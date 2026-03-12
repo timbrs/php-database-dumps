@@ -1,0 +1,145 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Database Dumps Configuration",
+  "description": "Конфигурация экспорта дампов БД (timbrs/database-dumps)",
+  "type": "object",
+  "definitions": {
+    "full_export": {
+      "description": "Полный экспорт таблиц (все строки). Ключ — имя схемы, значение — список таблиц.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "description": "Имя таблицы"
+        },
+        "description": "Список таблиц для полного экспорта"
+      }
+    },
+    "cascade_from_item": {
+      "type": "object",
+      "description": "FK-зависимость для каскадной фильтрации",
+      "properties": {
+        "parent": {
+          "type": "string",
+          "description": "Родительская таблица в формате schema.table. Пример: \"public.users\""
+        },
+        "fk_column": {
+          "type": "string",
+          "description": "Колонка внешнего ключа в текущей таблице. Пример: \"user_id\""
+        },
+        "parent_column": {
+          "type": "string",
+          "description": "Колонка первичного ключа в родительской таблице. Пример: \"id\""
+        }
+      },
+      "required": ["parent", "fk_column", "parent_column"],
+      "additionalProperties": false
+    },
+    "partial_export": {
+      "description": "Частичный экспорт таблиц (с ограничениями). Ключ — имя схемы.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "description": "Таблицы схемы с настройками экспорта",
+        "additionalProperties": {
+          "type": "object",
+          "description": "Настройки экспорта таблицы",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Максимальное количество строк для экспорта"
+            },
+            "order_by": {
+              "type": "string",
+              "pattern": "(ASC|DESC)$",
+              "description": "SQL ORDER BY (должен заканчиваться на ASC или DESC). Пример: \"created_at DESC\""
+            },
+            "where": {
+              "type": "string",
+              "description": "SQL WHERE условие. Пример: \"is_active = true\""
+            },
+            "cascade_from": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/cascade_from_item"
+              },
+              "description": "Каскадная фильтрация по FK-родителю. Генерирует WHERE-подзапросы для связности данных."
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "faker_pattern": {
+      "type": "string",
+      "enum": ["fio", "fio_short", "name", "email", "phone", "firstname", "lastname", "patronymic"],
+      "description": "Тип паттерна ПД: fio (Фамилия Имя Отчество), fio_short (Фамилия И.О.), name (Фамилия Имя), email, phone, firstname (имя), lastname (фамилия), patronymic (отчество)"
+    },
+    "faker": {
+      "description": "Замена персональных данных. Ключ — имя схемы.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "description": "Таблицы схемы с настройками замены ПД",
+        "additionalProperties": {
+          "type": "object",
+          "description": "Колонки таблицы и их паттерны",
+          "additionalProperties": {
+            "$ref": "#/definitions/faker_pattern"
+          }
+        }
+      }
+    },
+    "includes": {
+      "description": "Подключение внешних файлов конфигурации по схемам. Ключ — имя схемы, значение — путь к файлу.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "description": "Путь к YAML-файлу конфигурации схемы (относительно главного файла)"
+      }
+    },
+    "connection_config": {
+      "type": "object",
+      "description": "Конфигурация экспорта для подключения",
+      "properties": {
+        "full_export": {
+          "$ref": "#/definitions/full_export"
+        },
+        "partial_export": {
+          "$ref": "#/definitions/partial_export"
+        },
+        "faker": {
+          "$ref": "#/definitions/faker"
+        },
+        "includes": {
+          "$ref": "#/definitions/includes"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "properties": {
+    "full_export": {
+      "$ref": "#/definitions/full_export"
+    },
+    "partial_export": {
+      "$ref": "#/definitions/partial_export"
+    },
+    "faker": {
+      "$ref": "#/definitions/faker"
+    },
+    "includes": {
+      "$ref": "#/definitions/includes"
+    },
+    "connections": {
+      "description": "Дополнительные подключения к БД. Ключ — имя подключения из config/database.php (Laravel) или doctrine.yaml (Symfony).",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/connection_config"
+      }
+    }
+  },
+  "additionalProperties": false
+}

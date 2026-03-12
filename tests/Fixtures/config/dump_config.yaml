@@ -1,0 +1,18 @@
+# Тестовая конфигурация для тестов
+
+full_export:
+  users:
+    - users
+    - roles
+  system:
+    - settings
+
+partial_export:
+  clients:
+    clients:
+      limit: 100
+      order_by: created_at DESC
+      where: "is_active = true"
+    clients_attr:
+      limit: 500
+      order_by: client_id DESC

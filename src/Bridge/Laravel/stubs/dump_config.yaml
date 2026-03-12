@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=../vendor/timbrs/database-dumps/resources/dump_config.schema.json
+# Конфигурация экспорта дампов БД
+# Документация: https://github.com/timbrs/database-dumps
+
+# Полный экспорт таблиц (все строки)
+#full_export:
+#    public:
+#        - users
+#        - roles
+
+# Частичный экспорт таблиц (с ограничениями)
+#partial_export:
+#    public:
+#        orders:
+#            limit: 1000
+#            order_by: "id DESC"
+#        logs:
+#            limit: 500
+#            where: "created_at > NOW() - INTERVAL '30 days'"
+
+# Дополнительные подключения (ключи = имена из config/database.php)
+#connections:
+#    mysql:
+#        full_export:
+#            app_db:
+#                - events
+#                - metrics
+#        partial_export:
+#            app_db:
+#                logs:
+#                    limit: 1000
+#                    order_by: "created_at DESC"

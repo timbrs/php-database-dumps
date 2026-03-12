@@ -1,0 +1,2 @@
+#!/bin/sh
+php scripts/bump-version.php
