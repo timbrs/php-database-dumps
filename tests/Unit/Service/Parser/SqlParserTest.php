@@ -1,0 +1,80 @@
+<?php
+
+namespace Timbrs\DatabaseDumps\Tests\Unit\Service\Parser;
+
+use PHPUnit\Framework\TestCase;
+use Timbrs\DatabaseDumps\Service\Parser\SqlParser;
+use Timbrs\DatabaseDumps\Service\Parser\StatementSplitter;
+
+class SqlParserTest extends TestCase
+{
+    /** @var SqlParser */
+    private $parser;
+
+    protected function setUp(): void
+    {
+        $splitter = new StatementSplitter();
+        $this->parser = new SqlParser($splitter);
+    }
+
+    public function testParseFile(): void
+    {
+        $sql = "SELECT * FROM users; SELECT * FROM orders;";
+
+        $statements = $this->parser->parseFile($sql);
+
+        $this->assertCount(2, $statements);
+    }
+
+    public function testIsValidReturnsTrueForSelectStatement(): void
+    {
+        $this->assertTrue($this->parser->isValid("SELECT * FROM users"));
+    }
+
+    public function testIsValidReturnsTrueForInsertStatement(): void
+    {
+        $this->assertTrue($this->parser->isValid("INSERT INTO users VALUES (1)"));
+    }
+
+    public function testIsValidReturnsTrueForUpdateStatement(): void
+    {
+        $this->assertTrue($this->parser->isValid("UPDATE users SET name = 'test'"));
+    }
+
+    public function testIsValidReturnsTrueForDeleteStatement(): void
+    {
+        $this->assertTrue($this->parser->isValid("DELETE FROM users WHERE id = 1"));
+    }
+
+    public function testIsValidReturnsTrueForTruncateStatement(): void
+    {
+        $this->assertTrue($this->parser->isValid("TRUNCATE TABLE users"));
+    }
+
+    public function testIsValidReturnsTrueForSetStatement(): void
+    {
+        $this->assertTrue($this->parser->isValid("SET work_mem = '256MB'"));
+    }
+
+    public function testIsValidReturnsFalseForEmptyString(): void
+    {
+        $this->assertFalse($this->parser->isValid(""));
+    }
+
+    public function testIsValidReturnsFalseForWhitespace(): void
+    {
+        $this->assertFalse($this->parser->isValid("   "));
+    }
+
+    public function testIsValidReturnsFalseForRandomText(): void
+    {
+        $this->assertFalse($this->parser->isValid("random text"));
+    }
+
+    public function testIsValidIsCaseInsensitive(): void
+    {
+        $this->assertTrue($this->parser->isValid("select * from users"));
+        $this->assertTrue($this->parser->isValid("SELECT * FROM users"));
+        $this->assertTrue($this->parser->isValid("SeLeCt * FrOm users"));
+    }
+}

@@ -1,0 +1,73 @@
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+        public: false
+
+    # Adapters
+    Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface:
+        class: Timbrs\DatabaseDumps\Adapter\DoctrineDbalAdapter
+        arguments:
+            $connection: '@doctrine.dbal.default_connection'
+
+    Timbrs\DatabaseDumps\Contract\FileSystemInterface:
+        class: Timbrs\DatabaseDumps\Util\FileSystemHelper
+
+    Timbrs\DatabaseDumps\Contract\ConfigLoaderInterface:
+        class: Timbrs\DatabaseDumps\Util\YamlConfigLoader
+
+    # Platform (для обратной совместимости)
+    Timbrs\DatabaseDumps\Contract\DatabasePlatformInterface:
+        factory: ['Timbrs\DatabaseDumps\Platform\PlatformFactory', 'create']
+        arguments:
+            $platformName: '%database_dumps.platform%'
+
+    # Config
+    Timbrs\DatabaseDumps\Config\EnvironmentConfig:
+        factory: ['Timbrs\DatabaseDumps\Config\EnvironmentConfig', 'fromEnv']
+
+    Timbrs\DatabaseDumps\Config\DumpConfig:
+        factory: ['@Timbrs\DatabaseDumps\Contract\ConfigLoaderInterface', 'load']
+        arguments:
+            $path: '%kernel.project_dir%/config/dump_config.yaml'
+
+    # ConnectionRegistry
+    Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface:
+        class: Timbrs\DatabaseDumps\Service\ConnectionRegistry
+        factory: ['Timbrs\DatabaseDumps\Bridge\Symfony\ConnectionRegistryFactory', 'create']
+        arguments:
+            $defaultConnection: '@doctrine.dbal.default_connection'
+            $dumpConfig: '@Timbrs\DatabaseDumps\Config\DumpConfig'
+            $container: '@service_container'
+
+    # Services
+    Timbrs\DatabaseDumps\:
+        resource: '../../../Service/**/*'
+
+    # Faker interface binding
+    Timbrs\DatabaseDumps\Contract\FakerInterface:
+        class: Timbrs\DatabaseDumps\Service\Faker\RussianFaker
+
+    # ConfigGenerator needs explicit wiring due to scalar parameters
+    Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigGenerator:
+        arguments:
+            $cascadeEnabled: true
+            $fakerEnabled: true
+            $splitBySchema: true
+
+    Timbrs\DatabaseDumps\Service\Dumper\DatabaseDumper:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+
+    Timbrs\DatabaseDumps\Service\Importer\DatabaseImporter:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+
+    # Commands
+    Timbrs\DatabaseDumps\Bridge\Symfony\Command\:
+        resource: '../Command/*'
+        tags: ['console.command']
+
+    Timbrs\DatabaseDumps\Bridge\Symfony\Command\PrepareConfigCommand:
+        arguments:
+            $projectDir: '%kernel.project_dir%'

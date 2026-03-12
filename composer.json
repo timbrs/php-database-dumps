@@ -1,0 +1,85 @@
+{
+    "name": "timbrs/database-dumps",
+    "description": "Framework-agnostic PHP package for managing database dumps with SQL exports/imports, supporting PostgreSQL and MySQL",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "database",
+        "dump",
+        "export",
+        "import",
+        "sql",
+        "postgresql",
+        "mysql",
+        "symfony",
+        "laravel"
+    ],
+    "authors": [
+        {
+            "name": "Timur Bayan"
+        }
+    ],
+    "require": {
+        "php": "^7.2|^8.0",
+        "symfony/finder": "^4.4|^5.4|^6.0|^7.0",
+        "symfony/yaml": "^4.4|^5.4|^6.0|^7.0"
+    },
+    "require-dev": {
+        "doctrine/dbal": "^2.13|^3.0|^4.0",
+        "friendsofphp/php-cs-fixer": "^3.0",
+        "illuminate/console": "^7.0|^8.0|^9.0|^10.0|^11.0",
+        "illuminate/database": "^7.0|^8.0|^9.0|^10.0|^11.0",
+        "illuminate/support": "^7.0|^8.0|^9.0|^10.0|^11.0",
+        "phpstan/phpstan": "^1.10",
+        "phpunit/phpunit": "^8.5|^9.5|^10.0|^11.0",
+        "symfony/config": "^4.4|^5.4|^6.0|^7.0",
+        "symfony/console": "^4.4|^5.4|^6.0|^7.0",
+        "symfony/dependency-injection": "^4.4|^5.4|^6.0|^7.0",
+        "symfony/http-kernel": "^4.4|^5.4|^6.0|^7.0"
+    },
+    "suggest": {
+        "doctrine/dbal": "Required for DoctrineDbalAdapter",
+        "illuminate/console": "Required for Laravel artisan commands",
+        "illuminate/database": "Required for LaravelDatabaseAdapter",
+        "illuminate/support": "Required for Laravel bridge",
+        "symfony/config": "Required for Symfony bundle DI extension",
+        "symfony/console": "Required for Symfony bridge commands",
+        "symfony/dependency-injection": "Required for Symfony bundle DI extension",
+        "symfony/http-kernel": "Required for Symfony bundle registration"
+    },
+    "autoload": {
+        "psr-4": {
+            "Timbrs\\DatabaseDumps\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Timbrs\\DatabaseDumps\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "test-coverage": "phpunit --coverage-html coverage",
+        "phpstan": "phpstan analyse --memory-limit=512M",
+        "cs-fix": "php-cs-fixer fix",
+        "setup-hooks": "git config core.hooksPath .githooks",
+        "post-install-cmd": ["@setup-hooks"],
+        "post-update-cmd": ["@setup-hooks"]
+    },
+    "extra": {
+        "branch-alias": {
+            "dev-master": "1.1-dev"
+        },
+        "laravel": {
+            "providers": [
+                "Timbrs\\DatabaseDumps\\Bridge\\Laravel\\DatabaseDumpsServiceProvider"
+            ]
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "optimize-autoloader": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
