@@ -77,4 +77,43 @@ class SqlParserTest extends TestCase
         $this->assertTrue($this->parser->isValid("SELECT * FROM users"));
         $this->assertTrue($this->parser->isValid("SeLeCt * FrOm users"));
     }
+
+    public function testParseColumnListFromInsert(): void
+    {
+        $sql = 'INSERT INTO "public"."users" ("id", "name", "email") VALUES (1, \'Test\', \'test@test.com\');';
+        $columns = $this->parser->parseColumnList($sql);
+
+        $this->assertEquals(['id', 'name', 'email'], $columns);
+    }
+
+    public function testParseColumnListWithBackticks(): void
+    {
+        $sql = 'INSERT INTO `mydb`.`users` (`id`, `name`, `email`) VALUES (1, \'Test\', \'test@test.com\');';
+        $columns = $this->parser->parseColumnList($sql);
+
+        $this->assertEquals(['id', 'name', 'email'], $columns);
+    }
+
+    public function testParseColumnListWithHeaderComments(): void
+    {
+        $sql = "-- Дамп таблицы: public.users\n-- Дата: 2024-01-01\n\nTRUNCATE TABLE \"public\".\"users\" CASCADE;\n\nINSERT INTO \"public\".\"users\" (\"id\", \"name\") VALUES\n(1, 'Test');";
+        $columns = $this->parser->parseColumnList($sql);
+
+        $this->assertEquals(['id', 'name'], $columns);
+    }
+
+    public function testParseColumnListNoInsert(): void
+    {
+        $sql = "TRUNCATE TABLE users CASCADE;\n-- Таблица пуста";
+        $columns = $this->parser->parseColumnList($sql);
+
+        $this->assertNull($columns);
+    }
+
+    public function testParseColumnListEmptySql(): void
+    {
+        $columns = $this->parser->parseColumnList('');
+
+        $this->assertNull($columns);
+    }
 }

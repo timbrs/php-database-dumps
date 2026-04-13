@@ -8,7 +8,7 @@ use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
 
 class CascadeWhereResolver
 {
-    private const MAX_DEPTH = 10;
+    private const DEFAULT_MAX_DEPTH = 10;
 
     /** @var ConnectionRegistryInterface */
     private $registry;
@@ -16,9 +16,17 @@ class CascadeWhereResolver
     /** @var int Счётчик подзапросов для уникальных алиасов */
     private $subqueryCounter = 0;
 
-    public function __construct(ConnectionRegistryInterface $registry)
+    /** @var int */
+    private $maxDepth;
+
+    /**
+     * @param ConnectionRegistryInterface $registry
+     * @param int $maxDepth
+     */
+    public function __construct(ConnectionRegistryInterface $registry, $maxDepth = self::DEFAULT_MAX_DEPTH)
     {
         $this->registry = $registry;
+        $this->maxDepth = (int) $maxDepth;
     }
 
     /**
@@ -55,7 +63,7 @@ class CascadeWhereResolver
      */
     private function resolveEntry(array $entry, DumpConfig $dumpConfig, ?string $connectionName, int $depth): ?string
     {
-        if ($depth >= self::MAX_DEPTH) {
+        if ($depth >= $this->maxDepth) {
             return null;
         }
 

@@ -80,9 +80,55 @@ ORDER BY tc.TABLE_SCHEMA, tc.TABLE_NAME, tc.CONSTRAINT_NAME";
         /** @var array<int, array{constraint_name: string, source_schema: string, source_table: string, source_column: string, target_schema: string, target_table: string, target_column: string}> $results */
         $results = $connection->fetchAllAssociative($sql);
 
-        // Filter out self-referential FKs
-        return array_values(array_filter($results, function ($row) {
-            return !($row['source_table'] === $row['target_table'] && $row['source_schema'] === $row['target_schema']);
-        }));
+        return $results;
+    }
+
+    /**
+     * Получить информацию о nullable для FK-столбцов.
+     *
+     * @param array<int, array{source_schema: string, source_table: string, source_column: string}> $foreignKeys
+     * @return array<string, bool> key = "schema.table.column", value = is_nullable
+     */
+    public function getForeignKeyNullability(array $foreignKeys, ?string $connectionName = null): array
+    {
+        if (empty($foreignKeys)) {
+            return [];
+        }
+
+        $connection = $this->registry->getConnection($connectionName);
+        $platform = $connection->getPlatformName();
+
+        // Собрать уникальные столбцы для запроса
+        $columns = [];
+        foreach ($foreignKeys as $fk) {
+            $key = $fk['source_schema'] . '.' . $fk['source_table'] . '.' . $fk['source_column'];
+            if (!isset($columns[$key])) {
+                $columns[$key] = $fk;
+            }
+        }
+
+        $result = [];
+
+        if ($platform === PlatformFactory::ORACLE || $platform === PlatformFactory::OCI) {
+            foreach ($columns as $key => $fk) {
+                $sql = "SELECT nullable FROM all_tab_columns WHERE owner = UPPER('"
+                    . $fk['source_schema'] . "') AND table_name = UPPER('"
+                    . $fk['source_table'] . "') AND column_name = UPPER('"
+                    . $fk['source_column'] . "')";
+                $rows = $connection->fetchAllAssociative($sql);
+                $result[$key] = !empty($rows) && $rows[0]['nullable'] === 'Y';
+            }
+        } else {
+            foreach ($columns as $key => $fk) {
+                $sql = "SELECT is_nullable FROM information_schema.columns WHERE table_schema = '"
+                    . $fk['source_schema'] . "' AND table_name = '"
+                    . $fk['source_table'] . "' AND column_name = '"
+                    . $fk['source_column'] . "'";
+                $rows = $connection->fetchAllAssociative($sql);
+                $result[$key] = !empty($rows) && $rows[0]['is_nullable'] === 'YES';
+            }
+        }
+
+        return $result;
     }
 }

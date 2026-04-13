@@ -126,5 +126,44 @@ class DumpConfigTest extends TestCase
     {
         $this->assertEquals('includes', DumpConfig::KEY_INCLUDES);
         $this->assertEquals('faker', DumpConfig::KEY_FAKER);
+        $this->assertEquals('settings', DumpConfig::KEY_SETTINGS);
+    }
+
+    public function testSettingsDefaults(): void
+    {
+        $this->assertEquals(1000, $this->config->getBatchSize());
+        $this->assertEquals(200, $this->config->getSampleSize());
+        $this->assertEquals(10, $this->config->getMaxCascadeDepth());
+    }
+
+    public function testSettingsFromConstructor(): void
+    {
+        $config = new DumpConfig([], [], [], null, [
+            'batch_size' => 500,
+            'sample_size' => 100,
+            'max_cascade_depth' => 5,
+        ]);
+
+        $this->assertEquals(500, $config->getBatchSize());
+        $this->assertEquals(100, $config->getSampleSize());
+        $this->assertEquals(5, $config->getMaxCascadeDepth());
+    }
+
+    public function testSettingsPartialOverride(): void
+    {
+        $config = new DumpConfig([], [], [], null, [
+            'batch_size' => 2000,
+        ]);
+
+        $this->assertEquals(2000, $config->getBatchSize());
+        $this->assertEquals(200, $config->getSampleSize()); // default
+        $this->assertEquals(10, $config->getMaxCascadeDepth()); // default
+    }
+
+    public function testGetSettings(): void
+    {
+        $settings = ['batch_size' => 500, 'sample_size' => 100];
+        $config = new DumpConfig([], [], [], null, $settings);
+        $this->assertEquals($settings, $config->getSettings());
     }
 }

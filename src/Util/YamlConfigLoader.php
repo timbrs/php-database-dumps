@@ -66,11 +66,18 @@ class YamlConfigLoader implements ConfigLoaderInterface
             }
         }
 
+        // Parse settings
+        $settings = [];
+        if (isset($data[DumpConfig::KEY_SETTINGS]) && is_array($data[DumpConfig::KEY_SETTINGS])) {
+            $settings = $data[DumpConfig::KEY_SETTINGS];
+        }
+
         return new DumpConfig(
             $data[DumpConfig::KEY_FULL_EXPORT] ?? [],
             $data[DumpConfig::KEY_PARTIAL_EXPORT] ?? [],
             $connections,
-            $fakerConfig
+            $fakerConfig,
+            $settings
         );
     }
 

@@ -9,6 +9,7 @@ use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Exception\ExportFailedException;
 use Timbrs\DatabaseDumps\Service\Generator\SqlGenerator;
+use Timbrs\DatabaseDumps\Service\Graph\SortResult;
 use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
 
 /**
@@ -86,21 +87,51 @@ class DatabaseDumper
 
         $connectionName = $tables[0]->getConnectionName();
 
-        try {
-            $sortedKeys = $this->dependencyResolver->sortForExport($tableKeys, $connectionName);
-            $tableMap = [];
-            foreach ($tables as $t) {
-                $tableMap[$t->getFullTableName()] = $t;
-            }
-            $tables = [];
-            foreach ($sortedKeys as $key) {
-                if (isset($tableMap[$key])) {
-                    $tables[] = $tableMap[$key];
+        $sortResult = $this->dependencyResolver->sortForExportWithResult($tableKeys, $connectionName);
+        $sortedKeys = $sortResult->getSorted();
+
+        $tableMap = [];
+        foreach ($tables as $t) {
+            $tableMap[$t->getFullTableName()] = $t;
+        }
+
+        // Прокинуть deferred-информацию в TableConfig
+        if ($sortResult->hasDeferredEdges()) {
+            $this->logger->info('Обнаружены циклические FK-зависимости, разорваны рёбра: '
+                . count($sortResult->getDeferredEdges()));
+            foreach ($sortResult->getDeferredEdges() as $edge) {
+                $sourceKey = $edge['source'];
+                if (isset($tableMap[$sourceKey]) && $edge['source_column'] !== '') {
+                    $existing = $tableMap[$sourceKey];
+                    $currentDeferred = $existing->getDeferredColumns();
+                    if ($currentDeferred === null) {
+                        $currentDeferred = [];
+                    }
+                    $currentDeferred[] = [
+                        'column' => $edge['source_column'],
+                        'reference_table' => $edge['target'],
+                        'reference_column' => $edge['target_column'],
+                    ];
+                    // Пересоздаём TableConfig с deferred-информацией
+                    $tableMap[$sourceKey] = new TableConfig(
+                        $existing->getSchema(),
+                        $existing->getTable(),
+                        $existing->getLimit(),
+                        $existing->getWhere(),
+                        $existing->getOrderBy(),
+                        $existing->getConnectionName(),
+                        $existing->getCascadeFrom(),
+                        $currentDeferred
+                    );
                 }
             }
-        } catch (\RuntimeException $e) {
-            // Cycle detected - fall back to original order, log warning
-            $this->logger->warning('Цикл FK зависимостей, используется исходный порядок: ' . $e->getMessage());
+        }
+
+        $tables = [];
+        foreach ($sortedKeys as $key) {
+            if (isset($tableMap[$key])) {
+                $tables[] = $tableMap[$key];
+            }
         }
 
         $total = count($tables);

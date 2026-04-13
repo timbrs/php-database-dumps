@@ -127,4 +127,36 @@ class TableConfigTest extends TestCase
         $config = TableConfig::fromArray('public', 'users', []);
         $this->assertNull($config->getCascadeFrom());
     }
+
+    public function testDeferredColumnsDefaultIsNull(): void
+    {
+        $config = new TableConfig('public', 'categories');
+        $this->assertNull($config->getDeferredColumns());
+    }
+
+    public function testDeferredColumnsFromConstructor(): void
+    {
+        $deferred = [
+            ['column' => 'parent_id', 'reference_table' => 'public.categories', 'reference_column' => 'id'],
+        ];
+        $config = new TableConfig('public', 'categories', null, null, null, null, null, $deferred);
+        $this->assertEquals($deferred, $config->getDeferredColumns());
+    }
+
+    public function testFromArrayWithDeferredColumns(): void
+    {
+        $deferred = [
+            ['column' => 'parent_id', 'reference_table' => 'public.categories', 'reference_column' => 'id'],
+        ];
+        $config = TableConfig::fromArray('public', 'categories', [
+            TableConfig::KEY_DEFERRED_COLUMNS => $deferred,
+        ]);
+        $this->assertEquals($deferred, $config->getDeferredColumns());
+    }
+
+    public function testFromArrayWithoutDeferredColumns(): void
+    {
+        $config = TableConfig::fromArray('public', 'users', []);
+        $this->assertNull($config->getDeferredColumns());
+    }
 }

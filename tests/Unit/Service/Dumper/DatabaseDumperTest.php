@@ -12,6 +12,7 @@ use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\Dumper\DatabaseDumper;
 use Timbrs\DatabaseDumps\Service\Dumper\DataFetcher;
 use Timbrs\DatabaseDumps\Service\Generator\SqlGenerator;
+use Timbrs\DatabaseDumps\Service\Graph\SortResult;
 use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
 
 class DatabaseDumperTest extends TestCase
@@ -85,12 +86,12 @@ class DatabaseDumperTest extends TestCase
         // Dependency resolver returns sorted order: users, orders, order_items
         $this->dependencyResolver
             ->expects($this->once())
-            ->method('sortForExport')
+            ->method('sortForExportWithResult')
             ->with(
                 ['public.orders', 'public.order_items', 'public.users'],
                 null
             )
-            ->willReturn(['public.users', 'public.orders', 'public.order_items']);
+            ->willReturn(new SortResult(['public.users', 'public.orders', 'public.order_items']));
 
         $this->dataFetcher->method('fetch')->willReturn([]);
         $this->sqlGenerator->method('generateChunks')->willReturnCallback(function () {
@@ -184,31 +185,35 @@ class DatabaseDumperTest extends TestCase
         $dumper->exportTable($config);
     }
 
-    public function testExportAllHandlesCycleGracefully(): void
+    public function testExportAllHandlesCycleWithDeferredEdges(): void
     {
         $tableA = new TableConfig('public', 'users');
         $tableB = new TableConfig('public', 'orders');
 
         $tables = [$tableA, $tableB];
 
-        // Dependency resolver throws RuntimeException (cycle detected)
+        // Dependency resolver returns result with deferred edges (cycle broken)
         $this->dependencyResolver
             ->expects($this->once())
-            ->method('sortForExport')
-            ->willThrowException(new \RuntimeException('Circular dependency detected'));
-
-        // Logger should receive a warning about the cycle
-        $this->logger
-            ->expects($this->once())
-            ->method('warning')
-            ->with($this->stringContains('Цикл FK зависимостей'));
+            ->method('sortForExportWithResult')
+            ->willReturn(new SortResult(
+                ['public.users', 'public.orders'],
+                [
+                    [
+                        'source' => 'public.orders',
+                        'target' => 'public.users',
+                        'source_column' => 'user_id',
+                        'target_column' => 'id',
+                    ],
+                ]
+            ));
 
         $this->dataFetcher->method('fetch')->willReturn([]);
         $this->sqlGenerator->method('generateChunks')->willReturnCallback(function () {
             yield '-- SQL';
         });
 
-        // Track the order — should be original order
+        // Track the order
         $exportOrder = [];
         $this->logger->method('info')->willReturnCallback(function ($message) use (&$exportOrder) {
             if (preg_match('/\[\d+\/\d+\] ([\w.]+)/', $message, $matches)) {
@@ -219,13 +224,12 @@ class DatabaseDumperTest extends TestCase
         $dumper = $this->createDumper();
         $dumper->exportAll($tables);
 
-        // Original order preserved
         $this->assertEquals(['public.users', 'public.orders'], $exportOrder);
     }
 
     public function testExportAllWithEmptyTablesArray(): void
     {
-        $this->dependencyResolver->expects($this->never())->method('sortForExport');
+        $this->dependencyResolver->expects($this->never())->method('sortForExportWithResult');
         $this->dataFetcher->expects($this->never())->method('fetch');
 
         $dumper = $this->createDumper();

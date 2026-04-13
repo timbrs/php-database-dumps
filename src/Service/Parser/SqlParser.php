@@ -28,6 +28,34 @@ class SqlParser
     }
 
     /**
+     * Извлечь список столбцов из первого INSERT-выражения в SQL
+     *
+     * @param string $sqlContent
+     * @return array<string>|null Список столбцов или null, если INSERT не найден
+     */
+    public function parseColumnList(string $sqlContent): ?array
+    {
+        // Ищем первый INSERT INTO ... (columns) VALUES
+        if (preg_match('/INSERT\s+INTO\s+\S+\s*\(([^)]+)\)\s*VALUES/i', $sqlContent, $matches)) {
+            $columnsStr = $matches[1];
+            $columns = array_map(function ($col) {
+                // Убираем кавычки и пробелы
+                $col = trim($col);
+                $col = trim($col, '"');
+                $col = trim($col, '`');
+                $col = trim($col, '[]');
+                return $col;
+            }, explode(',', $columnsStr));
+
+            return array_values(array_filter($columns, function ($col) {
+                return $col !== '';
+            }));
+        }
+
+        return null;
+    }
+
+    /**
      * Проверить, является ли SQL валидным (базовая проверка)
      */
     public function isValid(string $sql): bool

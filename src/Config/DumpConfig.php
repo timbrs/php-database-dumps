@@ -12,7 +12,16 @@ class DumpConfig
     public const KEY_CONNECTIONS = 'connections';
     public const KEY_INCLUDES = 'includes';
     public const KEY_FAKER = 'faker';
+    public const KEY_SETTINGS = 'settings';
     public const DUMPS_DIR = 'database/dumps';
+
+    public const SETTING_BATCH_SIZE = 'batch_size';
+    public const SETTING_SAMPLE_SIZE = 'sample_size';
+    public const SETTING_MAX_CASCADE_DEPTH = 'max_cascade_depth';
+
+    public const DEFAULT_BATCH_SIZE = 1000;
+    public const DEFAULT_SAMPLE_SIZE = 200;
+    public const DEFAULT_MAX_CASCADE_DEPTH = 10;
 
     /**
      * @var array<string, array<string>> Полный экспорт по схемам
@@ -32,22 +41,28 @@ class DumpConfig
     /** @var FakerConfig|null */
     private $fakerConfig;
 
+    /** @var array<string, mixed> */
+    private $settings;
+
     /**
      * @param array<string, array<string>> $fullExport
      * @param array<string, array<string, array<string, mixed>>> $partialExport
      * @param array<string, DumpConfig> $connections
      * @param FakerConfig|null $fakerConfig
+     * @param array<string, mixed> $settings
      */
     public function __construct(
         array $fullExport,
         array $partialExport,
         array $connections = [],
-        ?FakerConfig $fakerConfig = null
+        ?FakerConfig $fakerConfig = null,
+        array $settings = []
     ) {
         $this->fullExport = $fullExport;
         $this->partialExport = $partialExport;
         $this->connections = $connections;
         $this->fakerConfig = $fakerConfig;
+        $this->settings = $settings;
     }
 
     /**
@@ -146,5 +161,45 @@ class DumpConfig
         }
 
         return $this->fakerConfig;
+    }
+
+    /**
+     * Получить все настройки
+     *
+     * @return array<string, mixed>
+     */
+    public function getSettings(): array
+    {
+        return $this->settings;
+    }
+
+    /**
+     * Получить размер батча для INSERT
+     */
+    public function getBatchSize(): int
+    {
+        return isset($this->settings[self::SETTING_BATCH_SIZE])
+            ? (int) $this->settings[self::SETTING_BATCH_SIZE]
+            : self::DEFAULT_BATCH_SIZE;
+    }
+
+    /**
+     * Получить размер выборки для PatternDetector
+     */
+    public function getSampleSize(): int
+    {
+        return isset($this->settings[self::SETTING_SAMPLE_SIZE])
+            ? (int) $this->settings[self::SETTING_SAMPLE_SIZE]
+            : self::DEFAULT_SAMPLE_SIZE;
+    }
+
+    /**
+     * Получить максимальную глубину каскадных подзапросов
+     */
+    public function getMaxCascadeDepth(): int
+    {
+        return isset($this->settings[self::SETTING_MAX_CASCADE_DEPTH])
+            ? (int) $this->settings[self::SETTING_MAX_CASCADE_DEPTH]
+            : self::DEFAULT_MAX_CASCADE_DEPTH;
     }
 }

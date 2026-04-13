@@ -10,14 +10,49 @@ use Timbrs\DatabaseDumps\Platform\PlatformFactory;
  */
 class InsertGenerator
 {
-    private const BATCH_SIZE = 1000;
+    private const DEFAULT_BATCH_SIZE = 1000;
 
     /** @var ConnectionRegistryInterface */
     private $registry;
 
-    public function __construct(ConnectionRegistryInterface $registry)
+    /** @var int<1, max> */
+    private $batchSize;
+
+    /**
+     * @param ConnectionRegistryInterface $registry
+     * @param int $batchSize
+     */
+    public function __construct(ConnectionRegistryInterface $registry, $batchSize = self::DEFAULT_BATCH_SIZE)
     {
         $this->registry = $registry;
+        $this->batchSize = max(1, (int) $batchSize);
+    }
+
+    /** @var array<int, array{column: string, reference_table: string, reference_column: string}>|null */
+    private $deferredColumns;
+
+    /** @var array<int, array{pk_column: string, pk_value: mixed, column: string, value: mixed}> */
+    private $collectedDeferredValues = [];
+
+    /**
+     * Установить deferred-столбцы (будут заменены на NULL в INSERT)
+     *
+     * @param array<int, array{column: string, reference_table: string, reference_column: string}>|null $deferredColumns
+     */
+    public function setDeferredColumns(?array $deferredColumns): void
+    {
+        $this->deferredColumns = $deferredColumns;
+        $this->collectedDeferredValues = [];
+    }
+
+    /**
+     * Получить собранные deferred-значения (после generate/generateChunks)
+     *
+     * @return array<int, array{pk_column: string, pk_value: mixed, column: string, value: mixed}>
+     */
+    public function getCollectedDeferredValues(): array
+    {
+        return $this->collectedDeferredValues;
     }
 
     /**
@@ -46,7 +81,7 @@ class InsertGenerator
             return $this->generateOracleInserts($fullTable, $rows, $platform, $connection);
         }
 
-        $batches = array_chunk($rows, self::BATCH_SIZE);
+        $batches = array_chunk($rows, $this->batchSize);
         $sql = '';
         $batchNum = 1;
 
@@ -84,14 +119,14 @@ class InsertGenerator
         $isOracle = $platformName === PlatformFactory::ORACLE || $platformName === PlatformFactory::OCI;
 
         if ($isOracle) {
-            foreach (array_chunk($rows, self::BATCH_SIZE) as $chunk) {
+            foreach (array_chunk($rows, $this->batchSize) as $chunk) {
                 yield $this->generateOracleInserts($fullTable, $chunk, $platform, $connection);
             }
             return;
         }
 
         $batchNum = 1;
-        foreach (array_chunk($rows, self::BATCH_SIZE) as $batch) {
+        foreach (array_chunk($rows, $this->batchSize) as $batch) {
             $sql = "-- Batch {$batchNum} (" . count($batch) . " rows)\n";
             $sql .= $this->generateBatchInsert($fullTable, $batch, $platform, $connection);
             $sql .= "\n";
@@ -116,6 +151,7 @@ class InsertGenerator
         }
 
         $columns = array_keys($rows[0]);
+        $deferredColumnNames = $this->getDeferredColumnNames();
         $columnsList = implode(', ', array_map(function ($col) use ($platform) {
             return $platform->quoteIdentifier($col);
         }, $columns));
@@ -125,8 +161,12 @@ class InsertGenerator
         $values = [];
         foreach ($rows as $row) {
             $escapedValues = [];
-            foreach ($row as $value) {
-                if ($value === null) {
+            foreach ($row as $col => $value) {
+                if (isset($deferredColumnNames[$col])) {
+                    // Deferred-столбец: вставляем NULL, сохраняем оригинальное значение
+                    $this->collectDeferredValue($row, $col, $value);
+                    $escapedValues[] = 'NULL';
+                } elseif ($value === null) {
                     $escapedValues[] = 'NULL';
                 } elseif (is_bool($value)) {
                     $escapedValues[] = $value ? 'TRUE' : 'FALSE';
@@ -154,6 +194,7 @@ class InsertGenerator
     private function generateOracleInserts(string $fullTable, array $rows, $platform, $connection): string
     {
         $columns = array_keys($rows[0]);
+        $deferredColumnNames = $this->getDeferredColumnNames();
         $columnsList = implode(', ', array_map(function ($col) use ($platform) {
             return $platform->quoteIdentifier($col);
         }, $columns));
@@ -162,8 +203,11 @@ class InsertGenerator
 
         foreach ($rows as $row) {
             $escapedValues = [];
-            foreach ($row as $value) {
-                if ($value === null) {
+            foreach ($row as $col => $value) {
+                if (isset($deferredColumnNames[$col])) {
+                    $this->collectDeferredValue($row, $col, $value);
+                    $escapedValues[] = 'NULL';
+                } elseif ($value === null) {
                     $escapedValues[] = 'NULL';
                 } elseif (is_bool($value)) {
                     $escapedValues[] = $value ? 'TRUE' : 'FALSE';
@@ -175,5 +219,47 @@ class InsertGenerator
         }
 
         return $sql;
+    }
+
+    /**
+     * Получить map имён deferred-столбцов
+     *
+     * @return array<string, true>
+     */
+    private function getDeferredColumnNames(): array
+    {
+        if ($this->deferredColumns === null) {
+            return [];
+        }
+        $names = [];
+        foreach ($this->deferredColumns as $dc) {
+            $names[$dc['column']] = true;
+        }
+        return $names;
+    }
+
+    /**
+     * Сохранить оригинальное значение deferred-столбца для последующего UPDATE
+     *
+     * @param array<string, mixed> $row
+     * @param string $col
+     * @param mixed $value
+     */
+    private function collectDeferredValue(array $row, string $col, $value): void
+    {
+        if ($value === null) {
+            return; // Уже NULL — UPDATE не нужен
+        }
+
+        // Определяем PK-столбец: берём первый столбец строки (convention: id)
+        $columns = array_keys($row);
+        $pkColumn = $columns[0];
+
+        $this->collectedDeferredValues[] = [
+            'pk_column' => $pkColumn,
+            'pk_value' => $row[$pkColumn],
+            'column' => $col,
+            'value' => $value,
+        ];
     }
 }

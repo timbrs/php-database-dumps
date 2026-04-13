@@ -42,6 +42,12 @@ class DatabaseImporter
     /** @var TableDependencyResolver */
     private $dependencyResolver;
 
+    /** @var SchemaValidator|null */
+    private $schemaValidator;
+
+    /** @var bool */
+    private $ignoreSchemaMismatch = false;
+
     public function __construct(
         ConnectionRegistryInterface $registry,
         DumpConfig $dumpConfig,
@@ -52,7 +58,8 @@ class DatabaseImporter
         SqlParser $parser,
         LoggerInterface $logger,
         string $projectDir,
-        TableDependencyResolver $dependencyResolver
+        TableDependencyResolver $dependencyResolver,
+        SchemaValidator $schemaValidator = null
     ) {
         $this->registry = $registry;
         $this->dumpConfig = $dumpConfig;
@@ -64,6 +71,15 @@ class DatabaseImporter
         $this->logger = $logger;
         $this->projectDir = $projectDir;
         $this->dependencyResolver = $dependencyResolver;
+        $this->schemaValidator = $schemaValidator;
+    }
+
+    /**
+     * Установить флаг игнорирования расхождений схемы
+     */
+    public function setIgnoreSchemaMismatch(bool $ignore): void
+    {
+        $this->ignoreSchemaMismatch = $ignore;
     }
 
     /**
@@ -203,7 +219,7 @@ class DatabaseImporter
     /**
      * Отсортировать файлы по FK зависимостям (родители первыми).
      *
-     * При циклических зависимостях — фолбэк на исходный порядок.
+     * Циклические зависимости разрываются автоматически через sortWithCycleBreaking.
      *
      * @param string[] $files
      * @return string[]
@@ -223,12 +239,7 @@ class DatabaseImporter
             $tableKeys[] = $key;
         }
 
-        try {
-            $sortedKeys = $this->dependencyResolver->sortForImport($tableKeys, $connectionName);
-        } catch (\RuntimeException $e) {
-            $this->logger->warning('Циклическая зависимость при сортировке импорта: ' . $e->getMessage() . '. Используется алфавитный порядок.');
-            return $files;
-        }
+        $sortedKeys = $this->dependencyResolver->sortForImport($tableKeys, $connectionName);
 
         // Переупорядочить файлы по отсортированным ключам
         $sortedFiles = [];
@@ -298,6 +309,27 @@ class DatabaseImporter
 
         try {
             $sql = $this->fileSystem->read($filePath);
+
+            // Валидация схемы перед импортом
+            if ($this->schemaValidator !== null) {
+                $dumpColumns = $this->parser->parseColumnList($sql);
+                if ($dumpColumns !== null) {
+                    $connectionName = null; // текущее подключение уже выбрано
+                    $validation = $this->schemaValidator->validate($schema, $tableName, $dumpColumns, $connectionName);
+                    if (!$validation->isValid()) {
+                        $this->logger->warning(
+                            "[{$current}/{$total}] {$fullName} — расхождение схемы: " . $validation->getDescription()
+                        );
+                        if (!$this->ignoreSchemaMismatch) {
+                            $this->logger->warning(
+                                "[{$current}/{$total}] {$fullName} — пропущен. Используйте --ignore-schema-mismatch для импорта"
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+
             $statements = $this->parser->parseFile($sql, $backslashEscapes);
 
             foreach ($statements as $statement) {

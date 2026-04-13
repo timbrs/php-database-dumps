@@ -73,9 +73,17 @@ class PatternDetector
     /** @var ConnectionRegistryInterface */
     private $registry;
 
-    public function __construct(ConnectionRegistryInterface $registry)
+    /** @var int */
+    private $sampleSize;
+
+    /**
+     * @param ConnectionRegistryInterface $registry
+     * @param int $sampleSize
+     */
+    public function __construct(ConnectionRegistryInterface $registry, $sampleSize = self::SAMPLE_SIZE)
     {
         $this->registry = $registry;
+        $this->sampleSize = (int) $sampleSize;
     }
 
     /**
@@ -92,9 +100,9 @@ class PatternDetector
         $randomFunc = $platform->getRandomFunctionSql();
         $platformName = $connection->getPlatformName();
         if ($platformName === PlatformFactory::ORACLE || $platformName === PlatformFactory::OCI) {
-            $sql = "SELECT * FROM {$fullTable} ORDER BY {$randomFunc} FETCH FIRST " . self::SAMPLE_SIZE . " ROWS ONLY";
+            $sql = "SELECT * FROM {$fullTable} ORDER BY {$randomFunc} FETCH FIRST " . $this->sampleSize . " ROWS ONLY";
         } else {
-            $sql = "SELECT * FROM {$fullTable} ORDER BY {$randomFunc} LIMIT " . self::SAMPLE_SIZE;
+            $sql = "SELECT * FROM {$fullTable} ORDER BY {$randomFunc} LIMIT " . $this->sampleSize;
         }
 
         $rows = $connection->fetchAllAssociative($sql);

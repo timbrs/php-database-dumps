@@ -37,6 +37,7 @@ class DumpExportCommand extends Command
             ->addOption('connection', 'c', InputOption::VALUE_REQUIRED, 'Имя подключения (или "all" для всех)')
             ->addOption('no-cascade', null, InputOption::VALUE_NONE, 'Пропустить каскадную фильтрацию WHERE')
             ->addOption('no-faker', null, InputOption::VALUE_NONE, 'Пропустить замену персональных данных')
+            ->addOption('dry-run', null, InputOption::VALUE_NONE, 'Показать план экспорта без реального выполнения')
             ->setHelp(<<<'HELP'
 Примеры:
   php bin/console app:dbdump:export public.users              Экспорт таблицы users из схемы public
@@ -87,11 +88,8 @@ HELP
 
     private function exportAll(InputInterface $input, SymfonyStyle $io): int
     {
-        $io->title('Экспорт всех таблиц согласно конфигурации');
-
         $schemaFilter = $input->getOption('schema');
         $connectionFilter = $input->getOption('connection');
-        $startTime = microtime(true);
 
         try {
             $tables = $this->configResolver->resolveAll($schemaFilter, $connectionFilter);
@@ -100,6 +98,13 @@ HELP
                 $io->warning('Нет таблиц для экспорта в конфигурации');
                 return Command::FAILURE;
             }
+
+            if ($input->getOption('dry-run')) {
+                return $this->dryRun($tables, $io);
+            }
+
+            $io->title('Экспорт всех таблиц согласно конфигурации');
+            $startTime = microtime(true);
 
             $io->section('Полный экспорт таблиц');
             $this->dumper->exportAll($tables);
@@ -118,6 +123,33 @@ HELP
 
             return Command::FAILURE;
         }
+    }
+
+    /**
+     * @param array<\Timbrs\DatabaseDumps\Config\TableConfig> $tables
+     */
+    private function dryRun(array $tables, SymfonyStyle $io): int
+    {
+        $io->title('Dry-run: план экспорта');
+
+        $rows = [];
+        foreach ($tables as $config) {
+            $mode = $config->isFullExport() ? 'full' : 'partial (limit ' . $config->getLimit() . ')';
+            $where = $config->getWhere() ?? '-';
+            $cascade = $config->getCascadeFrom() !== null ? count($config->getCascadeFrom()) . ' связей' : '-';
+
+            $rows[] = [
+                $config->getFullTableName(),
+                $mode,
+                $where,
+                $cascade,
+            ];
+        }
+
+        $io->table(['Таблица', 'Режим', 'WHERE', 'Cascade'], $rows);
+        $io->note('Всего таблиц: ' . count($tables));
+
+        return Command::SUCCESS;
     }
 
     private function exportTable(InputInterface $input, string $fullTableName, SymfonyStyle $io): int

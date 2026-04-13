@@ -96,7 +96,7 @@ class ForeignKeyInspectorTest extends TestCase
         $this->assertEquals('mydb', $result[0]['source_schema']);
     }
 
-    public function testFiltersSelfReferentialFks(): void
+    public function testIncludesSelfReferentialFks(): void
     {
         $this->connection->method('getPlatformName')->willReturn('postgresql');
 
@@ -126,8 +126,63 @@ class ForeignKeyInspectorTest extends TestCase
         $inspector = new ForeignKeyInspector($this->registry);
         $result = $inspector->getForeignKeys();
 
-        $this->assertCount(1, $result);
+        // Self-referential FK больше не фильтруются
+        $this->assertCount(2, $result);
         $this->assertEquals('fk_orders_user_id', $result[0]['constraint_name']);
+        $this->assertEquals('fk_categories_parent', $result[1]['constraint_name']);
+    }
+
+    public function testGetForeignKeyNullability(): void
+    {
+        $this->connection->method('getPlatformName')->willReturn('postgresql');
+
+        $fks = [
+            [
+                'source_schema' => 'public',
+                'source_table' => 'orders',
+                'source_column' => 'user_id',
+            ],
+        ];
+
+        $this->connection->method('fetchAllAssociative')->willReturn([
+            ['is_nullable' => 'YES'],
+        ]);
+
+        $inspector = new ForeignKeyInspector($this->registry);
+        $result = $inspector->getForeignKeyNullability($fks);
+
+        $this->assertArrayHasKey('public.orders.user_id', $result);
+        $this->assertTrue($result['public.orders.user_id']);
+    }
+
+    public function testGetForeignKeyNullabilityNotNullable(): void
+    {
+        $this->connection->method('getPlatformName')->willReturn('postgresql');
+
+        $fks = [
+            [
+                'source_schema' => 'public',
+                'source_table' => 'orders',
+                'source_column' => 'user_id',
+            ],
+        ];
+
+        $this->connection->method('fetchAllAssociative')->willReturn([
+            ['is_nullable' => 'NO'],
+        ]);
+
+        $inspector = new ForeignKeyInspector($this->registry);
+        $result = $inspector->getForeignKeyNullability($fks);
+
+        $this->assertFalse($result['public.orders.user_id']);
+    }
+
+    public function testGetForeignKeyNullabilityEmpty(): void
+    {
+        $inspector = new ForeignKeyInspector($this->registry);
+        $result = $inspector->getForeignKeyNullability([]);
+
+        $this->assertEmpty($result);
     }
 
     public function testEmptyResult(): void

@@ -26,11 +26,11 @@ class TableDependencyResolver
      *
      * @param array<string> $tableKeys "schema.table" keys
      * @return array<string> sorted
-     * @throws \RuntimeException on circular dependency
      */
     public function sortForExport(array $tableKeys, ?string $connectionName = null): array
     {
-        return $this->sortTables($tableKeys, $connectionName);
+        $result = $this->sortTablesWithCycleBreaking($tableKeys, $connectionName);
+        return $result->getSorted();
     }
 
     /**
@@ -41,7 +41,19 @@ class TableDependencyResolver
      */
     public function sortForImport(array $tableKeys, ?string $connectionName = null): array
     {
-        return $this->sortTables($tableKeys, $connectionName);
+        $result = $this->sortTablesWithCycleBreaking($tableKeys, $connectionName);
+        return $result->getSorted();
+    }
+
+    /**
+     * Sort table keys with cycle breaking, returning full SortResult.
+     *
+     * @param array<string> $tableKeys "schema.table" keys
+     * @return SortResult
+     */
+    public function sortForExportWithResult(array $tableKeys, ?string $connectionName = null): SortResult
+    {
+        return $this->sortTablesWithCycleBreaking($tableKeys, $connectionName);
     }
 
     /**
@@ -105,15 +117,17 @@ class TableDependencyResolver
 
     /**
      * @param array<string> $tableKeys
-     * @return array<string>
+     * @return SortResult
      */
-    private function sortTables(array $tableKeys, ?string $connectionName): array
+    private function sortTablesWithCycleBreaking(array $tableKeys, ?string $connectionName): SortResult
     {
         $graph = $this->getDependencyGraph($connectionName);
+        $fks = $this->fkInspector->getForeignKeys($connectionName);
 
         // Build adjacency: only include edges where BOTH nodes are in $tableKeys
         $tableKeySet = array_flip($tableKeys);
         $adjacency = [];
+        $edgeDetails = [];
 
         // Init all nodes
         foreach ($tableKeys as $key) {
@@ -126,11 +140,36 @@ class TableDependencyResolver
                 foreach ($graph[$childKey] as $parentKey => $columns) {
                     if (isset($tableKeySet[$parentKey])) {
                         $adjacency[$childKey][] = $parentKey;
+                        if (!isset($edgeDetails[$childKey])) {
+                            $edgeDetails[$childKey] = [];
+                        }
+                        $edgeDetails[$childKey][$parentKey] = $columns;
                     }
                 }
             }
         }
 
-        return $this->sorter->sort($adjacency);
+        // Build nullable edges map
+        $nullability = $this->fkInspector->getForeignKeyNullability($fks, $connectionName);
+        $nullableEdges = [];
+        foreach ($tableKeys as $childKey) {
+            if (isset($graph[$childKey])) {
+                foreach ($graph[$childKey] as $parentKey => $columns) {
+                    if (isset($tableKeySet[$parentKey])) {
+                        // Ищем FK в списке: schema.table.column
+                        $parts = explode('.', $childKey, 2);
+                        if (count($parts) === 2) {
+                            $nullKey = $parts[0] . '.' . $parts[1] . '.' . $columns['source_column'];
+                            $edgeKey = $childKey . '->' . $parentKey;
+                            if (isset($nullability[$nullKey])) {
+                                $nullableEdges[$edgeKey] = $nullability[$nullKey];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return $this->sorter->sortWithCycleBreaking($adjacency, $nullableEdges, $edgeDetails);
     }
 }

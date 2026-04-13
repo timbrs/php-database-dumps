@@ -11,7 +11,7 @@ use Illuminate\Console\Command;
 class DumpExportCommand extends Command
 {
     /** @var string */
-    protected $signature = 'dbdump:export {table? : Имя таблицы (schema.table) или "all"} {--schema= : Фильтр по схеме для "all"} {--connection= : Имя подключения (или "all" для всех)} {--no-cascade : Пропустить каскадную фильтрацию WHERE} {--no-faker : Пропустить замену персональных данных}';
+    protected $signature = 'dbdump:export {table? : Имя таблицы (schema.table) или "all"} {--schema= : Фильтр по схеме для "all"} {--connection= : Имя подключения (или "all" для всех)} {--no-cascade : Пропустить каскадную фильтрацию WHERE} {--no-faker : Пропустить замену персональных данных} {--dry-run : Показать план экспорта без реального выполнения}';
 
     /** @var string */
     protected $description = 'Экспорт SQL дампа таблицы из БД';
@@ -83,13 +83,10 @@ HELP;
 
     private function exportAll(): int
     {
-        $this->info('Экспорт всех таблиц согласно конфигурации');
-
         /** @var string|null $schemaFilter */
         $schemaFilter = $this->option('schema');
         /** @var string|null $connectionFilter */
         $connectionFilter = $this->option('connection');
-        $startTime = microtime(true);
 
         try {
             $tables = $this->configResolver->resolveAll($schemaFilter, $connectionFilter);
@@ -98,6 +95,13 @@ HELP;
                 $this->warn('Нет таблиц для экспорта в конфигурации');
                 return self::FAILURE;
             }
+
+            if ($this->option('dry-run')) {
+                return $this->dryRun($tables);
+            }
+
+            $this->info('Экспорт всех таблиц согласно конфигурации');
+            $startTime = microtime(true);
 
             $this->dumper->exportAll($tables);
 
@@ -115,6 +119,35 @@ HELP;
 
             return self::FAILURE;
         }
+    }
+
+    /**
+     * @param array<\Timbrs\DatabaseDumps\Config\TableConfig> $tables
+     */
+    private function dryRun(array $tables): int
+    {
+        $this->info('Dry-run: план экспорта');
+        $this->line('');
+
+        $headers = ['Таблица', 'Режим', 'WHERE', 'Cascade'];
+        $rows = [];
+        foreach ($tables as $config) {
+            $mode = $config->isFullExport() ? 'full' : 'partial (limit ' . $config->getLimit() . ')';
+            $where = $config->getWhere() ?? '-';
+            $cascade = $config->getCascadeFrom() !== null ? count($config->getCascadeFrom()) . ' связей' : '-';
+
+            $rows[] = [
+                $config->getFullTableName(),
+                $mode,
+                $where,
+                $cascade,
+            ];
+        }
+
+        $this->table($headers, $rows);
+        $this->info('Всего таблиц: ' . count($tables));
+
+        return self::SUCCESS;
     }
 
     private function exportTable(string $fullTableName): int

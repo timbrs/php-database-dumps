@@ -26,6 +26,7 @@ use Timbrs\DatabaseDumps\Service\Dumper\DatabaseDumper;
 use Timbrs\DatabaseDumps\Service\Dumper\CascadeWhereResolver;
 use Timbrs\DatabaseDumps\Service\Dumper\DataFetcher;
 use Timbrs\DatabaseDumps\Service\Dumper\TableConfigResolver;
+use Timbrs\DatabaseDumps\Service\Generator\DeferredUpdateGenerator;
 use Timbrs\DatabaseDumps\Service\Generator\InsertGenerator;
 use Timbrs\DatabaseDumps\Service\Generator\SequenceGenerator;
 use Timbrs\DatabaseDumps\Service\Generator\SqlGenerator;
@@ -35,6 +36,7 @@ use Timbrs\DatabaseDumps\Service\Generator\TruncateGenerator;
 use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
 use Timbrs\DatabaseDumps\Service\Graph\TopologicalSorter;
 use Timbrs\DatabaseDumps\Service\Importer\DatabaseImporter;
+use Timbrs\DatabaseDumps\Service\Importer\SchemaValidator;
 use Timbrs\DatabaseDumps\Service\Importer\ScriptExecutor;
 use Timbrs\DatabaseDumps\Service\Importer\TransactionManager;
 use Timbrs\DatabaseDumps\Service\Parser\SqlParser;
@@ -116,9 +118,24 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
         $this->app->singleton(TableConfigResolver::class);
 
         $this->app->singleton(TruncateGenerator::class);
-        $this->app->singleton(InsertGenerator::class);
+        $this->app->singleton(InsertGenerator::class, function ($app) {
+            /** @var DumpConfig $dumpConfig */
+            $dumpConfig = $app->make(DumpConfig::class);
+            return new InsertGenerator(
+                $app->make(ConnectionRegistryInterface::class),
+                $dumpConfig->getBatchSize()
+            );
+        });
         $this->app->singleton(SequenceGenerator::class);
-        $this->app->singleton(SqlGenerator::class);
+        $this->app->singleton(SqlGenerator::class, function ($app) {
+            return new SqlGenerator(
+                $app->make(TruncateGenerator::class),
+                $app->make(InsertGenerator::class),
+                $app->make(SequenceGenerator::class),
+                $app->make(DeferredUpdateGenerator::class)
+            );
+        });
+        $this->app->singleton(DeferredUpdateGenerator::class);
 
         $this->app->singleton(DataFetcher::class, function ($app) {
             return new DataFetcher(
@@ -133,8 +150,23 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
         $this->app->singleton(ForeignKeyInspector::class);
         $this->app->singleton(TopologicalSorter::class);
         $this->app->singleton(TableDependencyResolver::class);
-        $this->app->singleton(CascadeWhereResolver::class);
-        $this->app->singleton(PatternDetector::class);
+        $this->app->singleton(CascadeWhereResolver::class, function ($app) {
+            /** @var DumpConfig $dumpConfig */
+            $dumpConfig = $app->make(DumpConfig::class);
+            return new CascadeWhereResolver(
+                $app->make(ConnectionRegistryInterface::class),
+                $dumpConfig->getMaxCascadeDepth()
+            );
+        });
+        $this->app->singleton(PatternDetector::class, function ($app) {
+            /** @var DumpConfig $dumpConfig */
+            $dumpConfig = $app->make(DumpConfig::class);
+            return new PatternDetector(
+                $app->make(ConnectionRegistryInterface::class),
+                $dumpConfig->getSampleSize()
+            );
+        });
+        $this->app->singleton(SchemaValidator::class);
         $this->app->singleton(FakerInterface::class, RussianFaker::class);
         $this->app->singleton(ConfigSplitter::class);
 
@@ -183,7 +215,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(SqlParser::class),
                 $app->make(LoggerInterface::class),
                 $app['config']->get('database-dumps.project_dir'),
-                $app->make(TableDependencyResolver::class)
+                $app->make(TableDependencyResolver::class),
+                $app->make(SchemaValidator::class)
             );
         });
     }

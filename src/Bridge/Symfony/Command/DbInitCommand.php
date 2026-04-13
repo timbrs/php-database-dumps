@@ -30,6 +30,7 @@ class DbInitCommand extends Command
             ->addOption('schema', 's', InputOption::VALUE_REQUIRED, 'Импорт только указанной схемы')
             ->addOption('connection', 'c', InputOption::VALUE_REQUIRED, 'Имя подключения (или "all" для всех)')
             ->addOption('no-cascade', null, InputOption::VALUE_NONE, 'Пропустить топологическую сортировку импорта')
+            ->addOption('ignore-schema-mismatch', null, InputOption::VALUE_NONE, 'Импортировать даже при расхождении схемы дампа и БД')
             ->setHelp(<<<'HELP'
 Примеры:
   php bin/console app:dbdump:import                          Импорт всех дампов
@@ -54,6 +55,10 @@ HELP
         $startTime = microtime(true);
 
         try {
+            if ($input->getOption('ignore-schema-mismatch')) {
+                $this->importer->setIgnoreSchemaMismatch(true);
+            }
+
             $this->importer->import(
                 $input->getOption('skip-before'),
                 $input->getOption('skip-after'),

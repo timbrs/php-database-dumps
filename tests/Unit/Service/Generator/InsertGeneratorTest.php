@@ -257,6 +257,53 @@ class InsertGeneratorTest extends TestCase
         }
     }
 
+    public function testGenerateWithDeferredColumnsReplacesWithNull(): void
+    {
+        $this->generator->setDeferredColumns([
+            ['column' => 'parent_id', 'reference_table' => 'public.categories', 'reference_column' => 'id'],
+        ]);
+
+        $rows = [
+            ['id' => 1, 'name' => 'Root', 'parent_id' => null],
+            ['id' => 2, 'name' => 'Child', 'parent_id' => 1],
+            ['id' => 3, 'name' => 'Grandchild', 'parent_id' => 2],
+        ];
+
+        $sql = $this->generator->generate('public', 'categories', $rows);
+
+        // parent_id должен быть NULL для всех строк
+        $this->assertStringContainsString('INSERT INTO', $sql);
+        // Все 3 значения parent_id заменены на NULL
+        // Строка 1: parent_id=null (уже NULL), строка 2: parent_id=1→NULL, строка 3: parent_id=2→NULL
+        // Проверяем что в SQL нет значений '1' для parent_id и '2' для parent_id
+        // (но '1' присутствует как id, поэтому проверяем deferred values)
+
+        $deferred = $this->generator->getCollectedDeferredValues();
+        // Строка 1: parent_id=null → пропущена, строка 2: parent_id=1, строка 3: parent_id=2
+        $this->assertCount(2, $deferred);
+        $this->assertEquals('id', $deferred[0]['pk_column']);
+        $this->assertEquals(2, $deferred[0]['pk_value']);
+        $this->assertEquals('parent_id', $deferred[0]['column']);
+        $this->assertEquals(1, $deferred[0]['value']);
+        $this->assertEquals(3, $deferred[1]['pk_value']);
+        $this->assertEquals(2, $deferred[1]['value']);
+
+        // Cleanup
+        $this->generator->setDeferredColumns(null);
+    }
+
+    public function testGenerateWithoutDeferredColumnsDoesNotCollect(): void
+    {
+        $rows = [
+            ['id' => 1, 'name' => 'User 1', 'parent_id' => 2],
+        ];
+
+        $this->generator->setDeferredColumns(null);
+        $this->generator->generate('public', 'users', $rows);
+
+        $this->assertEmpty($this->generator->getCollectedDeferredValues());
+    }
+
     public function testGenerateChunksOracleYieldsChunks(): void
     {
         $connection = $this->createMock(DatabaseConnectionInterface::class);

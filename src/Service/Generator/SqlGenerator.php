@@ -15,15 +15,19 @@ class SqlGenerator
     private $insertGenerator;
     /** @var SequenceGenerator */
     private $sequenceGenerator;
+    /** @var DeferredUpdateGenerator|null */
+    private $deferredUpdateGenerator;
 
     public function __construct(
         TruncateGenerator $truncateGenerator,
         InsertGenerator $insertGenerator,
-        SequenceGenerator $sequenceGenerator
+        SequenceGenerator $sequenceGenerator,
+        DeferredUpdateGenerator $deferredUpdateGenerator = null
     ) {
         $this->truncateGenerator = $truncateGenerator;
         $this->insertGenerator = $insertGenerator;
         $this->sequenceGenerator = $sequenceGenerator;
+        $this->deferredUpdateGenerator = $deferredUpdateGenerator;
     }
 
     /**
@@ -39,6 +43,7 @@ class SqlGenerator
         $schema = $config->getSchema();
         $table = $config->getTable();
         $connectionName = $config->getConnectionName();
+        $deferredColumns = $config->getDeferredColumns();
 
         $sql = $this->buildHeader($config, count($rows), $fetchQuery);
 
@@ -46,11 +51,22 @@ class SqlGenerator
         $sql .= $this->truncateGenerator->generate($schema, $table, $connectionName);
         $sql .= "\n";
 
-        // INSERT
+        // INSERT (с NULL для deferred-столбцов)
+        $this->insertGenerator->setDeferredColumns($deferredColumns);
         $sql .= $this->insertGenerator->generate($schema, $table, $rows, $connectionName);
 
         // Sequence reset
         $sql .= $this->sequenceGenerator->generate($schema, $table, $connectionName);
+
+        // Deferred UPDATE (восстановление FK-столбцов после разрыва цикла)
+        if ($deferredColumns !== null && $this->deferredUpdateGenerator !== null) {
+            $deferredValues = $this->insertGenerator->getCollectedDeferredValues();
+            $sql .= $this->deferredUpdateGenerator->generate(
+                $schema, $table, $deferredColumns, $deferredValues, $connectionName
+            );
+        }
+
+        $this->insertGenerator->setDeferredColumns(null);
 
         return $sql;
     }
@@ -68,6 +84,7 @@ class SqlGenerator
         $schema = $config->getSchema();
         $table = $config->getTable();
         $connectionName = $config->getConnectionName();
+        $deferredColumns = $config->getDeferredColumns();
 
         $header = $this->buildHeader($config, count($rows), $fetchQuery);
 
@@ -75,6 +92,8 @@ class SqlGenerator
         $header .= "\n";
 
         yield $header;
+
+        $this->insertGenerator->setDeferredColumns($deferredColumns);
 
         foreach ($this->insertGenerator->generateChunks($schema, $table, $rows, $connectionName) as $chunk) {
             yield $chunk;
@@ -84,6 +103,18 @@ class SqlGenerator
         if ($footer !== '') {
             yield $footer;
         }
+
+        // Deferred UPDATE (восстановление FK-столбцов после разрыва цикла)
+        if ($deferredColumns !== null && $this->deferredUpdateGenerator !== null) {
+            $deferredValues = $this->insertGenerator->getCollectedDeferredValues();
+            foreach ($this->deferredUpdateGenerator->generateChunks(
+                $schema, $table, $deferredColumns, $deferredValues, $connectionName
+            ) as $chunk) {
+                yield $chunk;
+            }
+        }
+
+        $this->insertGenerator->setDeferredColumns(null);
     }
 
     /**

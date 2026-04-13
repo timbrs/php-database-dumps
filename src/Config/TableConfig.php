@@ -12,6 +12,7 @@ class TableConfig
 
     public const KEY_ORDER_BY = 'order_by';
     public const KEY_CASCADE_FROM = 'cascade_from';
+    public const KEY_DEFERRED_COLUMNS = 'deferred_columns';
 
     /** @var string */
     private $schema;
@@ -27,9 +28,12 @@ class TableConfig
     private $connectionName;
     /** @var array<int, array{parent: string, fk_column: string, parent_column: string}>|null */
     private $cascadeFrom;
+    /** @var array<int, array{column: string, reference_table: string, reference_column: string}>|null */
+    private $deferredColumns;
 
     /**
      * @param array<int, array{parent: string, fk_column: string, parent_column: string}>|null $cascadeFrom
+     * @param array<int, array{column: string, reference_table: string, reference_column: string}>|null $deferredColumns
      */
     public function __construct(
         string $schema,
@@ -38,7 +42,8 @@ class TableConfig
         ?string $where = null,
         ?string $orderBy = null,
         ?string $connectionName = null,
-        ?array $cascadeFrom = null
+        ?array $cascadeFrom = null,
+        ?array $deferredColumns = null
     ) {
         $this->schema = $schema;
         $this->table = $table;
@@ -47,6 +52,7 @@ class TableConfig
         $this->orderBy = $orderBy;
         $this->connectionName = $connectionName;
         $this->cascadeFrom = $cascadeFrom;
+        $this->deferredColumns = $deferredColumns;
     }
 
     public function getSchema(): string
@@ -105,6 +111,16 @@ class TableConfig
     }
 
     /**
+     * Получить список отложенных столбцов (разорванные циклические FK)
+     *
+     * @return array<int, array{column: string, reference_table: string, reference_column: string}>|null
+     */
+    public function getDeferredColumns(): ?array
+    {
+        return $this->deferredColumns;
+    }
+
+    /**
      * Создать из массива конфигурации
      *
      * @param string $schema
@@ -116,6 +132,7 @@ class TableConfig
     public static function fromArray(string $schema, string $table, array $config = [], ?string $connectionName = null): self
     {
         $cascadeFrom = isset($config[self::KEY_CASCADE_FROM]) ? $config[self::KEY_CASCADE_FROM] : null;
+        $deferredColumns = isset($config[self::KEY_DEFERRED_COLUMNS]) ? $config[self::KEY_DEFERRED_COLUMNS] : null;
 
         return new self(
             $schema,
@@ -124,7 +141,8 @@ class TableConfig
             $config[self::KEY_WHERE] ?? null,
             $config[self::KEY_ORDER_BY] ?? null,
             $connectionName,
-            $cascadeFrom
+            $cascadeFrom,
+            $deferredColumns
         );
     }
 }

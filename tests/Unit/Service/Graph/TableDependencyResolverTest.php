@@ -17,6 +17,7 @@ class TableDependencyResolverTest extends TestCase
     protected function setUp(): void
     {
         $this->fkInspector = $this->createMock(ForeignKeyInspector::class);
+        $this->fkInspector->method('getForeignKeyNullability')->willReturn([]);
         $this->resolver = new TableDependencyResolver($this->fkInspector, new TopologicalSorter());
     }
 

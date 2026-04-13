@@ -97,6 +97,121 @@ class TopologicalSorter
     }
 
     /**
+     * Топологическая сортировка с автоматическим разрывом циклов.
+     *
+     * Разрывает циклы, удаляя nullable-рёбра (или self-referential).
+     * Возвращает SortResult с отсортированными узлами и списком отложенных рёбер.
+     *
+     * @param array<string, array<string>> $adjacency key=node, value=list of dependencies
+     * @param array<string, bool> $nullableEdges key = "source->target" (edge key), value = is_nullable
+     * @param array<string, array<string, array{source_column: string, target_column: string}>> $edgeDetails key=node, value = map of dep => column info
+     * @return SortResult
+     */
+    public function sortWithCycleBreaking(array $adjacency, array $nullableEdges = [], array $edgeDetails = []): SortResult
+    {
+        if (empty($adjacency)) {
+            return new SortResult([]);
+        }
+
+        $deferredEdges = [];
+
+        // Сначала удаляем self-referential рёбра — они всегда deferred
+        foreach ($adjacency as $node => $deps) {
+            $filtered = [];
+            foreach ($deps as $dep) {
+                if ($dep === $node) {
+                    // Self-referential: всегда deferred
+                    $detail = isset($edgeDetails[$node][$dep]) ? $edgeDetails[$node][$dep] : null;
+                    $deferredEdges[] = [
+                        'source' => $node,
+                        'target' => $dep,
+                        'source_column' => $detail !== null ? $detail['source_column'] : '',
+                        'target_column' => $detail !== null ? $detail['target_column'] : '',
+                    ];
+                } else {
+                    $filtered[] = $dep;
+                }
+            }
+            $adjacency[$node] = $filtered;
+        }
+
+        // Итеративно пытаемся отсортировать, разрывая циклы
+        $maxIterations = 100;
+        $iteration = 0;
+
+        while ($iteration < $maxIterations) {
+            $iteration++;
+
+            try {
+                $sorted = $this->sort($adjacency);
+                return new SortResult($sorted, $deferredEdges);
+            } catch (\RuntimeException $e) {
+                // Цикл обнаружен — ищем ребро для разрыва
+                $cycles = $this->detectCycles($adjacency);
+                if (count($cycles) === 0) {
+                    // Не должно произойти, но на всякий случай
+                    break;
+                }
+
+                $broken = false;
+                // Приоритет 1: nullable-ребро внутри цикла
+                foreach ($cycles as $cycle) {
+                    foreach ($cycle as $nodeInCycle) {
+                        foreach ($adjacency[$nodeInCycle] as $dep) {
+                            if (in_array($dep, $cycle, true)) {
+                                $edgeKey = $nodeInCycle . '->' . $dep;
+                                if (isset($nullableEdges[$edgeKey]) && $nullableEdges[$edgeKey]) {
+                                    // Разрываем это ребро
+                                    $adjacency[$nodeInCycle] = array_values(array_filter(
+                                        $adjacency[$nodeInCycle],
+                                        function ($d) use ($dep) { return $d !== $dep; }
+                                    ));
+                                    $detail = isset($edgeDetails[$nodeInCycle][$dep]) ? $edgeDetails[$nodeInCycle][$dep] : null;
+                                    $deferredEdges[] = [
+                                        'source' => $nodeInCycle,
+                                        'target' => $dep,
+                                        'source_column' => $detail !== null ? $detail['source_column'] : '',
+                                        'target_column' => $detail !== null ? $detail['target_column'] : '',
+                                    ];
+                                    $broken = true;
+                                    break 3;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Приоритет 2: любое ребро внутри первого цикла
+                if (!$broken) {
+                    $cycle = $cycles[0];
+                    $nodeInCycle = $cycle[0];
+                    foreach ($adjacency[$nodeInCycle] as $dep) {
+                        if (in_array($dep, $cycle, true)) {
+                            $adjacency[$nodeInCycle] = array_values(array_filter(
+                                $adjacency[$nodeInCycle],
+                                function ($d) use ($dep) { return $d !== $dep; }
+                            ));
+                            $detail = isset($edgeDetails[$nodeInCycle][$dep]) ? $edgeDetails[$nodeInCycle][$dep] : null;
+                            $deferredEdges[] = [
+                                'source' => $nodeInCycle,
+                                'target' => $dep,
+                                'source_column' => $detail !== null ? $detail['source_column'] : '',
+                                'target_column' => $detail !== null ? $detail['target_column'] : '',
+                            ];
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: если за maxIterations не удалось, возвращаем все узлы в алфавитном порядке
+        $allNodes = array_keys($adjacency);
+        sort($allNodes);
+        return new SortResult($allNodes, $deferredEdges);
+    }
+
+    /**
      * Detect cycles using Tarjan's SCC algorithm
      *
      * @param array<string, array<string>> $adjacency

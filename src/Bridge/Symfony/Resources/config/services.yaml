@@ -55,6 +55,22 @@ services:
             $fakerEnabled: true
             $splitBySchema: true
 
+    Timbrs\DatabaseDumps\Service\Generator\InsertGenerator:
+        arguments:
+            $batchSize: '%database_dumps.batch_size%'
+
+    Timbrs\DatabaseDumps\Service\Faker\PatternDetector:
+        arguments:
+            $sampleSize: '%database_dumps.sample_size%'
+
+    Timbrs\DatabaseDumps\Service\Dumper\CascadeWhereResolver:
+        arguments:
+            $maxDepth: '%database_dumps.max_cascade_depth%'
+
+    Timbrs\DatabaseDumps\Service\Generator\DeferredUpdateGenerator: ~
+
+    Timbrs\DatabaseDumps\Service\Importer\SchemaValidator: ~
+
     Timbrs\DatabaseDumps\Service\Dumper\DatabaseDumper:
         arguments:
             $projectDir: '%kernel.project_dir%'
