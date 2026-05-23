@@ -88,8 +88,10 @@ class PatternDetectorTest extends TestCase
         $this->assertEquals(PatternDetector::PATTERN_FIO_SHORT, $result['short_name']);
     }
 
-    public function testSkipsColumnsWithFewValues(): void
+    public function testFailSafeDetectsByColumnNameForSmallTable(): void
     {
+        // На маленьких таблицах (<10 строк) детекция по имени колонки —
+        // fail-safe для безопасности (лучше лишняя маскировка чем утечка PII).
         $rows = [];
         for ($i = 0; $i < 5; $i++) {
             $rows[] = ['email' => "user{$i}@example.com"];
@@ -97,7 +99,8 @@ class PatternDetectorTest extends TestCase
         $this->connection->method('fetchAllAssociative')->willReturn($rows);
 
         $result = $this->detector->detect('public', 'users');
-        $this->assertEmpty($result);
+        // 'email' имя — распознан по hint
+        $this->assertSame(PatternDetector::PATTERN_EMAIL, $result['email'] ?? null);
     }
 
     public function testBelowThresholdNotDetected(): void
@@ -228,8 +231,10 @@ class PatternDetectorTest extends TestCase
         $this->connection->method('fetchAllAssociative')->willReturn($rows);
 
         $result = $this->detector->detect('public', 'users');
-        $this->assertEquals(PatternDetector::PATTERN_NAME, $result['display_name']);
-        $this->assertArrayNotHasKey('first_name', $result);
+        $this->assertSame(PatternDetector::PATTERN_NAME, $result['display_name']);
+        // first_name теперь распознан по имени колонки (fail-safe для PII)
+        // даже когда корреляция со составной колонкой не сработала.
+        $this->assertSame(PatternDetector::PATTERN_FIRSTNAME, $result['first_name']);
     }
 
     public function testNoLinkedColumnsWithoutComposite(): void

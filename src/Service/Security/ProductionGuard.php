@@ -2,31 +2,65 @@
 
 namespace Timbrs\DatabaseDumps\Service\Security;
 
+use Timbrs\DatabaseDumps\Config\EnvironmentConfig;
 use Timbrs\DatabaseDumps\Exception\ProductionEnvironmentException;
 
 /**
- * Защита от опасных операций в production
+ * Защита от опасных операций в production.
+ *
+ * Принимает EnvironmentConfig напрямую — слой EnvironmentChecker удалён
+ * как избыточный (был тонкой обёрткой).
  */
 class ProductionGuard
 {
-    /** @var EnvironmentChecker */
-    private $environmentChecker;
+    /** @var EnvironmentConfig */
+    private $environmentConfig;
 
-    public function __construct(EnvironmentChecker $environmentChecker)
+    public function __construct(EnvironmentConfig $environmentConfig)
     {
-        $this->environmentChecker = $environmentChecker;
+        $this->environmentConfig = $environmentConfig;
+    }
+
+    public function isProduction(): bool
+    {
+        return $this->environmentConfig->isProduction();
+    }
+
+    public function getCurrentEnvironment(): string
+    {
+        return $this->environmentConfig->getCurrentEnv();
     }
 
     /**
-     * Проверить безопасность импорта и выбросить исключение если production
+     * Проверка безопасности импорта (разрушает целевую БД).
      *
      * @throws ProductionEnvironmentException
      */
     public function ensureSafeForImport(): void
     {
-        if ($this->environmentChecker->isProduction()) {
+        if ($this->environmentConfig->isProduction()) {
             throw ProductionEnvironmentException::importBlocked(
-                $this->environmentChecker->getCurrentEnvironment()
+                $this->environmentConfig->getCurrentEnv()
+            );
+        }
+    }
+
+    /**
+     * Проверка безопасности экспорта (читает реальные данные с потенциальным PII).
+     *
+     * Может быть обойдена через $allowProdExport (например, опция CLI --allow-prod-export),
+     * чтобы намеренно снимать дамп с prod после ручной верификации faker-конфига.
+     *
+     * @throws ProductionEnvironmentException
+     */
+    public function ensureSafeForExport(bool $allowProdExport = false): void
+    {
+        if ($allowProdExport) {
+            return;
+        }
+        if ($this->environmentConfig->isProduction()) {
+            throw ProductionEnvironmentException::exportBlocked(
+                $this->environmentConfig->getCurrentEnv()
             );
         }
     }

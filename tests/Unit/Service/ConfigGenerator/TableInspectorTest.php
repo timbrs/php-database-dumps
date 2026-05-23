@@ -2,11 +2,14 @@
 
 namespace Timbrs\DatabaseDumps\Tests\Unit\Service\ConfigGenerator;
 
+use PHPUnit\Framework\TestCase;
 use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
 use Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface;
+use Timbrs\DatabaseDumps\Platform\MySqlPlatform;
+use Timbrs\DatabaseDumps\Platform\OraclePlatform;
 use Timbrs\DatabaseDumps\Platform\PlatformFactory;
+use Timbrs\DatabaseDumps\Platform\PostgresPlatform;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\TableInspector;
-use PHPUnit\Framework\TestCase;
 
 class TableInspectorTest extends TestCase
 {
@@ -22,6 +25,13 @@ class TableInspectorTest extends TestCase
 
         $this->registry = $this->createMock(ConnectionRegistryInterface::class);
         $this->registry->method('getConnection')->willReturn($this->connection);
+    }
+
+    private function setPlatform(string $name): void
+    {
+        $platform = $name === PlatformFactory::ORACLE ? new OraclePlatform()
+            : ($name === PlatformFactory::MYSQL ? new MySqlPlatform() : new PostgresPlatform());
+        $this->registry->method('getPlatform')->willReturn($platform);
     }
 
     public function testListTablesPostgresql(): void
@@ -74,6 +84,7 @@ class TableInspectorTest extends TestCase
     public function testCountRows(): void
     {
         $this->connection->method('getPlatformName')->willReturn(PlatformFactory::POSTGRESQL);
+        $this->setPlatform(PlatformFactory::POSTGRESQL);
         $this->connection
             ->expects($this->once())
             ->method('fetchAllAssociative')
@@ -89,6 +100,7 @@ class TableInspectorTest extends TestCase
     public function testCountRowsMysql(): void
     {
         $this->connection->method('getPlatformName')->willReturn(PlatformFactory::MYSQL);
+        $this->setPlatform(PlatformFactory::MYSQL);
         $this->connection
             ->expects($this->once())
             ->method('fetchAllAssociative')
@@ -233,6 +245,8 @@ class TableInspectorTest extends TestCase
     public function testCountRowsOracle(): void
     {
         $this->connection->method('getPlatformName')->willReturn(PlatformFactory::ORACLE);
+        $this->setPlatform(PlatformFactory::ORACLE);
+        // Oracle (через OraclePlatform) делает UPPERCASE → "HR"."EMPLOYEES"
         $this->connection
             ->expects($this->once())
             ->method('fetchAllAssociative')
@@ -248,17 +262,14 @@ class TableInspectorTest extends TestCase
     public function testDetectOrderColumnOracle(): void
     {
         $this->connection->method('getPlatformName')->willReturn(PlatformFactory::ORACLE);
-        $this->connection->method('quote')->willReturnCallback(function ($value) {
-            return "'{$value}'";
-        });
+        // Параметры теперь передаются через placeholders — параметры передаются вторым аргументом
         $this->connection
             ->expects($this->once())
             ->method('fetchAllAssociative')
-            ->with($this->logicalAnd(
+            ->with(
                 $this->stringContains('all_tab_columns'),
-                $this->stringContains("'HR'"),
-                $this->stringContains("'EMPLOYEES'")
-            ))
+                $this->equalTo(['owner' => 'HR', 'table' => 'EMPLOYEES'])
+            )
             ->willReturn([
                 ['column_name' => 'id'],
                 ['column_name' => 'name'],

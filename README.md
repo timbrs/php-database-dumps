@@ -191,10 +191,11 @@ partial_export:
 
 | Опция | Описание |
 |-------|----------|
-| `limit` | Максимум строк |
+| `limit` | Максимум строк (для `sample` — общий потолок на объединённую выборку) |
 | `order_by` | Сортировка (должна заканчиваться на `ASC` или `DESC`) |
 | `where` | Условие WHERE |
 | `cascade_from` | Каскадная фильтрация по FK-родителю (см. ниже) |
+| `sample` | Выборка по именованным критериям («все фломастеры», см. ниже) |
 
 ### Каскадные зависимости (cascade_from)
 
@@ -228,6 +229,38 @@ partial_export:
 - Подзапросы вложенные: `order_items` → `orders` → `users` (глубина до 10 уровней)
 
 Команда `prepare-config` автоматически определяет FK-зависимости и генерирует `cascade_from`. Чтобы отключить: `--no-cascade`.
+
+### Выборка по именованным критериям (sample)
+
+Иногда нужно набрать «все фломастеры» — по 10–100 строк каждого бизнес-сегмента (красные/жёлтые/зелёные по статусу, новые/старые по дате, неактивные, VIP…), часто по разным колонкам и кросс-таблично. Опция `sample` задаёт набор именованных «корзин», каждая со своим WHERE и квотой; итоговая выборка — объединение всех корзин **без дублей** (дедуп по первичному ключу).
+
+```yaml
+partial_export:
+  public:
+    clients:
+      order_by: id DESC
+      limit: 100            # необяз.: общий потолок на объединённую выборку
+      sample:
+        criteria:           # именованные корзины; у каждой свой WHERE и квота
+          - { name: red,      where: "status = 'red'",                            limit: 10 }
+          - { name: new,      where: "created_at >= NOW() - INTERVAL '30 days'",   limit: 50 }
+          - { name: inactive, where: "last_login_at < NOW() - INTERVAL '90 days'", limit: 20 }
+          - { name: vip,      where: "EXISTS (SELECT 1 FROM public.client_flags f WHERE f.client_id = clients.id AND f.flag = 'vip')", limit: 30 }
+        stratify_by: status   # сахар: развернуть в по-корзине-на-DISTINCT-значение
+        per_value: 10         # квота для stratify_by
+```
+
+Как это работает:
+- **Фаза 1** — по каждому критерию выбираются первичные ключи: `SELECT <pk> FROM clients WHERE (<base where>) AND (<crit.where>) [ORDER BY ...] LIMIT <crit.limit>`. `stratify_by` разворачивается в по-корзине на каждое DISTINCT-значение колонки.
+- **Дедуп** — id всех корзин объединяются и дедуплицируются; при заданном `limit` объединённая выборка обрезается до него.
+- **Фаза 2** — финальный `SELECT * FROM clients WHERE <pk> IN (...)` (для составного PK — дизъюнкция равенств).
+
+Требования и поведение:
+- У таблицы должен быть первичный ключ (нужен для дедупа). `criteria[].where` проходит ту же проверку, что и обычный `where` (запрет `;` и SQL-комментариев, баланс кавычек/скобок) — корректные `EXISTS (...)` допускаются. `name` — идентификатор, `limit` — целое ≥ 1.
+- **Cascade-консистентность:** если у родителя задан `sample`, дочерние таблицы (`cascade_from`) ссылаются на **фактически выбранные** id родителя, а не повторяют критерии подзапросом.
+- `sample` и `cascade_from` на одной таблице несовместимы: при наличии `sample` экспорт идёт по нему (каскад для этой таблицы игнорируется). Поэтому авто-генерация добавляет `sample` только таблицам без `cascade_from`.
+
+Авто-генерация: с флагом `--criteria` (или `--deep`) `prepare-config` профилирует категориальные колонки и сам предлагает `sample.criteria` (по корзине на топ-значение). Бизнес-сегменты из кода (Eloquent scopes, методы репозиториев) добавляются через ветку OPENCODE — см. [Углублённый анализ](#углублённый-анализ-deep--ai--criteria).
 
 ### Замена персональных данных (faker)
 
@@ -413,12 +446,100 @@ php artisan dbdump:prepare-config new
 | `--no-cascade` | Пропустить обнаружение FK и генерацию `cascade_from` | — |
 | `--no-faker` | Пропустить обнаружение персональных данных | — |
 | `--no-split` | Генерировать единый YAML без разделения по схемам | — |
+| `--criteria` | Авто-генерация `sample.criteria` из категориальных колонок | — |
+| `--ai` / `--no-ai` | Включить/отключить LLM-детекцию ПД (по умолчанию авто, если задан `DBDUMP_LLM_URL`) | авто |
+| `--deep` | Глубокий анализ: профилирование + ИИ + `sample.criteria` + отчёт `database/analysis/REPORT.md` | — |
 
 **Как распределяются таблицы:**
 - Строк <= порога — `full_export`
 - Строк > порога — `partial_export` (с limit, автоопределённой сортировкой и шаблоном `where: "1=1"` для удобства редактирования)
 - Пустые таблицы — пропускаются
 - Служебные таблицы (migrations, sessions, cache_*, telescope_*, oauth_*, audit_*) — пропускаются
+
+## Углублённый анализ (--deep / --ai / --criteria)
+
+Помимо базовой генерации конфига, пакет умеет анализировать данные и код хост-приложения, опираясь на два источника ИИ:
+
+- **Прямой LLM** (`openai/gpt-oss-120b` по OpenAI-совместимому API) — анализ **данных**: PII-классификация точнее regex, профилирование, подсказки по выборке. Запросы ограничены по размеру.
+- **OPENCODE** (внешний агент) — анализ **кода** целиком: связи без FK (Eloquent `belongsTo/hasMany`, Doctrine-ассоциации, сырые JOIN), карта «колонка → код», ключевые поля и бизнес-сегменты. Пакет готовит вход и инструкции, агент возвращает JSON, который пакет поглощает.
+
+### Настройка LLM (интерактивно)
+
+Проще всего задать настройки LLM одной командой — она спросит, есть ли LLM, его адрес, модель и token (можно оставить пустым), при желании проверит соединение и сохранит всё в `database/dbdump_llm.json`:
+
+```bash
+php artisan dbdump:configure-llm                 # Laravel
+php bin/console app:dbdump:configure-llm         # Symfony
+```
+
+После этого `--ai`/`--deep` и `prepare-analysis` подхватывают настройки автоматически. Приоритет: переменные окружения `DBDUMP_LLM_*` (если заданы) перекрывают сохранённый файл. Файл может содержать token — добавьте `database/dbdump_llm.json` в `.gitignore`.
+
+### LLM-детекция ПД и профилирование
+
+```bash
+# Symfony
+php bin/console app:dbdump:prepare-config all --deep
+php bin/console app:dbdump:prepare-config all --ai          # только LLM-PII
+php bin/console app:dbdump:prepare-config all --criteria    # только авто sample.criteria
+
+# Laravel
+php artisan dbdump:prepare-config all --deep
+```
+
+- `--ai` использует LLM для классификации ПД (regex-результаты подаются как hints; принимаются типы с уверенностью выше порога, маппятся на `fio/email/phone/...`). При недоступном LLM — тихий fallback на regex + предупреждение.
+- `--criteria` профилирует категориальные колонки и предлагает `sample.criteria` (по корзине на топ-значение).
+- `--deep` включает всё перечисленное + пишет отчёт `database/analysis/REPORT.md` (+ машинный `analysis_result.json`): режим экспорта, предложенные критерии с SQL и обоснованием, ПД (regex vs LLM), профиль колонок.
+
+Переменные окружения LLM:
+
+| Переменная | Назначение | По умолчанию |
+|------------|-----------|--------------|
+| `DBDUMP_LLM_URL` | Базовый URL OpenAI-совместимого API (например `https://llm.example.com/v1`). Пусто → AI-функции выключены | — |
+| `DBDUMP_LLM_MODEL` | Имя модели | `openai/gpt-oss-120b` |
+| `DBDUMP_LLM_TOKEN` | Bearer-токен (опционально) | — |
+| `DBDUMP_LLM_TIMEOUT` | Таймаут запроса, сек | `120` |
+| `DBDUMP_LLM_ENABLED` | `true`/`false`; по умолчанию авто (включено при заданном URL) | авто |
+
+HTTP-запросы выполняются через `ext-curl` (без guzzle). Данные PII в промптах ограничены примерами значений колонок.
+
+### Анализ кода через OPENCODE
+
+**Самый простой путь — одной командой** (нужен `opencode` в PATH):
+
+```bash
+php artisan dbdump:prepare-analysis --run            # Laravel
+php bin/console app:dbdump:prepare-analysis --run    # Symfony
+```
+
+С `--run` модуль сам провижинит пакет, прогонит OPENCODE по чанку на каждую схему и применит результат к `dump_config.yaml`. Если opencode не найден — команда напечатает готовые к вставке строки запуска и не упадёт.
+
+**Ручной путь (3 шага)** — если хотите контролировать прогон агента:
+
+```bash
+# 1. Подготовить пакет (агент + инвентарь + контракт + RUN.md)
+php bin/console app:dbdump:prepare-analysis        # Symfony
+php artisan dbdump:prepare-analysis                # Laravel
+
+# 2. Запустить агента по чанку на схему (точные строки печатает команда из шага 1, см. также RUN.md)
+opencode run --agent dbdump-mapper \
+  -f database/analysis/schema_inventory.public.json \
+  "Обработай схему public по инструкции; результат запиши в database/analysis/out/public.json"
+
+# 3. Применить результат к dump_config.yaml
+php bin/console app:dbdump:apply-analysis          # Symfony
+php artisan dbdump:apply-analysis                  # Laravel
+```
+
+Что провижинит `prepare-analysis` в хост-проект:
+- `.opencode/agents/dbdump-mapper.md` — готовый агент (read-only по коду; пишет только в `database/analysis/out/`);
+- `.opencode/commands/dbdump-map.md` — слэш-команда для TUI (опционально);
+- `database/analysis/schema_inventory.json` — полный инвентарь + `schema_inventory.<schema>.json` по каждой схеме (для прогона по чанку без переполнения контекста 128k), **без значений данных** (PII в OPENCODE не выгружается);
+- `database/analysis/output_schema.json` — JSON-контракт ответа;
+- `database/analysis/RUN.md` — точные команды запуска и применения.
+
+`apply-analysis` читает `database/analysis/out/*.json`, валидирует против контракта, объединяет чанки и обогащает `dump_config.yaml`: `cascade_from` из кода (с пометкой `source: code` в отчёте) и `sample.criteria` из бизнес-сегментов. Пользовательские правки в приоритете — добавляется только отсутствующее; провенанс/уверенность фиксируются в `database/analysis/REPORT.md`.
+
+Провайдер и модель LLM предполагаются уже настроенными в opencode пользователя (`~/.config/opencode/opencode.json`); агент не задаёт модель явно и наследует дефолтную — отдельной настройки не требуется. Для больших схем дробите прогон по чанку на схему (см. RUN.md).
 
 ## Настройка Symfony
 
@@ -501,6 +622,11 @@ php bin/console app:dbdump:prepare-config all --threshold=1000 --force
 php bin/console app:dbdump:prepare-config schema=billing
 php bin/console app:dbdump:prepare-config table=public.users
 php bin/console app:dbdump:prepare-config new --no-cascade --no-faker
+
+# Углублённый анализ
+php bin/console app:dbdump:prepare-config all --deep
+php bin/console app:dbdump:prepare-analysis --run    # всё одной командой (нужен opencode в PATH)
+# или вручную: prepare-analysis → opencode run → apply-analysis
 ```
 
 ## Настройка Laravel
@@ -572,6 +698,11 @@ php artisan dbdump:prepare-config all --threshold=1000 --force
 php artisan dbdump:prepare-config schema=billing
 php artisan dbdump:prepare-config table=public.users
 php artisan dbdump:prepare-config new --no-cascade --no-faker
+
+# Углублённый анализ
+php artisan dbdump:prepare-config all --deep
+php artisan dbdump:prepare-analysis --run            # всё одной командой (нужен opencode в PATH)
+# или вручную: prepare-analysis → opencode run → apply-analysis
 ```
 
 ## Скрипты before/after

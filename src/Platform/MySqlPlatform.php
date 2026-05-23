@@ -3,28 +3,36 @@
 namespace Timbrs\DatabaseDumps\Platform;
 
 use Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface;
-use Timbrs\DatabaseDumps\Contract\DatabasePlatformInterface;
+use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 
 /**
  * Платформа MySQL / MariaDB
  */
-class MySqlPlatform implements DatabasePlatformInterface
+class MySqlPlatform extends AbstractPlatform
 {
-    public function quoteIdentifier(string $identifier): string
+    /** @var LoggerInterface|null */
+    private $logger;
+
+    public function __construct(LoggerInterface $logger = null)
     {
-        return '`' . $identifier . '`';
+        $this->logger = $logger;
     }
 
-    public function getFullTableName(string $schema, string $table): string
+    protected function getIdentifierQuote(): string
     {
-        return $this->quoteIdentifier($schema) . '.' . $this->quoteIdentifier($table);
+        return '`';
     }
 
+    /**
+     * MySQL: TRUNCATE = неявный COMMIT, что ломает атомарность импорта.
+     * Используем DELETE FROM в одной транзакции с импортом.
+     * FOREIGN_KEY_CHECKS управляется централизованно в DatabaseImporter (try/finally).
+     */
     public function getTruncateStatement(string $schema, string $table): string
     {
         $fullTable = $this->getFullTableName($schema, $table);
 
-        return "SET FOREIGN_KEY_CHECKS=0;\nDELETE FROM {$fullTable};";
+        return "DELETE FROM {$fullTable};";
     }
 
     public function getSequenceResetSql(string $schema, string $table, DatabaseConnectionInterface $connection): string
@@ -33,12 +41,42 @@ class MySqlPlatform implements DatabasePlatformInterface
 
         try {
             $fullTable = $this->getFullTableName($schema, $table);
-            $sql .= "ALTER TABLE {$fullTable} AUTO_INCREMENT = 1;\n";
-        } catch (\Exception $e) {
-            $sql .= '-- Ошибка сброса AUTO_INCREMENT: ' . $e->getMessage() . "\n";
-        }
 
-        $sql .= "SET FOREIGN_KEY_CHECKS=1;\n";
+            // Найти AUTO_INCREMENT-колонку (если есть)
+            $autoIncColumn = $connection->fetchAllAssociative(
+                "SELECT COLUMN_NAME AS column_name
+                 FROM information_schema.COLUMNS
+                 WHERE TABLE_SCHEMA = :schema
+                   AND TABLE_NAME = :table
+                   AND EXTRA LIKE '%auto_increment%'
+                 LIMIT 1",
+                ['schema' => $schema, 'table' => $table]
+            );
+
+            if (empty($autoIncColumn)) {
+                $sql .= "-- AUTO_INCREMENT-колонка не найдена\n";
+                return $sql;
+            }
+
+            $column = $autoIncColumn[0]['column_name'];
+            $quotedColumn = $this->quoteIdentifier($column);
+
+            // ALTER TABLE ... AUTO_INCREMENT = N (без подзапросов в MySQL).
+            // Рассчитываем следующее значение из текущих данных.
+            $maxRow = $connection->fetchAllAssociative(
+                "SELECT COALESCE(MAX({$quotedColumn}), 0) + 1 AS next_value FROM {$fullTable}"
+            );
+            $nextValue = isset($maxRow[0]['next_value']) ? (int) $maxRow[0]['next_value'] : 1;
+
+            $sql .= "ALTER TABLE {$fullTable} AUTO_INCREMENT = {$nextValue};\n";
+        } catch (\Exception $e) {
+            if ($this->logger !== null) {
+                $this->logger->warning(
+                    'Ошибка сброса AUTO_INCREMENT для ' . $schema . '.' . $table . ': ' . $e->getMessage()
+                );
+            }
+            $sql .= "-- Не удалось сбросить AUTO_INCREMENT (детали в логе)\n";
+        }
 
         return $sql;
     }
@@ -48,8 +86,18 @@ class MySqlPlatform implements DatabasePlatformInterface
         return 'RAND()';
     }
 
-    public function getLimitSql(int $limit): string
+    public function quoteBoolean(bool $value): string
     {
-        return 'LIMIT ' . $limit;
+        return $value ? '1' : '0';
+    }
+
+    public function disableForeignKeysSql(): ?string
+    {
+        return 'SET FOREIGN_KEY_CHECKS=0';
+    }
+
+    public function enableForeignKeysSql(): ?string
+    {
+        return 'SET FOREIGN_KEY_CHECKS=1';
     }
 }

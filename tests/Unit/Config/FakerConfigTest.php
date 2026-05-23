@@ -60,7 +60,7 @@ class FakerConfigTest extends TestCase
             ],
             'billing' => [
                 'invoices' => [
-                    'address' => 'address',
+                    'phone' => 'phone',
                 ],
             ],
         ];
@@ -68,6 +68,26 @@ class FakerConfigTest extends TestCase
         $config = new FakerConfig($data);
 
         $this->assertSame($data, $config->toArray());
+    }
+
+    public function testConstructorRejectsUnknownPattern(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new FakerConfig([
+            'public' => [
+                'users' => ['name' => 'fioo'], // опечатка — должно бросить
+            ],
+        ]);
+    }
+
+    public function testConstructorRejectsNonStringPattern(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new FakerConfig([
+            'public' => [
+                'users' => ['name' => 123],
+            ],
+        ]);
     }
 
     public function testIsEmptyReturnsTrueForEmptyConfig(): void

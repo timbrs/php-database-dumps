@@ -18,52 +18,45 @@ class PostgresPlatformTest extends TestCase
 
     public function testQuoteIdentifier(): void
     {
-        $this->assertEquals('"users"', $this->platform->quoteIdentifier('users'));
-        $this->assertEquals('"my_table"', $this->platform->quoteIdentifier('my_table'));
+        $this->assertSame('"users"', $this->platform->quoteIdentifier('users'));
+    }
+
+    public function testQuoteIdentifierEscapesInnerQuotes(): void
+    {
+        // Защита от инъекций
+        $this->assertSame('"weird""name"', $this->platform->quoteIdentifier('weird"name'));
     }
 
     public function testGetFullTableName(): void
     {
-        $this->assertEquals('"users"."users"', $this->platform->getFullTableName('users', 'users'));
-        $this->assertEquals('"public"."orders"', $this->platform->getFullTableName('public', 'orders'));
+        $this->assertSame('"users"."users"', $this->platform->getFullTableName('users', 'users'));
     }
 
     public function testGetTruncateStatement(): void
     {
         $sql = $this->platform->getTruncateStatement('users', 'users');
-
-        $this->assertEquals('TRUNCATE TABLE "users"."users" CASCADE;', $sql);
-    }
-
-    public function testGetTruncateStatementIncludesCascade(): void
-    {
-        $sql = $this->platform->getTruncateStatement('public', 'orders');
-
-        $this->assertStringContainsString('CASCADE', $sql);
+        $this->assertSame('TRUNCATE TABLE "users"."users" CASCADE;', $sql);
     }
 
     public function testGetSequenceResetSqlWithSequences(): void
     {
         $connection = $this->createMock(DatabaseConnectionInterface::class);
-        $connection
-            ->expects($this->once())
-            ->method('fetchFirstColumn')
-            ->willReturn(['users.users_id_seq']);
+        $connection->method('fetchAllAssociative')->willReturn([
+            ['column_name' => 'id', 'sequence_name' => 'users.users_id_seq'],
+        ]);
 
         $sql = $this->platform->getSequenceResetSql('users', 'users', $connection);
 
         $this->assertStringContainsString('Сброс sequences', $sql);
         $this->assertStringContainsString("setval('users.users_id_seq'", $sql);
-        $this->assertStringContainsString('MAX(id)', $sql);
+        // Имя колонки квотируется через quoteIdentifier (не хардкод 'id')
+        $this->assertStringContainsString('MAX("id")', $sql);
     }
 
     public function testGetSequenceResetSqlWithNoSequences(): void
     {
         $connection = $this->createMock(DatabaseConnectionInterface::class);
-        $connection
-            ->expects($this->once())
-            ->method('fetchFirstColumn')
-            ->willReturn([]);
+        $connection->method('fetchAllAssociative')->willReturn([]);
 
         $sql = $this->platform->getSequenceResetSql('users', 'users', $connection);
 
@@ -74,24 +67,41 @@ class PostgresPlatformTest extends TestCase
     public function testGetSequenceResetSqlHandlesException(): void
     {
         $connection = $this->createMock(DatabaseConnectionInterface::class);
-        $connection
-            ->expects($this->once())
-            ->method('fetchFirstColumn')
-            ->willThrowException(new \Exception('Database error'));
+        $connection->method('fetchAllAssociative')->willThrowException(new \Exception('DB error'));
 
         $sql = $this->platform->getSequenceResetSql('users', 'users', $connection);
 
-        $this->assertStringContainsString('Ошибка получения sequences', $sql);
+        // Сообщение НЕ должно содержать детали ошибки (защита от утечки в дамп)
+        $this->assertStringContainsString('Не удалось получить список sequences', $sql);
+        $this->assertStringNotContainsString('DB error', $sql);
+    }
+
+    public function testGetSequenceResetSqlUsesProvidedColumnNameNotHardcoded(): void
+    {
+        // PK не "id" — должен использоваться возвращённый column_name
+        $connection = $this->createMock(DatabaseConnectionInterface::class);
+        $connection->method('fetchAllAssociative')->willReturn([
+            ['column_name' => 'user_uuid', 'sequence_name' => 'public.user_seq'],
+        ]);
+
+        $sql = $this->platform->getSequenceResetSql('public', 'users', $connection);
+        $this->assertStringContainsString('MAX("user_uuid")', $sql);
+        $this->assertStringNotContainsString('MAX(id)', $sql);
+    }
+
+    public function testQuoteBoolean(): void
+    {
+        $this->assertSame('TRUE', $this->platform->quoteBoolean(true));
+        $this->assertSame('FALSE', $this->platform->quoteBoolean(false));
     }
 
     public function testGetRandomFunctionSql(): void
     {
-        $this->assertEquals('RANDOM()', $this->platform->getRandomFunctionSql());
+        $this->assertSame('RANDOM()', $this->platform->getRandomFunctionSql());
     }
 
     public function testGetLimitSql(): void
     {
-        $this->assertEquals('LIMIT 100', $this->platform->getLimitSql(100));
-        $this->assertEquals('LIMIT 1', $this->platform->getLimitSql(1));
+        $this->assertSame('LIMIT 100', $this->platform->getLimitSql(100));
     }
 }

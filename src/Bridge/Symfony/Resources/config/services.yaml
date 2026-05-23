@@ -16,6 +16,10 @@ services:
     Timbrs\DatabaseDumps\Contract\ConfigLoaderInterface:
         class: Timbrs\DatabaseDumps\Util\YamlConfigLoader
 
+    # Logger — NullLogger по умолчанию, command override (см. ниже)
+    Timbrs\DatabaseDumps\Contract\LoggerInterface:
+        class: Timbrs\DatabaseDumps\Bridge\Symfony\ConsoleLogger
+
     # Platform (для обратной совместимости)
     Timbrs\DatabaseDumps\Contract\DatabasePlatformInterface:
         factory: ['Timbrs\DatabaseDumps\Platform\PlatformFactory', 'create']
@@ -26,10 +30,34 @@ services:
     Timbrs\DatabaseDumps\Config\EnvironmentConfig:
         factory: ['Timbrs\DatabaseDumps\Config\EnvironmentConfig', 'fromEnv']
 
-    Timbrs\DatabaseDumps\Config\DumpConfig:
-        factory: ['@Timbrs\DatabaseDumps\Contract\ConfigLoaderInterface', 'load']
+    # LLM (прямой клиент для анализа данных)
+    Timbrs\DatabaseDumps\Service\Ai\AiConfigStore: ~
+
+    Timbrs\DatabaseDumps\Config\AiConfig:
+        factory: ['@Timbrs\DatabaseDumps\Service\Ai\AiConfigStore', 'resolve']
         arguments:
-            $path: '%kernel.project_dir%/config/dump_config.yaml'
+            $projectDir: '%kernel.project_dir%'
+
+    Timbrs\DatabaseDumps\Contract\HttpTransportInterface:
+        class: Timbrs\DatabaseDumps\Service\Ai\CurlHttpTransport
+
+    Timbrs\DatabaseDumps\Contract\AiClientInterface:
+        factory: ['Timbrs\DatabaseDumps\Service\Ai\AiClientFactory', 'create']
+        arguments:
+            $transport: '@Timbrs\DatabaseDumps\Contract\HttpTransportInterface'
+            $config: '@Timbrs\DatabaseDumps\Config\AiConfig'
+            $logger: '@Timbrs\DatabaseDumps\Contract\LoggerInterface'
+
+    Timbrs\DatabaseDumps\Service\Faker\LlmPatternDetector: ~
+
+    Timbrs\DatabaseDumps\Util\ConditionalConfigLoader:
+        arguments:
+            $loader: '@Timbrs\DatabaseDumps\Contract\ConfigLoaderInterface'
+
+    Timbrs\DatabaseDumps\Config\DumpConfig:
+        factory: ['@Timbrs\DatabaseDumps\Util\ConditionalConfigLoader', 'load']
+        arguments:
+            $path: '%database_dumps.config_path%'
 
     # ConnectionRegistry
     Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface:
@@ -40,20 +68,39 @@ services:
             $dumpConfig: '@Timbrs\DatabaseDumps\Config\DumpConfig'
             $container: '@service_container'
 
-    # Services
-    Timbrs\DatabaseDumps\:
-        resource: '../../../Service/**/*'
+    # Services — явно перечисляем, чтобы избежать неоднозначных биндингов
+    Timbrs\DatabaseDumps\Service\Parser\StatementSplitter: ~
+    Timbrs\DatabaseDumps\Service\Parser\SqlParser: ~
+    Timbrs\DatabaseDumps\Service\Importer\TransactionManager: ~
+    Timbrs\DatabaseDumps\Service\Importer\ScriptExecutor: ~
+    Timbrs\DatabaseDumps\Service\Importer\SchemaValidator: ~
+    Timbrs\DatabaseDumps\Service\Security\ProductionGuard: ~
+    Timbrs\DatabaseDumps\Service\Dumper\TableConfigResolver: ~
+    Timbrs\DatabaseDumps\Service\Graph\TopologicalSorter: ~
+    Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver: ~
+    Timbrs\DatabaseDumps\Service\ConfigGenerator\ForeignKeyInspector: ~
+    Timbrs\DatabaseDumps\Service\ConfigGenerator\PrimaryKeyInspector: ~
+    Timbrs\DatabaseDumps\Service\ConfigGenerator\TableInspector: ~
+    Timbrs\DatabaseDumps\Service\ConfigGenerator\ServiceTableFilter: ~
+    Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigSplitter: ~
+    Timbrs\DatabaseDumps\Service\ConfigGenerator\ModeParser: ~
+    Timbrs\DatabaseDumps\Service\Generator\TruncateGenerator: ~
+    Timbrs\DatabaseDumps\Service\Generator\SequenceGenerator: ~
+    Timbrs\DatabaseDumps\Service\Generator\DeferredUpdateGenerator: ~
+    Timbrs\DatabaseDumps\Service\Generator\SqlGenerator: ~
 
-    # Faker interface binding
-    Timbrs\DatabaseDumps\Contract\FakerInterface:
-        class: Timbrs\DatabaseDumps\Service\Faker\RussianFaker
+    # Faker
+    Timbrs\DatabaseDumps\Service\Faker\RussianFaker: ~
 
-    # ConfigGenerator needs explicit wiring due to scalar parameters
+    # Alias: ОДИН инстанс RussianFaker используется через интерфейс
+    Timbrs\DatabaseDumps\Contract\FakerInterface: '@Timbrs\DatabaseDumps\Service\Faker\RussianFaker'
+
     Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigGenerator:
         arguments:
             $cascadeEnabled: true
             $fakerEnabled: true
             $splitBySchema: true
+            $projectDir: '%kernel.project_dir%'
 
     Timbrs\DatabaseDumps\Service\Generator\InsertGenerator:
         arguments:
@@ -63,13 +110,32 @@ services:
         arguments:
             $sampleSize: '%database_dumps.sample_size%'
 
+    # Профилирование и авто-критерии (deep-анализ)
+    Timbrs\DatabaseDumps\Service\ConfigGenerator\ColumnStatisticsInspector:
+        arguments:
+            $sampleSize: '%database_dumps.sample_size%'
+    Timbrs\DatabaseDumps\Service\ConfigGenerator\CriteriaSuggester: ~
+    Timbrs\DatabaseDumps\Service\Analysis\AnalysisReportWriter: ~
+
+    # Анализ кода через OPENCODE
+    Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+    Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor: ~
+    Timbrs\DatabaseDumps\Service\Analysis\OpencodeRunner: ~
+    Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+
+    # Sample-выборка по именованным критериям
+    Timbrs\DatabaseDumps\Service\Dumper\SelectedPkRegistry: ~
+    Timbrs\DatabaseDumps\Service\Dumper\SampleQueryBuilder: ~
+
     Timbrs\DatabaseDumps\Service\Dumper\CascadeWhereResolver:
         arguments:
             $maxDepth: '%database_dumps.max_cascade_depth%'
 
-    Timbrs\DatabaseDumps\Service\Generator\DeferredUpdateGenerator: ~
-
-    Timbrs\DatabaseDumps\Service\Importer\SchemaValidator: ~
+    Timbrs\DatabaseDumps\Service\Dumper\DataFetcher: ~
 
     Timbrs\DatabaseDumps\Service\Dumper\DatabaseDumper:
         arguments:
@@ -81,9 +147,23 @@ services:
 
     # Commands
     Timbrs\DatabaseDumps\Bridge\Symfony\Command\:
-        resource: '../Command/*'
+        resource: '../../Command/*'
         tags: ['console.command']
 
     Timbrs\DatabaseDumps\Bridge\Symfony\Command\PrepareConfigCommand:
         arguments:
+            $configPath: '%database_dumps.config_path%'
+
+    Timbrs\DatabaseDumps\Bridge\Symfony\Command\ConfigureLlmCommand:
+        arguments:
             $projectDir: '%kernel.project_dir%'
+
+    Timbrs\DatabaseDumps\Bridge\Symfony\Command\PrepareAnalysisCommand:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+            $configPath: '%database_dumps.config_path%'
+
+    Timbrs\DatabaseDumps\Bridge\Symfony\Command\ApplyAnalysisCommand:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+            $configPath: '%database_dumps.config_path%'

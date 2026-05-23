@@ -144,8 +144,9 @@ class ForeignKeyInspectorTest extends TestCase
             ],
         ];
 
+        // Новый формат: один батч-запрос возвращает schema/table/column/nullable.
         $this->connection->method('fetchAllAssociative')->willReturn([
-            ['is_nullable' => 'YES'],
+            ['table_schema' => 'public', 'table_name' => 'orders', 'column_name' => 'user_id', 'is_nullable' => 'YES'],
         ]);
 
         $inspector = new ForeignKeyInspector($this->registry);
@@ -168,7 +169,7 @@ class ForeignKeyInspectorTest extends TestCase
         ];
 
         $this->connection->method('fetchAllAssociative')->willReturn([
-            ['is_nullable' => 'NO'],
+            ['table_schema' => 'public', 'table_name' => 'orders', 'column_name' => 'user_id', 'is_nullable' => 'NO'],
         ]);
 
         $inspector = new ForeignKeyInspector($this->registry);

@@ -18,72 +18,78 @@ class MySqlPlatformTest extends TestCase
 
     public function testQuoteIdentifierUsesBackticks(): void
     {
-        $this->assertEquals('`users`', $this->platform->quoteIdentifier('users'));
-        $this->assertEquals('`my_table`', $this->platform->quoteIdentifier('my_table'));
+        $this->assertSame('`users`', $this->platform->quoteIdentifier('users'));
+        $this->assertSame('`my_table`', $this->platform->quoteIdentifier('my_table'));
+    }
+
+    public function testQuoteIdentifierEscapesBackticks(): void
+    {
+        // Защита от инъекции: внутренний backtick должен удваиваться.
+        $this->assertSame('`tab``le`', $this->platform->quoteIdentifier('tab`le'));
     }
 
     public function testGetFullTableName(): void
     {
-        $this->assertEquals('`users`.`users`', $this->platform->getFullTableName('users', 'users'));
-        $this->assertEquals('`mydb`.`orders`', $this->platform->getFullTableName('mydb', 'orders'));
+        $this->assertSame('`users`.`users`', $this->platform->getFullTableName('users', 'users'));
+        $this->assertSame('`mydb`.`orders`', $this->platform->getFullTableName('mydb', 'orders'));
     }
 
-    public function testGetTruncateStatementUsesDeleteWithForeignKeyChecks(): void
+    public function testGetTruncateStatementUsesDelete(): void
     {
         $sql = $this->platform->getTruncateStatement('users', 'users');
 
-        $this->assertStringContainsString('SET FOREIGN_KEY_CHECKS=0;', $sql);
+        // FOREIGN_KEY_CHECKS теперь управляется DatabaseImporter (try/finally на всю сессию),
+        // в SQL дампе их нет.
         $this->assertStringContainsString('DELETE FROM `users`.`users`;', $sql);
         $this->assertStringNotContainsString('TRUNCATE', $sql);
         $this->assertStringNotContainsString('CASCADE', $sql);
+        $this->assertStringNotContainsString('FOREIGN_KEY_CHECKS', $sql);
     }
 
-    public function testGetTruncateStatementDisablesForeignKeyChecksBeforeDelete(): void
+    public function testDisableEnableForeignKeysSql(): void
     {
-        $sql = $this->platform->getTruncateStatement('users', 'users');
-
-        $fkPos = strpos($sql, 'SET FOREIGN_KEY_CHECKS=0;');
-        $deletePos = strpos($sql, 'DELETE FROM');
-        $this->assertLessThan($deletePos, $fkPos);
+        $this->assertSame('SET FOREIGN_KEY_CHECKS=0', $this->platform->disableForeignKeysSql());
+        $this->assertSame('SET FOREIGN_KEY_CHECKS=1', $this->platform->enableForeignKeysSql());
     }
 
-    public function testGetSequenceResetSqlUsesAutoIncrement(): void
+    public function testGetSequenceResetSqlNoAutoIncrementColumn(): void
     {
         $connection = $this->createMock(DatabaseConnectionInterface::class);
+        $connection->method('fetchAllAssociative')->willReturn([]);
 
         $sql = $this->platform->getSequenceResetSql('users', 'users', $connection);
 
         $this->assertStringContainsString('AUTO_INCREMENT', $sql);
-        $this->assertStringContainsString('`users`.`users`', $sql);
+        $this->assertStringContainsString('не найдена', $sql);
     }
 
-    public function testGetSequenceResetSqlDoesNotContainSetval(): void
+    public function testGetSequenceResetSqlWithAutoIncrementColumn(): void
     {
         $connection = $this->createMock(DatabaseConnectionInterface::class);
+        $connection->method('fetchAllAssociative')->willReturnOnConsecutiveCalls(
+            [['column_name' => 'id']],
+            [['next_value' => 42]]
+        );
 
         $sql = $this->platform->getSequenceResetSql('users', 'users', $connection);
 
-        $this->assertStringNotContainsString('setval', $sql);
-        $this->assertStringNotContainsString('pg_get_serial_sequence', $sql);
+        $this->assertStringContainsString('ALTER TABLE `users`.`users` AUTO_INCREMENT = 42', $sql);
     }
 
-    public function testGetSequenceResetSqlReenablesForeignKeyChecks(): void
+    public function testQuoteBoolean(): void
     {
-        $connection = $this->createMock(DatabaseConnectionInterface::class);
-
-        $sql = $this->platform->getSequenceResetSql('users', 'users', $connection);
-
-        $this->assertStringContainsString('SET FOREIGN_KEY_CHECKS=1;', $sql);
+        $this->assertSame('1', $this->platform->quoteBoolean(true));
+        $this->assertSame('0', $this->platform->quoteBoolean(false));
     }
 
     public function testGetRandomFunctionSql(): void
     {
-        $this->assertEquals('RAND()', $this->platform->getRandomFunctionSql());
+        $this->assertSame('RAND()', $this->platform->getRandomFunctionSql());
     }
 
     public function testGetLimitSql(): void
     {
-        $this->assertEquals('LIMIT 100', $this->platform->getLimitSql(100));
-        $this->assertEquals('LIMIT 1', $this->platform->getLimitSql(1));
+        $this->assertSame('LIMIT 100', $this->platform->getLimitSql(100));
+        $this->assertSame('LIMIT 1', $this->platform->getLimitSql(1));
     }
 }

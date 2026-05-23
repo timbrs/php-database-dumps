@@ -3,7 +3,8 @@
 namespace Timbrs\DatabaseDumps\Service\Generator;
 
 use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
-use Timbrs\DatabaseDumps\Platform\PlatformFactory;
+use Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface;
+use Timbrs\DatabaseDumps\Contract\DatabasePlatformInterface;
 
 /**
  * Генерация INSERT statements с батчингом
@@ -18,8 +19,13 @@ class InsertGenerator
     /** @var int<1, max> */
     private $batchSize;
 
+    /** @var array<int, array{column: string, reference_table: string, reference_column: string}>|null */
+    private $deferredColumns;
+
+    /** @var array<int, array{pk_column: string, pk_value: mixed, column: string, value: mixed}> */
+    private $collectedDeferredValues = [];
+
     /**
-     * @param ConnectionRegistryInterface $registry
      * @param int $batchSize
      */
     public function __construct(ConnectionRegistryInterface $registry, $batchSize = self::DEFAULT_BATCH_SIZE)
@@ -27,12 +33,6 @@ class InsertGenerator
         $this->registry = $registry;
         $this->batchSize = max(1, (int) $batchSize);
     }
-
-    /** @var array<int, array{column: string, reference_table: string, reference_column: string}>|null */
-    private $deferredColumns;
-
-    /** @var array<int, array{pk_column: string, pk_value: mixed, column: string, value: mixed}> */
-    private $collectedDeferredValues = [];
 
     /**
      * Установить deferred-столбцы (будут заменены на NULL в INSERT)
@@ -46,8 +46,6 @@ class InsertGenerator
     }
 
     /**
-     * Получить собранные deferred-значения (после generate/generateChunks)
-     *
      * @return array<int, array{pk_column: string, pk_value: mixed, column: string, value: mixed}>
      */
     public function getCollectedDeferredValues(): array
@@ -56,174 +54,146 @@ class InsertGenerator
     }
 
     /**
-     * Сгенерировать INSERT statements с батчингом
+     * Сгенерировать INSERT statements с батчингом (целиком в строку).
      *
-     * @param string $schema
-     * @param string $table
-     * @param array<array<string, mixed>> $rows
-     * @param string|null $connectionName
-     * @return string
+     * @param iterable<array<string, mixed>> $rows массив или Generator
      */
-    public function generate(string $schema, string $table, array $rows, ?string $connectionName = null): string
+    public function generate(string $schema, string $table, iterable $rows, ?string $connectionName = null): string
     {
-        if (empty($rows)) {
-            return "-- Таблица пуста, нет данных для импорта\n";
-        }
-
-        $platform = $this->registry->getPlatform($connectionName);
-        $connection = $this->registry->getConnection($connectionName);
-
-        $fullTable = $platform->getFullTableName($schema, $table);
-        $platformName = $connection->getPlatformName();
-        $isOracle = $platformName === PlatformFactory::ORACLE || $platformName === PlatformFactory::OCI;
-
-        if ($isOracle) {
-            return $this->generateOracleInserts($fullTable, $rows, $platform, $connection);
-        }
-
-        $batches = array_chunk($rows, $this->batchSize);
         $sql = '';
-        $batchNum = 1;
-
-        foreach ($batches as $batch) {
-            $sql .= "-- Batch {$batchNum} (" . count($batch) . " rows)\n";
-            $sql .= $this->generateBatchInsert($fullTable, $batch, $platform, $connection);
-            $sql .= "\n";
-            $batchNum++;
+        foreach ($this->generateChunks($schema, $table, $rows, $connectionName) as $chunk) {
+            $sql .= $chunk;
         }
-
         return $sql;
     }
 
     /**
-     * Потоковая генерация INSERT statements по батчам (Generator для экономии памяти)
+     * Потоковая генерация INSERT statements по батчам (Generator для экономии памяти).
      *
-     * @param string $schema
-     * @param string $table
-     * @param array<array<string, mixed>> $rows
-     * @param string|null $connectionName
+     * @param iterable<array<string, mixed>> $rows массив или Generator
      * @return \Generator<string>
      */
-    public function generateChunks($schema, $table, array $rows, $connectionName = null)
+    public function generateChunks($schema, $table, iterable $rows, $connectionName = null)
     {
-        if (empty($rows)) {
-            yield "-- Таблица пуста, нет данных для импорта\n";
-            return;
-        }
-
         $platform = $this->registry->getPlatform($connectionName);
         $connection = $this->registry->getConnection($connectionName);
-
         $fullTable = $platform->getFullTableName($schema, $table);
-        $platformName = $connection->getPlatformName();
-        $isOracle = $platformName === PlatformFactory::ORACLE || $platformName === PlatformFactory::OCI;
 
-        if ($isOracle) {
-            foreach (array_chunk($rows, $this->batchSize) as $chunk) {
-                yield $this->generateOracleInserts($fullTable, $chunk, $platform, $connection);
+        $batchNum = 1;
+        $isFirstBatch = true;
+        $supportsMultiRow = $platform->supportsMultiRowInsert();
+
+        foreach ($this->batchedRows($rows) as $batch) {
+            if ($isFirstBatch && empty($batch)) {
+                yield "-- Таблица пуста, нет данных для импорта\n";
+                return;
+            }
+            $isFirstBatch = false;
+
+            if (empty($batch)) {
+                continue;
+            }
+
+            $columns = array_keys($batch[0]);
+            $deferredColumnNames = $this->getDeferredColumnNames();
+            $columnsList = $this->buildColumnsList($columns, $platform);
+
+            $header = "-- Batch {$batchNum} (" . count($batch) . " rows)\n";
+            $batchNum++;
+
+            if ($supportsMultiRow) {
+                $values = [];
+                foreach ($batch as $row) {
+                    $values[] = '(' . implode(', ', $this->escapeRow($row, $platform, $connection, $deferredColumnNames)) . ')';
+                }
+                yield $header
+                    . "INSERT INTO {$fullTable} ({$columnsList}) VALUES\n"
+                    . implode(",\n", $values) . ";\n\n";
+            } else {
+                $sql = $header;
+                foreach ($batch as $row) {
+                    $escaped = $this->escapeRow($row, $platform, $connection, $deferredColumnNames);
+                    $sql .= "INSERT INTO {$fullTable} ({$columnsList}) VALUES (" . implode(', ', $escaped) . ");\n";
+                }
+                yield $sql . "\n";
+            }
+        }
+
+        if ($isFirstBatch) {
+            yield "-- Таблица пуста, нет данных для импорта\n";
+        }
+    }
+
+    /**
+     * Разбить выборку (массив или итератор) на батчи по batchSize строк.
+     *
+     * @param iterable<array<string, mixed>> $rows
+     * @return \Generator<int, array<int, array<string, mixed>>>
+     */
+    private function batchedRows(iterable $rows): \Generator
+    {
+        if (is_array($rows)) {
+            foreach (array_chunk($rows, $this->batchSize) as $batch) {
+                yield $batch;
             }
             return;
         }
 
-        $batchNum = 1;
-        foreach (array_chunk($rows, $this->batchSize) as $batch) {
-            $sql = "-- Batch {$batchNum} (" . count($batch) . " rows)\n";
-            $sql .= $this->generateBatchInsert($fullTable, $batch, $platform, $connection);
-            $sql .= "\n";
-            yield $sql;
-            $batchNum++;
-        }
-    }
-
-    /**
-     * Сгенерировать INSERT для одного батча
-     *
-     * @param string $fullTable
-     * @param array<array<string, mixed>> $rows
-     * @param \Timbrs\DatabaseDumps\Contract\DatabasePlatformInterface $platform
-     * @param \Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface $connection
-     * @return string
-     */
-    private function generateBatchInsert(string $fullTable, array $rows, $platform, $connection): string
-    {
-        if (empty($rows)) {
-            return '';
-        }
-
-        $columns = array_keys($rows[0]);
-        $deferredColumnNames = $this->getDeferredColumnNames();
-        $columnsList = implode(', ', array_map(function ($col) use ($platform) {
-            return $platform->quoteIdentifier($col);
-        }, $columns));
-
-        $sql = "INSERT INTO {$fullTable} ({$columnsList}) VALUES\n";
-
-        $values = [];
+        $buffer = [];
         foreach ($rows as $row) {
-            $escapedValues = [];
-            foreach ($row as $col => $value) {
-                if (isset($deferredColumnNames[$col])) {
-                    // Deferred-столбец: вставляем NULL, сохраняем оригинальное значение
-                    $this->collectDeferredValue($row, $col, $value);
-                    $escapedValues[] = 'NULL';
-                } elseif ($value === null) {
-                    $escapedValues[] = 'NULL';
-                } elseif (is_bool($value)) {
-                    $escapedValues[] = $value ? 'TRUE' : 'FALSE';
-                } else {
-                    $escapedValues[] = $connection->quote($value);
-                }
+            $buffer[] = $row;
+            if (count($buffer) >= $this->batchSize) {
+                yield $buffer;
+                $buffer = [];
             }
-            $values[] = '(' . implode(', ', $escapedValues) . ')';
         }
-
-        $sql .= implode(",\n", $values) . ";\n";
-
-        return $sql;
+        if (!empty($buffer)) {
+            yield $buffer;
+        }
     }
 
     /**
-     * Сгенерировать отдельный INSERT на каждую строку (Oracle не поддерживает multi-row INSERT)
-     *
-     * @param string $fullTable
-     * @param array<array<string, mixed>> $rows
-     * @param \Timbrs\DatabaseDumps\Contract\DatabasePlatformInterface $platform
-     * @param \Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface $connection
-     * @return string
+     * @param array<int, string> $columns
      */
-    private function generateOracleInserts(string $fullTable, array $rows, $platform, $connection): string
+    private function buildColumnsList(array $columns, DatabasePlatformInterface $platform): string
     {
-        $columns = array_keys($rows[0]);
-        $deferredColumnNames = $this->getDeferredColumnNames();
-        $columnsList = implode(', ', array_map(function ($col) use ($platform) {
-            return $platform->quoteIdentifier($col);
-        }, $columns));
-
-        $sql = "-- " . count($rows) . " rows\n";
-
-        foreach ($rows as $row) {
-            $escapedValues = [];
-            foreach ($row as $col => $value) {
-                if (isset($deferredColumnNames[$col])) {
-                    $this->collectDeferredValue($row, $col, $value);
-                    $escapedValues[] = 'NULL';
-                } elseif ($value === null) {
-                    $escapedValues[] = 'NULL';
-                } elseif (is_bool($value)) {
-                    $escapedValues[] = $value ? 'TRUE' : 'FALSE';
-                } else {
-                    $escapedValues[] = $connection->quote($value);
-                }
-            }
-            $sql .= "INSERT INTO {$fullTable} ({$columnsList}) VALUES (" . implode(', ', $escapedValues) . ");\n";
+        $parts = [];
+        foreach ($columns as $col) {
+            $parts[] = $platform->quoteIdentifier($col);
         }
-
-        return $sql;
+        return implode(', ', $parts);
     }
 
     /**
-     * Получить map имён deferred-столбцов
+     * Экранировать одну строку, учитывая deferred-столбцы и платформо-зависимый boolean.
      *
+     * @param array<string, mixed> $row
+     * @param array<string, true> $deferredColumnNames
+     * @return array<int, string>
+     */
+    private function escapeRow(
+        array $row,
+        DatabasePlatformInterface $platform,
+        DatabaseConnectionInterface $connection,
+        array $deferredColumnNames
+    ): array {
+        $escaped = [];
+        foreach ($row as $col => $value) {
+            if (isset($deferredColumnNames[$col])) {
+                $this->collectDeferredValue($row, $col, $value);
+                $escaped[] = 'NULL';
+            } elseif ($value === null) {
+                $escaped[] = 'NULL';
+            } elseif (is_bool($value)) {
+                $escaped[] = $platform->quoteBoolean($value);
+            } else {
+                $escaped[] = $connection->quote($value);
+            }
+        }
+        return $escaped;
+    }
+
+    /**
      * @return array<string, true>
      */
     private function getDeferredColumnNames(): array
@@ -239,19 +209,19 @@ class InsertGenerator
     }
 
     /**
-     * Сохранить оригинальное значение deferred-столбца для последующего UPDATE
+     * Сохранить оригинальное значение deferred-столбца для последующего UPDATE.
      *
      * @param array<string, mixed> $row
-     * @param string $col
      * @param mixed $value
      */
     private function collectDeferredValue(array $row, string $col, $value): void
     {
         if ($value === null) {
-            return; // Уже NULL — UPDATE не нужен
+            return;
         }
 
-        // Определяем PK-столбец: берём первый столбец строки (convention: id)
+        // PK: первый столбец строки (по соглашению — id).
+        // Если PK иной, нужна доработка через TableInspector — см. документацию.
         $columns = array_keys($row);
         $pkColumn = $columns[0];
 

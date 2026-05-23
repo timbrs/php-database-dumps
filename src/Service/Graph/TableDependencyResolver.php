@@ -4,6 +4,20 @@ namespace Timbrs\DatabaseDumps\Service\Graph;
 
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ForeignKeyInspector;
 
+/**
+ * Резолвер FK-зависимостей.
+ *
+ * Семантика порядка:
+ * - sortForExport — родители впереди (для генерации дампа: чтобы при импорте
+ *   родительские строки уже существовали к моменту INSERT детей).
+ * - sortForImport — то же самое (parents first), так как INSERT детей нуждается
+ *   в существующих родителях; TRUNCATE/DELETE для MySQL/Oracle делаются
+ *   с временно отключёнными FK-checks, для PG — через CASCADE.
+ *
+ * Циклы FK разрываются автоматически через TopologicalSorter::sortWithCycleBreaking
+ * (предпочитая разорвать nullable-рёбра — они потом восстанавливаются через
+ * DeferredUpdateGenerator после основного INSERT).
+ */
 class TableDependencyResolver
 {
     /** @var ForeignKeyInspector */
@@ -22,44 +36,45 @@ class TableDependencyResolver
     }
 
     /**
-     * Sort table keys for export (parents first).
+     * Универсальный метод сортировки.
      *
      * @param array<string> $tableKeys "schema.table" keys
-     * @return array<string> sorted
      */
-    public function sortForExport(array $tableKeys, ?string $connectionName = null): array
+    public function sort(array $tableKeys, ?string $connectionName = null): SortResult
     {
-        $result = $this->sortTablesWithCycleBreaking($tableKeys, $connectionName);
-        return $result->getSorted();
+        return $this->sortTablesWithCycleBreaking($tableKeys, $connectionName);
     }
 
     /**
-     * Sort table keys for import (same: parents first).
+     * @param array<string> $tableKeys
+     * @return array<string>
+     */
+    public function sortForExport(array $tableKeys, ?string $connectionName = null): array
+    {
+        return $this->sort($tableKeys, $connectionName)->getSorted();
+    }
+
+    /**
+     * Импорт — тот же порядок (родители первыми), поскольку INSERT детей
+     * требует существующих родителей.
      *
      * @param array<string> $tableKeys
      * @return array<string>
      */
     public function sortForImport(array $tableKeys, ?string $connectionName = null): array
     {
-        $result = $this->sortTablesWithCycleBreaking($tableKeys, $connectionName);
-        return $result->getSorted();
+        return $this->sortForExport($tableKeys, $connectionName);
     }
 
     /**
-     * Sort table keys with cycle breaking, returning full SortResult.
-     *
-     * @param array<string> $tableKeys "schema.table" keys
-     * @return SortResult
+     * @param array<string> $tableKeys
      */
     public function sortForExportWithResult(array $tableKeys, ?string $connectionName = null): SortResult
     {
-        return $this->sortTablesWithCycleBreaking($tableKeys, $connectionName);
+        return $this->sort($tableKeys, $connectionName);
     }
 
     /**
-     * Get full dependency graph.
-     * key = "child_schema.child_table", value = map of "parent_schema.parent_table" => {source_column, target_column}
-     *
      * @return array<string, array<string, array{source_column: string, target_column: string}>>
      */
     public function getDependencyGraph(?string $connectionName = null): array
@@ -90,8 +105,6 @@ class TableDependencyResolver
     }
 
     /**
-     * Get cascade_from candidates for a child table.
-     *
      * @return array<int, array{parent: string, fk_column: string, parent_column: string}>
      */
     public function getCascadeFromCandidates(string $childSchema, string $childTable, ?string $connectionName = null): array
@@ -117,55 +130,57 @@ class TableDependencyResolver
 
     /**
      * @param array<string> $tableKeys
-     * @return SortResult
      */
     private function sortTablesWithCycleBreaking(array $tableKeys, ?string $connectionName): SortResult
     {
         $graph = $this->getDependencyGraph($connectionName);
         $fks = $this->fkInspector->getForeignKeys($connectionName);
 
-        // Build adjacency: only include edges where BOTH nodes are in $tableKeys
         $tableKeySet = array_flip($tableKeys);
         $adjacency = [];
         $edgeDetails = [];
 
-        // Init all nodes
         foreach ($tableKeys as $key) {
             $adjacency[$key] = [];
         }
 
-        // Add edges (child depends on parent, but only if parent is also in the set)
         foreach ($tableKeys as $childKey) {
-            if (isset($graph[$childKey])) {
-                foreach ($graph[$childKey] as $parentKey => $columns) {
-                    if (isset($tableKeySet[$parentKey])) {
-                        $adjacency[$childKey][] = $parentKey;
-                        if (!isset($edgeDetails[$childKey])) {
-                            $edgeDetails[$childKey] = [];
-                        }
-                        $edgeDetails[$childKey][$parentKey] = $columns;
-                    }
+            if (!isset($graph[$childKey])) {
+                continue;
+            }
+            foreach ($graph[$childKey] as $parentKey => $columns) {
+                if (!isset($tableKeySet[$parentKey])) {
+                    continue;
                 }
+                // Дедуп — несколько FK на одного родителя не должны давать дубль ребра
+                if (!in_array($parentKey, $adjacency[$childKey], true)) {
+                    $adjacency[$childKey][] = $parentKey;
+                }
+                if (!isset($edgeDetails[$childKey])) {
+                    $edgeDetails[$childKey] = [];
+                }
+                $edgeDetails[$childKey][$parentKey] = $columns;
             }
         }
 
-        // Build nullable edges map
         $nullability = $this->fkInspector->getForeignKeyNullability($fks, $connectionName);
         $nullableEdges = [];
         foreach ($tableKeys as $childKey) {
-            if (isset($graph[$childKey])) {
-                foreach ($graph[$childKey] as $parentKey => $columns) {
-                    if (isset($tableKeySet[$parentKey])) {
-                        // Ищем FK в списке: schema.table.column
-                        $parts = explode('.', $childKey, 2);
-                        if (count($parts) === 2) {
-                            $nullKey = $parts[0] . '.' . $parts[1] . '.' . $columns['source_column'];
-                            $edgeKey = $childKey . '->' . $parentKey;
-                            if (isset($nullability[$nullKey])) {
-                                $nullableEdges[$edgeKey] = $nullability[$nullKey];
-                            }
-                        }
-                    }
+            if (!isset($graph[$childKey])) {
+                continue;
+            }
+            foreach ($graph[$childKey] as $parentKey => $columns) {
+                if (!isset($tableKeySet[$parentKey])) {
+                    continue;
+                }
+                $parts = explode('.', $childKey, 2);
+                if (count($parts) !== 2) {
+                    continue;
+                }
+                $nullKey = $parts[0] . '.' . $parts[1] . '.' . $columns['source_column'];
+                $edgeKey = $childKey . '->' . $parentKey;
+                if (isset($nullability[$nullKey])) {
+                    $nullableEdges[$edgeKey] = $nullability[$nullKey];
                 }
             }
         }

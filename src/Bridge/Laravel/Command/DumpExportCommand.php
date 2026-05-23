@@ -2,36 +2,31 @@
 
 namespace Timbrs\DatabaseDumps\Bridge\Laravel\Command;
 
+use Illuminate\Console\Command;
 use Timbrs\DatabaseDumps\Bridge\Laravel\LaravelLogger;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\Dumper\DatabaseDumper;
 use Timbrs\DatabaseDumps\Service\Dumper\TableConfigResolver;
-use Illuminate\Console\Command;
 
 class DumpExportCommand extends Command
 {
     /** @var string */
-    protected $signature = 'dbdump:export {table? : Имя таблицы (schema.table) или "all"} {--schema= : Фильтр по схеме для "all"} {--connection= : Имя подключения (или "all" для всех)} {--no-cascade : Пропустить каскадную фильтрацию WHERE} {--no-faker : Пропустить замену персональных данных} {--dry-run : Показать план экспорта без реального выполнения}';
+    protected $signature = 'dbdump:export'
+        . ' {table? : Имя таблицы (schema.table) или "all"}'
+        . ' {--s|schema= : Фильтр по схеме для "all"}'
+        . ' {--c|connection= : Имя подключения (или "all")}'
+        . ' {--no-cascade : Пропустить каскадную фильтрацию WHERE}'
+        . ' {--no-faker : Пропустить замену ПД}'
+        . ' {--dry-run : Показать план экспорта без выполнения}'
+        . ' {--allow-prod-export : Разрешить экспорт на production}';
 
     /** @var string */
     protected $description = 'Экспорт SQL дампа таблицы из БД';
 
-    /** @var string */
-    protected $help = <<<'HELP'
-Примеры:
-  php artisan dbdump:export public.users              Экспорт таблицы users из схемы public
-  php artisan dbdump:export all                       Экспорт всех настроенных таблиц
-  php artisan dbdump:export all --schema=public       Экспорт таблиц схемы public
-  php artisan dbdump:export all --connection=secondary Экспорт из подключения secondary
-  php artisan dbdump:export all --connection=all      Экспорт из всех подключений
-HELP;
-
     /** @var DatabaseDumper */
     private $dumper;
-
     /** @var TableConfigResolver */
     private $configResolver;
-
     /** @var LoggerInterface */
     private $logger;
 
@@ -47,12 +42,14 @@ HELP;
     {
         $this->setupLogger();
 
-        /** @var string|null $table */
-        $table = $this->argument('table');
+        if ($this->option('allow-prod-export')) {
+            $this->dumper->setAllowProdExport(true);
+        }
 
+        $table = $this->argument('table');
         if ($table === null) {
             $this->showUsage();
-            return self::SUCCESS;
+            return self::FAILURE;
         }
 
         if ($table === 'all') {
@@ -65,27 +62,19 @@ HELP;
     private function showUsage(): void
     {
         $this->line('');
-        $this->line('<info>Использование:</info>');
-        $this->line('  export <comment><schema.table></comment>    Экспорт одной таблицы');
-        $this->line('  export <comment>all</comment>               Экспорт всех таблиц из конфигурации');
+        $this->line('Использование:');
+        $this->line('  export <schema.table>    Экспорт одной таблицы');
+        $this->line('  export all               Экспорт всех таблиц');
         $this->line('');
-        $this->line('<info>Примеры:</info>');
-        $this->line('  export <comment>public.users</comment>              — Экспорт таблицы users из схемы public');
-        $this->line('  export <comment>all</comment>                       — Экспорт всех настроенных таблиц');
-        $this->line('  export <comment>all --schema=public</comment>       — Экспорт таблиц схемы public');
-        $this->line('  export <comment>all --connection=secondary</comment> — Экспорт из подключения secondary');
-        $this->line('');
-        $this->line('<info>Опции:</info>');
-        $this->line('  <comment>-s, --schema=SCHEMA</comment>           Фильтр по схеме (для "all")');
-        $this->line('  <comment>-c, --connection=CONNECTION</comment>   Имя подключения (или "all" для всех)');
-        $this->line('  <comment>-h, --help</comment>                    Вывод справки');
+        $this->line('Опции:');
+        $this->line('  -s, --schema=SCHEMA          Фильтр по схеме (для "all")');
+        $this->line('  -c, --connection=CONN        Имя подключения (или "all")');
+        $this->line('  --allow-prod-export          Разрешить экспорт с production');
     }
 
     private function exportAll(): int
     {
-        /** @var string|null $schemaFilter */
         $schemaFilter = $this->option('schema');
-        /** @var string|null $connectionFilter */
         $connectionFilter = $this->option('connection');
 
         try {
@@ -108,15 +97,12 @@ HELP;
             $duration = round(microtime(true) - $startTime, 2);
             $totalTables = count($tables);
             $this->info("Экспортировано таблиц: {$totalTables} за {$duration} сек");
-
             return self::SUCCESS;
         } catch (\Exception $e) {
             $this->error('Ошибка экспорта: ' . $e->getMessage());
-
             if ($this->getOutput()->isVerbose()) {
                 $this->line('Трейс: ' . $e->getTraceAsString());
             }
-
             return self::FAILURE;
         }
     }
@@ -127,50 +113,34 @@ HELP;
     private function dryRun(array $tables): int
     {
         $this->info('Dry-run: план экспорта');
-        $this->line('');
-
         $headers = ['Таблица', 'Режим', 'WHERE', 'Cascade'];
         $rows = [];
         foreach ($tables as $config) {
             $mode = $config->isFullExport() ? 'full' : 'partial (limit ' . $config->getLimit() . ')';
             $where = $config->getWhere() ?? '-';
             $cascade = $config->getCascadeFrom() !== null ? count($config->getCascadeFrom()) . ' связей' : '-';
-
-            $rows[] = [
-                $config->getFullTableName(),
-                $mode,
-                $where,
-                $cascade,
-            ];
+            $rows[] = [$config->getFullTableName(), $mode, $where, $cascade];
         }
-
         $this->table($headers, $rows);
         $this->info('Всего таблиц: ' . count($tables));
-
         return self::SUCCESS;
     }
 
     private function exportTable(string $fullTableName): int
     {
         if (strpos($fullTableName, '.') === false) {
-            $this->error('Неверный формат таблицы. Используйте формат: schema.table');
+            $this->error('Неверный формат таблицы. Используйте: schema.table');
             return self::FAILURE;
         }
 
-        /** @var string|null $connectionFilter */
         $connectionFilter = $this->option('connection');
-
-        /** @var array{0: string, 1: string} $parts */
-        $parts = explode('.', $fullTableName, 2);
-        $schema = $parts[0];
-        $table = $parts[1];
+        [$schema, $table] = explode('.', $fullTableName, 2);
 
         $this->line("Экспорт: {$fullTableName}");
 
         try {
             $config = $this->configResolver->resolve($schema, $table, $connectionFilter);
             $this->dumper->exportTable($config);
-
             return self::SUCCESS;
         } catch (\Exception $e) {
             $this->error('Ошибка: ' . $e->getMessage());
@@ -181,9 +151,9 @@ HELP;
     private function setupLogger(): void
     {
         if ($this->logger instanceof LaravelLogger) {
-            $command = $this;
-            $this->logger->setOutputCallback(function ($message) use ($command) {
-                $command->line($message);
+            $cmd = $this;
+            $this->logger->setOutputCallback(function ($message) use ($cmd) {
+                $cmd->line($message);
             });
         }
     }

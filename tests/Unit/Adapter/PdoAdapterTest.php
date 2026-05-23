@@ -57,10 +57,23 @@ class PdoAdapterTest extends TestCase
         $pdo = $this->createPdoMock('mysql');
         $pdo->expects($this->once())
             ->method('exec')
-            ->with('DELETE FROM users');
+            ->with('DELETE FROM users')
+            ->willReturn(0); // успех (0 rows affected)
 
         $adapter = new PdoAdapter($pdo);
         $adapter->executeStatement('DELETE FROM users');
+    }
+
+    public function testExecuteStatementThrowsOnFalseReturn(): void
+    {
+        $pdo = $this->createPdoMock('mysql');
+        $pdo->method('exec')->willReturn(false);
+        $pdo->method('errorInfo')->willReturn(['HY000', 1, 'syntax error']);
+
+        $adapter = new PdoAdapter($pdo);
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessageMatches('/syntax error/');
+        $adapter->executeStatement('BAD SQL');
     }
 
     public function testFetchAllAssociative(): void

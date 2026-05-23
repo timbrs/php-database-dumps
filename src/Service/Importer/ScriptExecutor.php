@@ -8,6 +8,7 @@ use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Platform\PlatformFactory;
 use Timbrs\DatabaseDumps\Service\Parser\SqlParser;
+// PlatformFactory::canonicalize нормализует имя платформы (mariadb→mysql, oci→oracle и т.п.)
 
 /**
  * Выполнение before/after exec SQL скриптов
@@ -64,9 +65,8 @@ class ScriptExecutor
         // Сортировка для предсказуемого порядка выполнения
         sort($files);
 
-        $platformName = $connection->getPlatformName();
-        $backslashEscapes = $platformName === PlatformFactory::MYSQL
-            || $platformName === PlatformFactory::MARIADB;
+        $platformName = PlatformFactory::canonicalize($connection->getPlatformName());
+        $backslashEscapes = $platformName === PlatformFactory::MYSQL;
 
         $total = count($files);
         $current = 0;
@@ -98,7 +98,10 @@ class ScriptExecutor
 
             $this->logger->info("[{$current}/{$total}] {$filename} ... OK");
         } catch (\Exception $e) {
-            $this->logger->error("[{$current}/{$total}] {$filename} ... ERROR: " . $e->getMessage());
+            $this->logger->error(
+                "[{$current}/{$total}] {$filename} ... ERROR: "
+                . \Timbrs\DatabaseDumps\Util\ErrorMessageSanitizer::sanitize($e->getMessage())
+            );
             throw $e;
         }
     }

@@ -10,60 +10,97 @@ class EnvironmentConfigTest extends TestCase
     public function testDevelopmentEnvironment(): void
     {
         $config = new EnvironmentConfig('dev');
-
-        $this->assertEquals('dev', $config->getCurrentEnv());
-        $this->assertTrue($config->isDevelopment());
+        $this->assertSame('dev', $config->getCurrentEnv());
         $this->assertFalse($config->isProduction());
-        $this->assertFalse($config->isTest());
     }
 
     public function testProductionEnvironment(): void
     {
         $config = new EnvironmentConfig('prod');
-
-        $this->assertEquals('prod', $config->getCurrentEnv());
+        $this->assertSame('prod', $config->getCurrentEnv());
         $this->assertTrue($config->isProduction());
-        $this->assertFalse($config->isDevelopment());
-        $this->assertFalse($config->isTest());
+    }
+
+    public function testProductionEnvironmentLaravelStyle(): void
+    {
+        $config = new EnvironmentConfig('production');
+        $this->assertTrue($config->isProduction());
     }
 
     public function testPredprodEnvironment(): void
     {
         $config = new EnvironmentConfig('predprod');
-
-        $this->assertEquals('predprod', $config->getCurrentEnv());
         $this->assertTrue($config->isProduction());
-        $this->assertFalse($config->isDevelopment());
-        $this->assertFalse($config->isTest());
+    }
+
+    public function testNormalizationCaseInsensitive(): void
+    {
+        $config = new EnvironmentConfig('PROD');
+        $this->assertTrue($config->isProduction());
+        $this->assertSame('prod', $config->getCurrentEnv());
+    }
+
+    public function testNormalizationTrimsWhitespace(): void
+    {
+        $config = new EnvironmentConfig(' prod ');
+        $this->assertTrue($config->isProduction());
+        $this->assertSame('prod', $config->getCurrentEnv());
     }
 
     public function testTestEnvironment(): void
     {
         $config = new EnvironmentConfig('test');
-
-        $this->assertEquals('test', $config->getCurrentEnv());
-        $this->assertTrue($config->isTest());
+        $this->assertSame('test', $config->getCurrentEnv());
         $this->assertFalse($config->isProduction());
-        $this->assertFalse($config->isDevelopment());
+    }
+
+    public function testCustomProductionEnvs(): void
+    {
+        $config = new EnvironmentConfig('myprod', ['myprod']);
+        $this->assertTrue($config->isProduction());
     }
 
     public function testFromEnv(): void
     {
+        $original = getenv('APP_ENV');
+
+        putenv('APP_ENV=test');
         $_ENV['APP_ENV'] = 'test';
+        $_SERVER['APP_ENV'] = 'test';
 
         $config = EnvironmentConfig::fromEnv();
+        $this->assertSame('test', $config->getCurrentEnv());
+        $this->assertFalse($config->isProduction());
 
-        $this->assertEquals('test', $config->getCurrentEnv());
-        $this->assertTrue($config->isTest());
+        if ($original === false) {
+            putenv('APP_ENV');
+        } else {
+            putenv('APP_ENV=' . $original);
+        }
     }
 
-    public function testFromEnvUsesExistingValue(): void
+    public function testFromEnvFailsClosedWhenMissing(): void
     {
-        // В контексте PHPUnit тестов APP_ENV уже установлен в 'test' через phpunit.xml
-        // Поэтому проверяем что fromEnv() корректно читает существующее значение
-        $config = EnvironmentConfig::fromEnv();
+        $original = getenv('APP_ENV');
+        $origServer = $_SERVER['APP_ENV'] ?? null;
+        $origEnv = $_ENV['APP_ENV'] ?? null;
 
-        $this->assertNotEmpty($config->getCurrentEnv());
-        $this->assertContains($config->getCurrentEnv(), ['dev', 'test', 'prod', 'predprod']);
+        putenv('APP_ENV');
+        unset($_ENV['APP_ENV']);
+        unset($_SERVER['APP_ENV']);
+
+        $config = EnvironmentConfig::fromEnv();
+        // Fail-closed: при отсутствии APP_ENV считаем prod
+        $this->assertTrue($config->isProduction());
+
+        if ($original !== false) {
+            putenv('APP_ENV=' . $original);
+        }
+        if ($origServer !== null) {
+            $_SERVER['APP_ENV'] = $origServer;
+        }
+        if ($origEnv !== null) {
+            $_ENV['APP_ENV'] = $origEnv;
+        }
     }
 }

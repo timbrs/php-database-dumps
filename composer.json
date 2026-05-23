@@ -1,6 +1,6 @@
 {
     "name": "timbrs/database-dumps",
-    "description": "Framework-agnostic PHP package for managing database dumps with SQL exports/imports, supporting PostgreSQL and MySQL",
+    "description": "Framework-agnostic PHP package for managing database dumps with SQL exports/imports, supporting PostgreSQL, MySQL and Oracle",
     "type": "library",
     "license": "MIT",
     "keywords": [
@@ -11,6 +11,7 @@
         "sql",
         "postgresql",
         "mysql",
+        "oracle",
         "symfony",
         "laravel"
     ],
@@ -21,6 +22,7 @@
     ],
     "require": {
         "php": "^7.2|^8.0",
+        "ext-json": "*",
         "symfony/finder": "^4.4|^5.4|^6.0|^7.0",
         "symfony/yaml": "^4.4|^5.4|^6.0|^7.0"
     },
@@ -38,6 +40,7 @@
         "symfony/http-kernel": "^4.4|^5.4|^6.0|^7.0"
     },
     "suggest": {
+        "ext-curl": "Required for the optional LLM analysis features (prepare-config --ai / --deep); not needed for plain export/import",
         "doctrine/dbal": "Required for DoctrineDbalAdapter",
         "illuminate/console": "Required for Laravel artisan commands",
         "illuminate/database": "Required for LaravelDatabaseAdapter",

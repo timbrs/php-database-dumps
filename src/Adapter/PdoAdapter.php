@@ -19,46 +19,105 @@ class PdoAdapter implements DatabaseConnectionInterface
     public function __construct(\PDO $pdo)
     {
         $this->pdo = $pdo;
-        $this->driverName = $pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
-    }
-
-    public function executeStatement(string $sql): void
-    {
-        $this->pdo->exec($sql);
+        $this->driverName = (string) $pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
     }
 
     /**
+     * @param array<string, mixed> $params
+     */
+    public function executeStatement(string $sql, array $params = []): void
+    {
+        if (empty($params)) {
+            // PDO::exec возвращает int (rows affected) или false при ошибке.
+            // Под ERRMODE_EXCEPTION ошибка кинет PDOException, но под SILENT/WARNING
+            // вернётся false — поэтому явно проверяем.
+            $result = $this->pdo->exec($sql);
+            if ($result === false) {
+                $err = $this->pdo->errorInfo();
+                $msg = isset($err[2]) && $err[2] !== null ? $err[2] : 'unknown PDO error';
+                throw new \RuntimeException('executeStatement failed: ' . $msg);
+            }
+            return;
+        }
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        $stmt->closeCursor();
+    }
+
+    /**
+     * @param array<string, mixed> $params
      * @return array<int, array<string, mixed>>
      */
-    public function fetchAllAssociative(string $sql): array
+    public function fetchAllAssociative(string $sql, array $params = []): array
     {
-        $stmt = $this->pdo->query($sql);
+        $stmt = empty($params) ? $this->pdo->query($sql) : $this->prepareAndExecute($sql, $params);
         if ($stmt === false) {
             return [];
         }
-        $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
 
-        if ($this->driverName === 'pgsql' && !empty($rows)) {
-            $rows = BooleanNormalizer::normalize($stmt, $rows);
+        try {
+            $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+
+            if ($this->driverName === 'pgsql' && !empty($rows)) {
+                $rows = BooleanNormalizer::normalize($stmt, $rows);
+            }
+
+            if ($this->driverName === 'oci') {
+                $rows = $this->normalizeOracleRows($rows);
+            }
+
+            return $rows;
+        } finally {
+            $stmt->closeCursor();
         }
-
-        if ($this->driverName === 'oci') {
-            return array_map(function (array $row) {
-                $normalized = array_change_key_case($row, CASE_LOWER);
-                foreach ($normalized as $key => $value) {
-                    if (is_resource($value)) {
-                        $normalized[$key] = stream_get_contents($value);
-                    }
-                }
-                return $normalized;
-            }, $rows);
-        }
-
-        return $rows;
     }
 
     /**
-     * @param array<mixed> $params
+     * @param array<string, mixed> $params
+     * @return \Generator<int, array<string, mixed>>
+     */
+    public function iterateAssociative(string $sql, array $params = []): \Generator
+    {
+        $stmt = empty($params) ? $this->pdo->query($sql) : $this->prepareAndExecute($sql, $params);
+        if ($stmt === false) {
+            return;
+        }
+
+        // Для PG нужны метаданные для нормализации boolean. Снимем один раз.
+        $boolColumns = [];
+        if ($this->driverName === 'pgsql') {
+            $columnCount = $stmt->columnCount();
+            for ($i = 0; $i < $columnCount; $i++) {
+                $meta = $stmt->getColumnMeta($i);
+                if ($meta !== false && isset($meta['native_type']) && $meta['native_type'] === 'bool') {
+                    $boolColumns[] = $meta['name'];
+                }
+            }
+        }
+
+        try {
+            while (($row = $stmt->fetch(\PDO::FETCH_ASSOC)) !== false) {
+                if (!empty($boolColumns)) {
+                    foreach ($boolColumns as $col) {
+                        if (array_key_exists($col, $row) && $row[$col] !== null) {
+                            $row[$col] = ($row[$col] === 't' || $row[$col] === true
+                                || $row[$col] === '1' || $row[$col] === 1);
+                        }
+                    }
+                }
+                if ($this->driverName === 'oci') {
+                    $row = $this->normalizeOracleRow($row);
+                }
+                yield $row;
+            }
+        } finally {
+            $stmt->closeCursor();
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $params
      * @return array<int, mixed>
      */
     public function fetchFirstColumn(string $sql, array $params = []): array
@@ -66,11 +125,28 @@ class PdoAdapter implements DatabaseConnectionInterface
         $stmt = $this->pdo->prepare($sql);
         $stmt->execute($params);
 
-        return $stmt->fetchAll(\PDO::FETCH_COLUMN);
+        try {
+            return $stmt->fetchAll(\PDO::FETCH_COLUMN);
+        } finally {
+            $stmt->closeCursor();
+        }
     }
 
+    /**
+     * @param mixed $value
+     */
     public function quote($value): string
     {
+        if ($value === null) {
+            return 'NULL';
+        }
+        if (is_bool($value)) {
+            return $value ? '1' : '0';
+        }
+        if (is_int($value) || is_float($value)) {
+            return (string) $value;
+        }
+
         return $this->pdo->quote((string) $value);
     }
 
@@ -106,5 +182,39 @@ class PdoAdapter implements DatabaseConnectionInterface
             default:
                 return $this->driverName;
         }
+    }
+
+    /**
+     * @param array<string, mixed> $params
+     */
+    private function prepareAndExecute(string $sql, array $params): \PDOStatement
+    {
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        return $stmt;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $rows
+     * @return array<int, array<string, mixed>>
+     */
+    private function normalizeOracleRows(array $rows): array
+    {
+        return array_map([$this, 'normalizeOracleRow'], $rows);
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     * @return array<string, mixed>
+     */
+    private function normalizeOracleRow(array $row): array
+    {
+        $normalized = array_change_key_case($row, CASE_LOWER);
+        foreach ($normalized as $key => $value) {
+            if (is_resource($value)) {
+                $normalized[$key] = stream_get_contents($value);
+            }
+        }
+        return $normalized;
     }
 }

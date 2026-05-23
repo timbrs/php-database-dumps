@@ -32,6 +32,21 @@ class ConfigSplitter
         $configDir = dirname($mainConfigPath);
         $schemas = $this->collectSchemas($config);
 
+        // Валидация имён схем/connection (защита от path traversal через имена в БД/YAML).
+        foreach ($schemas as $schema) {
+            $this->validateName('schema', $schema);
+        }
+        if (isset($config[DumpConfig::KEY_CONNECTIONS]) && is_array($config[DumpConfig::KEY_CONNECTIONS])) {
+            foreach (array_keys($config[DumpConfig::KEY_CONNECTIONS]) as $connName) {
+                $this->validateName('connection', (string) $connName);
+                if (is_array($config[DumpConfig::KEY_CONNECTIONS][$connName])) {
+                    foreach ($this->collectSchemas($config[DumpConfig::KEY_CONNECTIONS][$connName]) as $s) {
+                        $this->validateName('schema', $s);
+                    }
+                }
+            }
+        }
+
         if (empty($schemas)) {
             $this->fileSystem->write($mainConfigPath, Yaml::dump($config, 4, 2));
             return;
@@ -135,6 +150,18 @@ class ConfigSplitter
         }
 
         return array_keys($schemas);
+    }
+
+    /**
+     * Защита от path traversal: имена схем/подключений должны быть простыми идентификаторами.
+     */
+    private function validateName(string $context, string $name): void
+    {
+        if ($name === '' || !preg_match('/^[A-Za-z_][A-Za-z0-9_$]*$/', $name)) {
+            throw new \InvalidArgumentException(
+                sprintf('ConfigSplitter: invalid %s name "%s" (must match [A-Za-z_][A-Za-z0-9_$]*)', $context, $name)
+            );
+        }
     }
 
     /**

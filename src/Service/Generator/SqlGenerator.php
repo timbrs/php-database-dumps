@@ -31,63 +31,34 @@ class SqlGenerator
     }
 
     /**
-     * Сгенерировать полный SQL дамп таблицы
+     * Сгенерировать полный SQL дамп таблицы.
      *
-     * @param TableConfig $config
      * @param array<array<string, mixed>> $rows
-     * @param string|null $fetchQuery SQL-запрос, использованный для выборки данных
-     * @return string
      */
     public function generate(TableConfig $config, array $rows, ?string $fetchQuery = null): string
     {
-        $schema = $config->getSchema();
-        $table = $config->getTable();
-        $connectionName = $config->getConnectionName();
-        $deferredColumns = $config->getDeferredColumns();
-
-        $sql = $this->buildHeader($config, count($rows), $fetchQuery);
-
-        // TRUNCATE
-        $sql .= $this->truncateGenerator->generate($schema, $table, $connectionName);
-        $sql .= "\n";
-
-        // INSERT (с NULL для deferred-столбцов)
-        $this->insertGenerator->setDeferredColumns($deferredColumns);
-        $sql .= $this->insertGenerator->generate($schema, $table, $rows, $connectionName);
-
-        // Sequence reset
-        $sql .= $this->sequenceGenerator->generate($schema, $table, $connectionName);
-
-        // Deferred UPDATE (восстановление FK-столбцов после разрыва цикла)
-        if ($deferredColumns !== null && $this->deferredUpdateGenerator !== null) {
-            $deferredValues = $this->insertGenerator->getCollectedDeferredValues();
-            $sql .= $this->deferredUpdateGenerator->generate(
-                $schema, $table, $deferredColumns, $deferredValues, $connectionName
-            );
+        $sql = '';
+        foreach ($this->generateChunks($config, $rows, $fetchQuery, count($rows)) as $chunk) {
+            $sql .= $chunk;
         }
-
-        $this->insertGenerator->setDeferredColumns(null);
-
         return $sql;
     }
 
     /**
-     * Потоковая генерация SQL дампа таблицы (Generator для экономии памяти)
+     * Потоковая генерация SQL дампа.
      *
-     * @param TableConfig $config
-     * @param array<array<string, mixed>> $rows
-     * @param string|null $fetchQuery SQL-запрос, использованный для выборки данных
+     * @param iterable<array<string, mixed>> $rows массив или Generator (для streaming)
+     * @param int|null $rowCountHint Подсказка по количеству строк для шапки (null = "?")
      * @return \Generator<string>
      */
-    public function generateChunks(TableConfig $config, array $rows, ?string $fetchQuery = null)
+    public function generateChunks(TableConfig $config, iterable $rows, ?string $fetchQuery = null, ?int $rowCountHint = null)
     {
         $schema = $config->getSchema();
         $table = $config->getTable();
         $connectionName = $config->getConnectionName();
         $deferredColumns = $config->getDeferredColumns();
 
-        $header = $this->buildHeader($config, count($rows), $fetchQuery);
-
+        $header = $this->buildHeader($config, $rowCountHint, $fetchQuery);
         $header .= $this->truncateGenerator->generate($schema, $table, $connectionName);
         $header .= "\n";
 
@@ -117,22 +88,16 @@ class SqlGenerator
         $this->insertGenerator->setDeferredColumns(null);
     }
 
-    /**
-     * Сформировать шапку SQL-дампа
-     *
-     * @param TableConfig $config
-     * @param int $rowCount
-     * @param string|null $fetchQuery
-     * @return string
-     */
-    private function buildHeader(TableConfig $config, int $rowCount, ?string $fetchQuery): string
+    private function buildHeader(TableConfig $config, ?int $rowCount, ?string $fetchQuery): string
     {
         $schema = $config->getSchema();
         $table = $config->getTable();
 
         $header = "-- Дамп таблицы: {$schema}.{$table}\n";
-        $header .= "-- Дата экспорта: " . date('Y-m-d H:i:s') . "\n";
-        $header .= "-- Количество записей: {$rowCount}\n";
+        $header .= '-- Дата экспорта: ' . date('Y-m-d H:i:s') . "\n";
+        if ($rowCount !== null) {
+            $header .= "-- Количество записей: {$rowCount}\n";
+        }
 
         if ($config->isPartialExport()) {
             $header .= "-- Режим: partial (limit {$config->getLimit()})\n";
@@ -140,8 +105,9 @@ class SqlGenerator
             $header .= "-- Режим: full\n";
         }
 
+        // НЕ выводим SELECT с WHERE — может содержать чувствительные значения.
         if ($fetchQuery !== null) {
-            $header .= "-- Запрос: {$fetchQuery}\n";
+            $header .= "-- Запрос выполнен через DataFetcher\n";
         }
 
         $header .= "\n";

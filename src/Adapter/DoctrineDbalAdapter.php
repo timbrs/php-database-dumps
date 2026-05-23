@@ -14,33 +14,69 @@ class DoctrineDbalAdapter implements DatabaseConnectionInterface
     /** @var Connection */
     private $connection;
 
+    /** @var string|null cached platform name */
+    private $platformName;
+
     public function __construct(Connection $connection)
     {
         $this->connection = $connection;
     }
 
-    public function executeStatement(string $sql): void
+    /**
+     * @param array<string, mixed> $params
+     */
+    public function executeStatement(string $sql, array $params = []): void
     {
-        $this->connection->executeStatement($sql);
+        $this->connection->executeStatement($sql, $params);
     }
 
     /**
+     * @param array<string, mixed> $params
      * @return array<int, array<string, mixed>>
      */
-    public function fetchAllAssociative(string $sql): array
+    public function fetchAllAssociative(string $sql, array $params = []): array
     {
-        if ($this->isPostgres()) {
+        // Для PG нам важна boolean-нормализация — пытаемся через нативный PDO.
+        if ($this->getPlatformName() === PlatformFactory::POSTGRESQL && empty($params)) {
             $pdo = $this->getNativePdo();
             if ($pdo !== null) {
                 return $this->fetchViaPdoWithBooleans($pdo, $sql);
             }
         }
 
-        return $this->connection->fetchAllAssociative($sql);
+        $rows = $this->connection->fetchAllAssociative($sql, $params);
+
+        if ($this->getPlatformName() === PlatformFactory::ORACLE) {
+            $rows = array_map([$this, 'normalizeOracleRow'], $rows);
+        }
+
+        return $rows;
     }
 
     /**
-     * @param array<mixed> $params
+     * @param array<string, mixed> $params
+     * @return \Generator<int, array<string, mixed>>
+     */
+    public function iterateAssociative(string $sql, array $params = []): \Generator
+    {
+        if (method_exists($this->connection, 'iterateAssociative')) {
+            foreach ($this->connection->iterateAssociative($sql, $params) as $row) {
+                if ($this->getPlatformName() === PlatformFactory::ORACLE) {
+                    $row = $this->normalizeOracleRow($row);
+                }
+                yield $row;
+            }
+            return;
+        }
+
+        // Fallback DBAL 2.x — нет streaming, используем массив.
+        foreach ($this->fetchAllAssociative($sql, $params) as $row) {
+            yield $row;
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $params
      * @return array<int, mixed>
      */
     public function fetchFirstColumn(string $sql, array $params = []): array
@@ -48,9 +84,22 @@ class DoctrineDbalAdapter implements DatabaseConnectionInterface
         return $this->connection->fetchFirstColumn($sql, $params);
     }
 
+    /**
+     * @param mixed $value
+     */
     public function quote($value): string
     {
-        return $this->connection->quote($value);
+        if ($value === null) {
+            return 'NULL';
+        }
+        if (is_bool($value)) {
+            return $value ? '1' : '0';
+        }
+        if (is_int($value) || is_float($value)) {
+            return (string) $value;
+        }
+
+        return $this->connection->quote((string) $value);
     }
 
     public function beginTransaction(): void
@@ -73,43 +122,48 @@ class DoctrineDbalAdapter implements DatabaseConnectionInterface
         return $this->connection->isTransactionActive();
     }
 
-    /**
-     * @return bool
-     */
-    private function isPostgres()
+    public function getPlatformName(): string
     {
+        if ($this->platformName !== null) {
+            return $this->platformName;
+        }
+
         $platform = $this->connection->getDatabasePlatform();
         $className = get_class($platform);
 
-        return strpos($className, 'PostgreSQL') !== false || strpos($className, 'Postgre') !== false;
+        if (strpos($className, 'PostgreSQL') !== false || strpos($className, 'Postgre') !== false) {
+            return $this->platformName = PlatformFactory::POSTGRESQL;
+        }
+
+        if (strpos($className, 'MySQL') !== false || strpos($className, 'MariaDb') !== false) {
+            return $this->platformName = PlatformFactory::MYSQL;
+        }
+
+        if (strpos($className, 'Oracle') !== false || strpos($className, 'OCI') !== false) {
+            return $this->platformName = PlatformFactory::ORACLE;
+        }
+
+        return $this->platformName = PlatformFactory::POSTGRESQL;
     }
 
-    /**
-     * Выполнить запрос через нативный PDO с нормализацией boolean-колонок
-     *
-     * @param \PDO $pdo
-     * @param string $sql
-     * @return array<int, array<string, mixed>>
-     */
-    private function fetchViaPdoWithBooleans(\PDO $pdo, $sql)
+    private function fetchViaPdoWithBooleans(\PDO $pdo, string $sql): array
     {
         $stmt = $pdo->query($sql);
         if ($stmt === false) {
-            return array();
+            return [];
         }
-
-        $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
-        if (empty($rows)) {
-            return $rows;
+        try {
+            $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+            if (empty($rows)) {
+                return $rows;
+            }
+            return BooleanNormalizer::normalize($stmt, $rows);
+        } finally {
+            $stmt->closeCursor();
         }
-
-        return BooleanNormalizer::normalize($stmt, $rows);
     }
 
-    /**
-     * @return \PDO|null
-     */
-    private function getNativePdo()
+    private function getNativePdo(): ?\PDO
     {
         if (method_exists($this->connection, 'getNativeConnection')) {
             $native = $this->connection->getNativeConnection();
@@ -124,23 +178,18 @@ class DoctrineDbalAdapter implements DatabaseConnectionInterface
         return null;
     }
 
-    public function getPlatformName(): string
+    /**
+     * @param array<string, mixed> $row
+     * @return array<string, mixed>
+     */
+    private function normalizeOracleRow(array $row): array
     {
-        $platform = $this->connection->getDatabasePlatform();
-        $className = get_class($platform);
-
-        if (strpos($className, 'PostgreSQL') !== false || strpos($className, 'Postgre') !== false) {
-            return PlatformFactory::POSTGRESQL;
+        $normalized = array_change_key_case($row, CASE_LOWER);
+        foreach ($normalized as $key => $value) {
+            if (is_resource($value)) {
+                $normalized[$key] = stream_get_contents($value);
+            }
         }
-
-        if (strpos($className, 'MySQL') !== false || strpos($className, 'MariaDb') !== false) {
-            return PlatformFactory::MYSQL;
-        }
-
-        if (strpos($className, 'Oracle') !== false || strpos($className, 'OCI') !== false) {
-            return PlatformFactory::ORACLE;
-        }
-
-        return PlatformFactory::POSTGRESQL;
+        return $normalized;
     }
 }

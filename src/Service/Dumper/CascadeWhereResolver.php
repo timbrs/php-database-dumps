@@ -5,7 +5,18 @@ namespace Timbrs\DatabaseDumps\Service\Dumper;
 use Timbrs\DatabaseDumps\Config\DumpConfig;
 use Timbrs\DatabaseDumps\Config\TableConfig;
 use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
+use Timbrs\DatabaseDumps\Contract\LoggerInterface;
+use Timbrs\DatabaseDumps\Platform\PlatformFactory;
 
+/**
+ * Преобразует cascade_from-настройки таблицы в WHERE-фрагмент с подзапросами.
+ *
+ * Защиты:
+ * - fk_column и parent_column квотируются через platform.quoteIdentifier (защита от инъекций).
+ * - Защита от циклов FK (visited-set по пути рекурсии): A→B→A не приведёт к экспоненциальному взрыву.
+ * - При превышении maxDepth поднимается warning в лог (вместо тихого возврата null,
+ *   который мог раньше расширять выборку).
+ */
 class CascadeWhereResolver
 {
     private const DEFAULT_MAX_DEPTH = 10;
@@ -13,39 +24,51 @@ class CascadeWhereResolver
     /** @var ConnectionRegistryInterface */
     private $registry;
 
-    /** @var int Счётчик подзапросов для уникальных алиасов */
-    private $subqueryCounter = 0;
-
     /** @var int */
     private $maxDepth;
 
+    /** @var LoggerInterface|null */
+    private $logger;
+
+    /** @var SelectedPkRegistry|null */
+    private $selectedPkRegistry;
+
+    /** @var int Счётчик подзапросов для уникальных алиасов */
+    private $subqueryCounter = 0;
+
     /**
-     * @param ConnectionRegistryInterface $registry
      * @param int $maxDepth
      */
-    public function __construct(ConnectionRegistryInterface $registry, $maxDepth = self::DEFAULT_MAX_DEPTH)
-    {
+    public function __construct(
+        ConnectionRegistryInterface $registry,
+        $maxDepth = self::DEFAULT_MAX_DEPTH,
+        LoggerInterface $logger = null,
+        SelectedPkRegistry $selectedPkRegistry = null
+    ) {
         $this->registry = $registry;
         $this->maxDepth = (int) $maxDepth;
+        $this->logger = $logger;
+        $this->selectedPkRegistry = $selectedPkRegistry;
     }
 
     /**
-     * Resolve cascade_from into WHERE clause fragment.
+     * Разрешить cascade_from в WHERE-фрагмент.
      *
-     * @return string|null WHERE clause fragment, or null if no cascade needed
+     * @return string|null WHERE-фрагмент или null если cascade не нужен.
      */
     public function resolve(TableConfig $childConfig, DumpConfig $dumpConfig): ?string
     {
         $cascadeFrom = $childConfig->getCascadeFrom();
-        if ($cascadeFrom === null || empty($cascadeFrom)) {
+        if (empty($cascadeFrom)) {
             return null;
         }
 
         $this->subqueryCounter = 0;
+        $visited = [$childConfig->getFullTableName() => true];
 
         $conditions = [];
         foreach ($cascadeFrom as $entry) {
-            $condition = $this->resolveEntry($entry, $dumpConfig, $childConfig->getConnectionName(), 0);
+            $condition = $this->resolveEntry($entry, $dumpConfig, $childConfig->getConnectionName(), 0, $visited);
             if ($condition !== null) {
                 $conditions[] = $condition;
             }
@@ -60,55 +83,90 @@ class CascadeWhereResolver
 
     /**
      * @param array{parent: string, fk_column: string, parent_column: string} $entry
+     * @param array<string, bool> $visited Путь рекурсии (для защиты от циклов)
      */
-    private function resolveEntry(array $entry, DumpConfig $dumpConfig, ?string $connectionName, int $depth): ?string
-    {
+    private function resolveEntry(
+        array $entry,
+        DumpConfig $dumpConfig,
+        ?string $connectionName,
+        int $depth,
+        array $visited
+    ): ?string {
         if ($depth >= $this->maxDepth) {
+            $this->warn("CascadeWhereResolver: достигнут максимальный depth={$this->maxDepth}, "
+                . "ветка {$entry['parent']} отброшена. Возможна неполная выборка.");
             return null;
         }
 
-        $parentKey = $entry['parent']; // "schema.table"
+        $parentKey = $entry['parent'];
         $fkColumn = $entry['fk_column'];
         $parentColumn = $entry['parent_column'];
 
-        // Parse parent schema.table
+        if (isset($visited[$parentKey])) {
+            $this->warn("CascadeWhereResolver: обнаружен цикл FK в пути cascade_from "
+                . "(повторное посещение {$parentKey}), ветка отброшена.");
+            return null;
+        }
+        $visited[$parentKey] = true;
+
         $parts = explode('.', $parentKey, 2);
         if (count($parts) !== 2) {
             return null;
         }
-        $parentSchema = $parts[0];
-        $parentTable = $parts[1];
+        [$parentSchema, $parentTable] = $parts;
 
-        // Check if parent is in full_export — no subquery needed
+        // Parent в full_export — нет смысла строить подзапрос.
         $fullTables = $dumpConfig->getFullExportTables($parentSchema);
         if (in_array($parentTable, $fullTables, true)) {
             return null;
         }
 
-        // Check if parent is in partial_export
         $parentTableConfig = $dumpConfig->getTableConfig($parentSchema, $parentTable);
         if ($parentTableConfig === null) {
-            // Parent not in config at all — skip
             return null;
         }
 
-        // Build subquery
         $platform = $this->registry->getPlatform($connectionName);
         $fullTableSql = $platform->getFullTableName($parentSchema, $parentTable);
 
-        $subquery = "SELECT {$platform->quoteIdentifier($parentColumn)} FROM {$fullTableSql}";
+        // Квотируем идентификаторы — защита от инъекций через имена колонок из YAML.
+        $quotedParentColumn = $platform->quoteIdentifier($parentColumn);
+        $quotedFkColumn = $platform->quoteIdentifier($fkColumn);
 
-        // Add parent's WHERE condition
-        $parentWhere = isset($parentTableConfig[TableConfig::KEY_WHERE]) ? $parentTableConfig[TableConfig::KEY_WHERE] : null;
+        // Cascade-консистентность: если у родителя задан sample и значения parent_column
+        // уже зарегистрированы (родитель дампится раньше детей) — ссылаемся на ИМЕННО
+        // выбранные id, а не повторяем критерии подзапросом.
+        if (isset($parentTableConfig[TableConfig::KEY_SAMPLE])) {
+            $idSetCondition = $this->buildIdSetCondition(
+                $parentSchema,
+                $parentTable,
+                $parentColumn,
+                $quotedFkColumn,
+                $connectionName
+            );
+            if ($idSetCondition !== null) {
+                return $idSetCondition;
+            }
+            $this->warn(sprintf(
+                'CascadeWhereResolver: у родителя %s.%s задан sample, но выбранные значения "%s" '
+                . 'недоступны — откат к подзапросу (выборка может быть несогласованной).',
+                $parentSchema,
+                $parentTable,
+                $parentColumn
+            ));
+        }
 
-        // Check if parent also has cascade_from — recursive resolution
+        $subquery = "SELECT {$quotedParentColumn} FROM {$fullTableSql}";
+
+        $parentWhere = $parentTableConfig[TableConfig::KEY_WHERE] ?? null;
+
         $parentCascadeWhere = null;
-        if (isset($parentTableConfig[TableConfig::KEY_CASCADE_FROM]) && !empty($parentTableConfig[TableConfig::KEY_CASCADE_FROM])) {
+        if (!empty($parentTableConfig[TableConfig::KEY_CASCADE_FROM])) {
             $parentCascadeConditions = [];
             foreach ($parentTableConfig[TableConfig::KEY_CASCADE_FROM] as $parentEntry) {
-                $parentCondition = $this->resolveEntry($parentEntry, $dumpConfig, $connectionName, $depth + 1);
-                if ($parentCondition !== null) {
-                    $parentCascadeConditions[] = $parentCondition;
+                $sub = $this->resolveEntry($parentEntry, $dumpConfig, $connectionName, $depth + 1, $visited);
+                if ($sub !== null) {
+                    $parentCascadeConditions[] = $sub;
                 }
             }
             if (!empty($parentCascadeConditions)) {
@@ -116,40 +174,88 @@ class CascadeWhereResolver
             }
         }
 
-        // Combine parent's WHERE and cascade WHERE
-        $whereClause = '';
-        if ($parentWhere !== null && $parentCascadeWhere !== null) {
-            $whereClause = " WHERE ({$parentWhere}) AND ({$parentCascadeWhere})";
-        } elseif ($parentWhere !== null) {
-            $whereClause = " WHERE {$parentWhere}";
-        } elseif ($parentCascadeWhere !== null) {
-            $whereClause = " WHERE {$parentCascadeWhere}";
-        }
+        $whereClause = $this->combineWhere($parentWhere, $parentCascadeWhere);
 
-        // Add ORDER BY and LIMIT
-        $orderBy = isset($parentTableConfig[TableConfig::KEY_ORDER_BY]) ? $parentTableConfig[TableConfig::KEY_ORDER_BY] : null;
+        $orderBy = $parentTableConfig[TableConfig::KEY_ORDER_BY] ?? null;
         if ($orderBy !== null) {
             $whereClause .= " ORDER BY {$orderBy}";
         }
 
-        $limit = isset($parentTableConfig[TableConfig::KEY_LIMIT]) ? $parentTableConfig[TableConfig::KEY_LIMIT] : null;
+        $limit = $parentTableConfig[TableConfig::KEY_LIMIT] ?? null;
         if ($limit !== null) {
             $whereClause .= ' ' . $platform->getLimitSql((int) $limit);
         }
 
         $innerSql = $subquery . $whereClause;
 
-        // MySQL/MariaDB не поддерживает LIMIT в подзапросе внутри IN —
-        // оборачиваем в дополнительный SELECT
+        // MySQL/MariaDB не поддерживает LIMIT в подзапросе внутри IN — оборачиваем.
         if ($limit !== null) {
-            $platformName = $this->registry->getConnection($connectionName)->getPlatformName();
-            if ($platformName === 'mysql' || $platformName === 'mariadb') {
+            $platformName = PlatformFactory::canonicalize(
+                $this->registry->getConnection($connectionName)->getPlatformName()
+            );
+            if ($platformName === PlatformFactory::MYSQL) {
                 $alias = '_cascade_' . $this->subqueryCounter;
                 $this->subqueryCounter++;
                 $innerSql = "SELECT * FROM ({$innerSql}) AS {$alias}";
             }
         }
 
-        return "({$fkColumn} IN ({$innerSql}) OR {$fkColumn} IS NULL)";
+        return "({$quotedFkColumn} IN ({$innerSql}) OR {$quotedFkColumn} IS NULL)";
+    }
+
+    /**
+     * Построить условие `fk IN (<выбранные id родителя>)` из реестра выбранных PK.
+     *
+     * @return string|null null, если реестр недоступен или значения родителя не зарегистрированы.
+     */
+    private function buildIdSetCondition(
+        string $parentSchema,
+        string $parentTable,
+        string $parentColumn,
+        string $quotedFkColumn,
+        ?string $connectionName
+    ): ?string {
+        if ($this->selectedPkRegistry === null) {
+            return null;
+        }
+
+        $values = $this->selectedPkRegistry->getColumnValues($parentSchema, $parentTable, $parentColumn);
+        if ($values === null) {
+            return null;
+        }
+
+        if (empty($values)) {
+            // Родитель не отобрал ни одной строки — у детей нет связанных строк (orphans по IS NULL).
+            return "({$quotedFkColumn} IN (NULL) OR {$quotedFkColumn} IS NULL)";
+        }
+
+        $connection = $this->registry->getConnection($connectionName);
+        $quoted = [];
+        foreach ($values as $value) {
+            $quoted[] = $connection->quote($value);
+        }
+
+        return "({$quotedFkColumn} IN (" . implode(', ', $quoted) . ") OR {$quotedFkColumn} IS NULL)";
+    }
+
+    private function combineWhere(?string $parentWhere, ?string $parentCascadeWhere): string
+    {
+        if ($parentWhere !== null && $parentCascadeWhere !== null) {
+            return " WHERE ({$parentWhere}) AND ({$parentCascadeWhere})";
+        }
+        if ($parentWhere !== null) {
+            return " WHERE {$parentWhere}";
+        }
+        if ($parentCascadeWhere !== null) {
+            return " WHERE {$parentCascadeWhere}";
+        }
+        return '';
+    }
+
+    private function warn(string $message): void
+    {
+        if ($this->logger !== null) {
+            $this->logger->warning($message);
+        }
     }
 }

@@ -2,19 +2,21 @@
 
 namespace Timbrs\DatabaseDumps\Tests\Unit\Service\Importer;
 
+use PHPUnit\Framework\MockObject\MockObject;
+use PHPUnit\Framework\TestCase;
 use Timbrs\DatabaseDumps\Config\DumpConfig;
 use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
 use Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
+use Timbrs\DatabaseDumps\Platform\MySqlPlatform;
+use Timbrs\DatabaseDumps\Platform\PostgresPlatform;
 use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
 use Timbrs\DatabaseDumps\Service\Importer\DatabaseImporter;
 use Timbrs\DatabaseDumps\Service\Importer\ScriptExecutor;
 use Timbrs\DatabaseDumps\Service\Importer\TransactionManager;
 use Timbrs\DatabaseDumps\Service\Parser\SqlParser;
 use Timbrs\DatabaseDumps\Service\Security\ProductionGuard;
-use PHPUnit\Framework\MockObject\MockObject;
-use PHPUnit\Framework\TestCase;
 
 class DatabaseImporterTest extends TestCase
 {
@@ -66,6 +68,12 @@ class DatabaseImporterTest extends TestCase
     private function createImporter($platformName = 'postgresql')
     {
         $this->connection->method('getPlatformName')->willReturn($platformName);
+        // Реальная платформа — для теста disableForeignKeysSql() / enableForeignKeysSql()
+        if ($platformName === 'mysql' || $platformName === 'mariadb') {
+            $this->registry->method('getPlatform')->willReturn(new MySqlPlatform());
+        } else {
+            $this->registry->method('getPlatform')->willReturn(new PostgresPlatform());
+        }
 
         return new DatabaseImporter(
             $this->registry,

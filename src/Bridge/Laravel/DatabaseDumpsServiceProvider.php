@@ -2,36 +2,58 @@
 
 namespace Timbrs\DatabaseDumps\Bridge\Laravel;
 
+use Illuminate\Support\ServiceProvider;
 use Timbrs\DatabaseDumps\Adapter\LaravelDatabaseAdapter;
+use Timbrs\DatabaseDumps\Bridge\Laravel\Command\ApplyAnalysisCommand;
+use Timbrs\DatabaseDumps\Bridge\Laravel\Command\ConfigureLlmCommand;
 use Timbrs\DatabaseDumps\Bridge\Laravel\Command\DbInitCommand;
 use Timbrs\DatabaseDumps\Bridge\Laravel\Command\DumpExportCommand;
+use Timbrs\DatabaseDumps\Bridge\Laravel\Command\PrepareAnalysisCommand;
 use Timbrs\DatabaseDumps\Bridge\Laravel\Command\PrepareConfigCommand;
+use Timbrs\DatabaseDumps\Config\AiConfig;
 use Timbrs\DatabaseDumps\Config\DumpConfig;
 use Timbrs\DatabaseDumps\Config\EnvironmentConfig;
+use Timbrs\DatabaseDumps\Contract\AiClientInterface;
 use Timbrs\DatabaseDumps\Contract\ConfigLoaderInterface;
 use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
 use Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface;
 use Timbrs\DatabaseDumps\Contract\DatabasePlatformInterface;
 use Timbrs\DatabaseDumps\Contract\FakerInterface;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
+use Timbrs\DatabaseDumps\Contract\HttpTransportInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Platform\PlatformFactory;
+use Timbrs\DatabaseDumps\Service\Ai\AiClientFactory;
+use Timbrs\DatabaseDumps\Service\Ai\AiConfigStore;
+use Timbrs\DatabaseDumps\Service\Ai\CurlHttpTransport;
+use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
+use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
+use Timbrs\DatabaseDumps\Service\Analysis\AnalysisReportWriter;
+use Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher;
+use Timbrs\DatabaseDumps\Service\Analysis\OpencodeRunner;
+use Timbrs\DatabaseDumps\Service\ConfigGenerator\ColumnStatisticsInspector;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigGenerator;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigSplitter;
+use Timbrs\DatabaseDumps\Service\ConfigGenerator\CriteriaSuggester;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ForeignKeyInspector;
+use Timbrs\DatabaseDumps\Service\ConfigGenerator\ModeParser;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ServiceTableFilter;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\TableInspector;
 use Timbrs\DatabaseDumps\Service\ConnectionRegistry;
-use Timbrs\DatabaseDumps\Service\Dumper\DatabaseDumper;
+use Timbrs\DatabaseDumps\Service\ConfigGenerator\PrimaryKeyInspector;
 use Timbrs\DatabaseDumps\Service\Dumper\CascadeWhereResolver;
+use Timbrs\DatabaseDumps\Service\Dumper\DatabaseDumper;
 use Timbrs\DatabaseDumps\Service\Dumper\DataFetcher;
+use Timbrs\DatabaseDumps\Service\Dumper\SampleQueryBuilder;
+use Timbrs\DatabaseDumps\Service\Dumper\SelectedPkRegistry;
 use Timbrs\DatabaseDumps\Service\Dumper\TableConfigResolver;
+use Timbrs\DatabaseDumps\Service\Faker\LlmPatternDetector;
+use Timbrs\DatabaseDumps\Service\Faker\PatternDetector;
+use Timbrs\DatabaseDumps\Service\Faker\RussianFaker;
 use Timbrs\DatabaseDumps\Service\Generator\DeferredUpdateGenerator;
 use Timbrs\DatabaseDumps\Service\Generator\InsertGenerator;
 use Timbrs\DatabaseDumps\Service\Generator\SequenceGenerator;
 use Timbrs\DatabaseDumps\Service\Generator\SqlGenerator;
-use Timbrs\DatabaseDumps\Service\Faker\PatternDetector;
-use Timbrs\DatabaseDumps\Service\Faker\RussianFaker;
 use Timbrs\DatabaseDumps\Service\Generator\TruncateGenerator;
 use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
 use Timbrs\DatabaseDumps\Service\Graph\TopologicalSorter;
@@ -41,14 +63,21 @@ use Timbrs\DatabaseDumps\Service\Importer\ScriptExecutor;
 use Timbrs\DatabaseDumps\Service\Importer\TransactionManager;
 use Timbrs\DatabaseDumps\Service\Parser\SqlParser;
 use Timbrs\DatabaseDumps\Service\Parser\StatementSplitter;
-use Timbrs\DatabaseDumps\Service\Security\EnvironmentChecker;
 use Timbrs\DatabaseDumps\Service\Security\ProductionGuard;
 use Timbrs\DatabaseDumps\Util\FileSystemHelper;
 use Timbrs\DatabaseDumps\Util\YamlConfigLoader;
-use Illuminate\Support\ServiceProvider;
 
 /**
- * Laravel ServiceProvider для timbrs/database-dumps
+ * Laravel ServiceProvider для timbrs/database-dumps.
+ *
+ * Изменения:
+ *  - DumpConfig зарегистрирован как bind() (НЕ singleton) — после prepare-config
+ *    последующие команды получат обновлённый конфиг.
+ *  - LaravelLogger пишет в Log facade (не молча теряет логи).
+ *  - DatabaseDumper получает ProductionGuard (защита от утечки PII с prod).
+ *  - ensureDumpConfigExists вызывается только в runningInConsole.
+ *  - ConnectionRegistry формируется аккуратно: при отсутствии подключения
+ *    выводится понятное сообщение.
  */
 class DatabaseDumpsServiceProvider extends ServiceProvider
 {
@@ -67,7 +96,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
             return EnvironmentConfig::fromEnv();
         });
 
-        $this->app->singleton(DumpConfig::class, function ($app) {
+        // bind (не singleton) — чтобы после prepare-config конфиг обновлялся
+        $this->app->bind(DumpConfig::class, function ($app) {
             $configPath = $app['config']->get('database-dumps.config_path');
 
             if (!file_exists($configPath)) {
@@ -76,11 +106,10 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
 
             /** @var ConfigLoaderInterface $loader */
             $loader = $app->make(ConfigLoaderInterface::class);
-
             return $loader->load($configPath);
         });
 
-        // Обратная совместимость: singleton connection/platform для внешнего кода
+        // Обратная совместимость: connection/platform для legacy-кода
         $this->app->singleton(DatabaseConnectionInterface::class, function ($app) {
             return new LaravelDatabaseAdapter($app['db']->connection());
         });
@@ -88,34 +117,42 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
         $this->app->singleton(DatabasePlatformInterface::class, function ($app) {
             /** @var DatabaseConnectionInterface $connection */
             $connection = $app->make(DatabaseConnectionInterface::class);
-
-            return PlatformFactory::create($connection->getPlatformName());
+            return PlatformFactory::create($connection->getPlatformName(), $app->make(LoggerInterface::class));
         });
 
-        // ConnectionRegistry — реестр подключений
         $this->app->singleton(ConnectionRegistryInterface::class, function ($app) {
             $registry = new ConnectionRegistry('default');
             $registry->register('default', new LaravelDatabaseAdapter($app['db']->connection()));
 
-            // Читаем имена подключений из DumpConfig
             /** @var DumpConfig $dumpConfig */
             $dumpConfig = $app->make(DumpConfig::class);
             foreach (array_keys($dumpConfig->getConnectionConfigs()) as $connName) {
-                $registry->register($connName, new LaravelDatabaseAdapter(
-                    $app['db']->connection($connName)
-                ));
+                try {
+                    $registry->register($connName, new LaravelDatabaseAdapter(
+                        $app['db']->connection($connName)
+                    ));
+                } catch (\Throwable $e) {
+                    throw new \RuntimeException(sprintf(
+                        'Connection "%s" из dump_config.yaml не найдено в config/database.php. '
+                        . 'Зарегистрируйте подключение в Laravel-конфиге.',
+                        $connName
+                    ), 0, $e);
+                }
             }
-
             return $registry;
         });
 
-        $this->app->singleton(EnvironmentChecker::class);
-        $this->app->singleton(ProductionGuard::class);
+        // ProductionGuard теперь принимает EnvironmentConfig напрямую (EnvironmentChecker удалён)
+        $this->app->singleton(ProductionGuard::class, function ($app) {
+            return new ProductionGuard($app->make(EnvironmentConfig::class));
+        });
+
         $this->app->singleton(StatementSplitter::class);
         $this->app->singleton(SqlParser::class);
         $this->app->singleton(TransactionManager::class);
         $this->app->singleton(ScriptExecutor::class);
         $this->app->singleton(TableConfigResolver::class);
+        $this->app->singleton(ModeParser::class);
 
         $this->app->singleton(TruncateGenerator::class);
         $this->app->singleton(InsertGenerator::class, function ($app) {
@@ -127,6 +164,7 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
             );
         });
         $this->app->singleton(SequenceGenerator::class);
+        $this->app->singleton(DeferredUpdateGenerator::class);
         $this->app->singleton(SqlGenerator::class, function ($app) {
             return new SqlGenerator(
                 $app->make(TruncateGenerator::class),
@@ -135,13 +173,25 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(DeferredUpdateGenerator::class)
             );
         });
-        $this->app->singleton(DeferredUpdateGenerator::class);
+
+        // Реестр выбранных PK — один общий инстанс на запрос (cascade-консистентность).
+        $this->app->singleton(SelectedPkRegistry::class);
+        $this->app->singleton(PrimaryKeyInspector::class);
+        $this->app->singleton(SampleQueryBuilder::class, function ($app) {
+            return new SampleQueryBuilder(
+                $app->make(ConnectionRegistryInterface::class),
+                $app->make(PrimaryKeyInspector::class),
+                $app->make(SelectedPkRegistry::class),
+                $app->make(LoggerInterface::class)
+            );
+        });
 
         $this->app->singleton(DataFetcher::class, function ($app) {
             return new DataFetcher(
                 $app->make(ConnectionRegistryInterface::class),
                 $app->make(CascadeWhereResolver::class),
-                $app->make(DumpConfig::class)
+                $app->make(DumpConfig::class),
+                $app->make(SampleQueryBuilder::class)
             );
         });
 
@@ -155,7 +205,9 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
             $dumpConfig = $app->make(DumpConfig::class);
             return new CascadeWhereResolver(
                 $app->make(ConnectionRegistryInterface::class),
-                $dumpConfig->getMaxCascadeDepth()
+                $dumpConfig->getMaxCascadeDepth(),
+                $app->make(LoggerInterface::class),
+                $app->make(SelectedPkRegistry::class)
             );
         });
         $this->app->singleton(PatternDetector::class, function ($app) {
@@ -166,9 +218,51 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $dumpConfig->getSampleSize()
             );
         });
+
+        // LLM (прямой клиент для анализа данных)
+        $this->app->singleton(AiConfigStore::class, function ($app) {
+            return new AiConfigStore($app->make(FileSystemInterface::class));
+        });
+        $this->app->singleton(AiConfig::class, function ($app) {
+            // Приоритет: явная секция llm в config (если url задан) → env/файл (AiConfigStore).
+            $cfg = $app['config']->get('database-dumps.llm', []);
+            if (is_array($cfg) && !empty($cfg['url'])) {
+                return AiConfig::fromArray($cfg);
+            }
+            return $app->make(AiConfigStore::class)->resolve($app['config']->get('database-dumps.project_dir'));
+        });
+        $this->app->singleton(HttpTransportInterface::class, CurlHttpTransport::class);
+        $this->app->singleton(AiClientInterface::class, function ($app) {
+            return AiClientFactory::create(
+                $app->make(HttpTransportInterface::class),
+                $app->make(AiConfig::class),
+                $app->make(LoggerInterface::class)
+            );
+        });
+        $this->app->singleton(LlmPatternDetector::class, function ($app) {
+            return new LlmPatternDetector(
+                $app->make(AiClientInterface::class),
+                $app->make(PatternDetector::class),
+                $app->make(ConnectionRegistryInterface::class),
+                $app->make(LoggerInterface::class)
+            );
+        });
+
         $this->app->singleton(SchemaValidator::class);
         $this->app->singleton(FakerInterface::class, RussianFaker::class);
         $this->app->singleton(ConfigSplitter::class);
+
+        // Профилирование и авто-критерии (deep-анализ)
+        $this->app->singleton(ColumnStatisticsInspector::class, function ($app) {
+            /** @var DumpConfig $dumpConfig */
+            $dumpConfig = $app->make(DumpConfig::class);
+            return new ColumnStatisticsInspector(
+                $app->make(ConnectionRegistryInterface::class),
+                $dumpConfig->getSampleSize()
+            );
+        });
+        $this->app->singleton(CriteriaSuggester::class);
+        $this->app->singleton(AnalysisReportWriter::class);
 
         $this->app->singleton(ConfigGenerator::class, function ($app) {
             return new ConfigGenerator(
@@ -179,14 +273,83 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(ConnectionRegistryInterface::class),
                 $app->make(TableDependencyResolver::class),
                 $app->make(ConfigSplitter::class),
-                $app->make(PatternDetector::class)
+                $app->make(PatternDetector::class),
+                true,
+                true,
+                true,
+                $app->make(LlmPatternDetector::class),
+                $app->make(ColumnStatisticsInspector::class),
+                $app->make(CriteriaSuggester::class),
+                $app->make(AnalysisReportWriter::class),
+                $app['config']->get('database-dumps.project_dir')
             );
         });
 
         $this->app->singleton(PrepareConfigCommand::class, function ($app) {
             return new PrepareConfigCommand(
                 $app->make(ConfigGenerator::class),
+                $app->make(ModeParser::class),
                 $app->make(LoggerInterface::class),
+                $app['config']->get('database-dumps.config_path')
+            );
+        });
+
+        // Анализ кода через OPENCODE
+        $this->app->singleton(AnalysisPackageBuilder::class, function ($app) {
+            return new AnalysisPackageBuilder(
+                $app->make(FileSystemInterface::class),
+                $app->make(ConnectionRegistryInterface::class),
+                $app->make(TableInspector::class),
+                $app->make(ServiceTableFilter::class),
+                $app->make(TableDependencyResolver::class),
+                $app->make(ColumnStatisticsInspector::class),
+                $app->make(LoggerInterface::class),
+                $app['config']->get('database-dumps.project_dir')
+            );
+        });
+        $this->app->singleton(AnalysisIngestor::class, function ($app) {
+            return new AnalysisIngestor(
+                $app->make(FileSystemInterface::class),
+                $app->make(LoggerInterface::class)
+            );
+        });
+        $this->app->singleton(ConfigEnricher::class, function ($app) {
+            return new ConfigEnricher(
+                $app->make(FileSystemInterface::class),
+                $app->make(ConfigSplitter::class),
+                $app->make(LoggerInterface::class),
+                $app['config']->get('database-dumps.project_dir')
+            );
+        });
+        $this->app->singleton(OpencodeRunner::class, function ($app) {
+            return new OpencodeRunner($app->make(LoggerInterface::class));
+        });
+
+        $this->app->singleton(ConfigureLlmCommand::class, function ($app) {
+            return new ConfigureLlmCommand(
+                $app->make(AiConfigStore::class),
+                $app->make(HttpTransportInterface::class),
+                $app['config']->get('database-dumps.project_dir')
+            );
+        });
+
+        $this->app->singleton(PrepareAnalysisCommand::class, function ($app) {
+            return new PrepareAnalysisCommand(
+                $app->make(AnalysisPackageBuilder::class),
+                $app->make(OpencodeRunner::class),
+                $app->make(AnalysisIngestor::class),
+                $app->make(ConfigEnricher::class),
+                $app->make(LoggerInterface::class),
+                $app['config']->get('database-dumps.project_dir'),
+                $app['config']->get('database-dumps.config_path')
+            );
+        });
+        $this->app->singleton(ApplyAnalysisCommand::class, function ($app) {
+            return new ApplyAnalysisCommand(
+                $app->make(AnalysisIngestor::class),
+                $app->make(ConfigEnricher::class),
+                $app->make(LoggerInterface::class),
+                $app['config']->get('database-dumps.project_dir'),
                 $app['config']->get('database-dumps.config_path')
             );
         });
@@ -200,7 +363,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app['config']->get('database-dumps.project_dir'),
                 $app->make(TableDependencyResolver::class),
                 $app->make(FakerInterface::class),
-                $app->make(DumpConfig::class)
+                $app->make(DumpConfig::class),
+                $app->make(ProductionGuard::class)
             );
         });
 
@@ -227,13 +391,15 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
             __DIR__ . '/config/database-dumps.php' => config_path('database-dumps.php'),
         ], 'database-dumps-config');
 
-        $this->ensureDumpConfigExists();
-
         if ($this->app->runningInConsole()) {
+            $this->ensureDumpConfigExists();
             $this->commands([
                 DumpExportCommand::class,
                 DbInitCommand::class,
                 PrepareConfigCommand::class,
+                ConfigureLlmCommand::class,
+                PrepareAnalysisCommand::class,
+                ApplyAnalysisCommand::class,
             ]);
         }
     }
@@ -247,11 +413,16 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
             return;
         }
 
+        /** @var FileSystemInterface $fs */
+        $fs = $this->app->make(FileSystemInterface::class);
         $dir = dirname($configPath);
-        if (!is_dir($dir)) {
-            mkdir($dir, 0755, true);
+        if (!$fs->isDirectory($dir)) {
+            $fs->createDirectory($dir);
         }
 
-        copy(__DIR__ . '/stubs/dump_config.yaml', $configPath);
+        $stub = __DIR__ . '/stubs/dump_config.yaml';
+        if (file_exists($stub)) {
+            $fs->write($configPath, $fs->read($stub));
+        }
     }
 }

@@ -3,24 +3,28 @@
 namespace Timbrs\DatabaseDumps\Service\Importer;
 
 use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
-use Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface;
+use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 
 /**
- * Управление транзакциями БД
+ * Управление транзакциями БД.
+ *
+ * При rollback() оборачиваем оригинальную ошибку — если rollBack сам бросает
+ * (потерянное соединение), не теряем исходное исключение.
  */
 class TransactionManager
 {
     /** @var ConnectionRegistryInterface */
     private $registry;
 
-    public function __construct(ConnectionRegistryInterface $registry)
+    /** @var LoggerInterface|null */
+    private $logger;
+
+    public function __construct(ConnectionRegistryInterface $registry, LoggerInterface $logger = null)
     {
         $this->registry = $registry;
+        $this->logger = $logger;
     }
 
-    /**
-     * Начать транзакцию на указанном подключении
-     */
     public function begin(?string $connectionName = null): void
     {
         $connection = $this->registry->getConnection($connectionName);
@@ -29,9 +33,6 @@ class TransactionManager
         }
     }
 
-    /**
-     * Закоммитить транзакцию на указанном подключении
-     */
     public function commit(?string $connectionName = null): void
     {
         $connection = $this->registry->getConnection($connectionName);
@@ -40,9 +41,6 @@ class TransactionManager
         }
     }
 
-    /**
-     * Откатить транзакцию на указанном подключении
-     */
     public function rollBack(?string $connectionName = null): void
     {
         $connection = $this->registry->getConnection($connectionName);
@@ -52,11 +50,10 @@ class TransactionManager
     }
 
     /**
-     * Выполнить код в транзакции с автоматическим rollback при ошибке
+     * Выполнить код в транзакции с автоматическим rollback при ошибке.
      *
      * @template T
      * @param callable(): T $callback
-     * @param string|null $connectionName
      * @return mixed
      * @throws \Throwable
      */
@@ -69,7 +66,14 @@ class TransactionManager
             $this->commit($connectionName);
             return $result;
         } catch (\Throwable $e) {
-            $this->rollBack($connectionName);
+            try {
+                $this->rollBack($connectionName);
+            } catch (\Throwable $rollbackError) {
+                if ($this->logger !== null) {
+                    $this->logger->error('Rollback failed: ' . $rollbackError->getMessage());
+                }
+                // Не подменяем оригинальное исключение
+            }
             throw $e;
         }
     }

@@ -4,6 +4,7 @@ namespace Timbrs\DatabaseDumps\Service\Importer;
 
 use Timbrs\DatabaseDumps\Config\DumpConfig;
 use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
+use Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Exception\ImportFailedException;
@@ -13,7 +14,15 @@ use Timbrs\DatabaseDumps\Service\Parser\SqlParser;
 use Timbrs\DatabaseDumps\Service\Security\ProductionGuard;
 
 /**
- * Импорт SQL дампов в БД
+ * Импорт SQL дампов в БД.
+ *
+ * Особенности:
+ * - ProductionGuard блокирует импорт на prod (см. ensureSafeForImport).
+ * - FOREIGN_KEY_CHECKS управляется через Platform.disableForeignKeysSql, в try/finally.
+ * - Перед чтением файла путь нормализуется через realpath и проверяется на
+ *   принадлежность projectDir (защита от symlink-traversal).
+ * - Сообщения об ошибках санитизируются (обрезаются после VALUES) — защита
+ *   от утечки данных импорта в логи.
  */
 class DatabaseImporter
 {
@@ -38,10 +47,8 @@ class DatabaseImporter
     private $logger;
     /** @var string */
     private $projectDir;
-
     /** @var TableDependencyResolver */
     private $dependencyResolver;
-
     /** @var SchemaValidator|null */
     private $schemaValidator;
 
@@ -74,21 +81,12 @@ class DatabaseImporter
         $this->schemaValidator = $schemaValidator;
     }
 
-    /**
-     * Установить флаг игнорирования расхождений схемы
-     */
     public function setIgnoreSchemaMismatch(bool $ignore): void
     {
         $this->ignoreSchemaMismatch = $ignore;
     }
 
     /**
-     * Импортировать дампы
-     *
-     * @param bool $skipBefore Пропустить before_exec скрипты
-     * @param bool $skipAfter Пропустить after_exec скрипты
-     * @param string|null $schemaFilter Фильтр по схеме
-     * @param string|null $connectionFilter Фильтр по подключению (null = дефолтное, 'all' = все)
      * @throws ImportFailedException
      */
     public function import(
@@ -97,21 +95,15 @@ class DatabaseImporter
         ?string $schemaFilter = null,
         ?string $connectionFilter = null
     ): void {
-        // 1. Проверка окружения (защита от prod)
         $this->productionGuard->ensureSafeForImport();
 
-        // 2. Определить подключения для импорта
         $connectionNames = $this->resolveConnectionNames($connectionFilter);
 
-        // 3. Per-connection import с транзакциями
         foreach ($connectionNames as $connName) {
             $this->importForConnection($connName, $skipBefore, $skipAfter, $schemaFilter);
         }
     }
 
-    /**
-     * Импорт для одного подключения
-     */
     private function importForConnection(
         ?string $connectionName,
         bool $skipBefore,
@@ -122,17 +114,14 @@ class DatabaseImporter
         $this->logger->info("Импорт подключения: {$label}");
 
         $this->transactionManager->transaction(function () use ($connectionName, $skipBefore, $skipAfter, $schemaFilter) {
-            // Before exec скрипты — на дефолтном подключении
             if (!$skipBefore && $connectionName === null) {
                 $this->logger->info('1. Выполнение before_exec скриптов');
                 $this->scriptExecutor->executeScripts($this->projectDir . '/' . self::BEFORE_EXEC_DIR);
             }
 
-            // Импорт дампов
             $this->logger->info('2. Импорт SQL дампов');
             $this->importDumps($schemaFilter, $connectionName);
 
-            // After exec скрипты — на дефолтном подключении
             if (!$skipAfter && $connectionName === null) {
                 $this->logger->info('3. Выполнение after_exec скриптов');
                 $this->scriptExecutor->executeScripts($this->projectDir . '/' . self::AFTER_EXEC_DIR);
@@ -141,14 +130,12 @@ class DatabaseImporter
     }
 
     /**
-     * Определить список подключений для импорта
-     *
      * @return array<string|null>
      */
     private function resolveConnectionNames(?string $connectionFilter): array
     {
         if ($connectionFilter === ConnectionRegistryInterface::CONNECTION_ALL) {
-            $names = [null]; // дефолтное
+            $names = [null];
             foreach (array_keys($this->dumpConfig->getConnectionConfigs()) as $connName) {
                 $names[] = $connName;
             }
@@ -159,12 +146,9 @@ class DatabaseImporter
             return [$connectionFilter];
         }
 
-        return [null]; // дефолтное
+        return [null];
     }
 
-    /**
-     * Импортировать дампы из директории
-     */
     private function importDumps(?string $schemaFilter, ?string $connectionName): void
     {
         $dumpsPath = $this->buildDumpsPath($connectionName);
@@ -173,96 +157,86 @@ class DatabaseImporter
             throw ImportFailedException::dumpsNotFound($dumpsPath);
         }
 
-        // Поиск всех .sql файлов
         $files = $this->fileSystem->findFiles($dumpsPath, '*.sql');
-
         if (empty($files)) {
             throw ImportFailedException::noDumpsFound($dumpsPath);
         }
 
-        // Сортировка для предсказуемого порядка (фолбэк)
-        sort($files);
-
-        // Фильтрация по схеме
         $filteredFiles = $this->filterFilesBySchema($files, $schemaFilter);
-
-        // Топологическая сортировка по FK зависимостям
         $filteredFiles = $this->sortFilesByDependencies($filteredFiles, $connectionName);
+
+        $connection = $this->registry->getConnection($connectionName);
+        $platform = $this->registry->getPlatform($connectionName);
+        $platformName = PlatformFactory::canonicalize($connection->getPlatformName());
+        $backslashEscapes = $platformName === PlatformFactory::MYSQL;
+
+        $disableFkSql = $platform->disableForeignKeysSql();
+        $enableFkSql = $platform->enableForeignKeysSql();
+
+        // Внимание: на MySQL ALTER TABLE ... AUTO_INCREMENT (в SequenceGenerator)
+        // выполняет неявный COMMIT внутри транзакции. То же касается TRUNCATE.
+        // Мы заменили TRUNCATE на DELETE FROM в MySqlPlatform, но AUTO_INCREMENT
+        // всё ещё DDL. Документировано как ограничение: атомарность impport
+        // на MySQL не гарантируется при наличии SequenceGenerator-операций.
+        if ($disableFkSql !== null) {
+            $connection->executeStatement($disableFkSql);
+        }
 
         $total = count($filteredFiles);
         $current = 0;
 
-        $connection = $this->registry->getConnection($connectionName);
-        $platformName = $connection->getPlatformName();
-        $backslashEscapes = $platformName === PlatformFactory::MYSQL
-            || $platformName === PlatformFactory::MARIADB;
-
-        $isMysql = $platformName === PlatformFactory::MYSQL
-            || $platformName === PlatformFactory::MARIADB;
-
-        if ($isMysql) {
-            $connection->executeStatement('SET FOREIGN_KEY_CHECKS=0');
-        }
-
         try {
             foreach ($filteredFiles as $file) {
                 $current++;
-                $this->importDumpFile($file, $current, $total, $connection, $backslashEscapes);
+                $this->importDumpFile($file, $current, $total, $connection, $connectionName, $backslashEscapes);
             }
         } finally {
-            if ($isMysql) {
-                $connection->executeStatement('SET FOREIGN_KEY_CHECKS=1');
+            if ($enableFkSql !== null) {
+                try {
+                    $connection->executeStatement($enableFkSql);
+                } catch (\Throwable $e) {
+                    $this->logger->warning('Не удалось восстановить FK_CHECKS: ' . $e->getMessage());
+                }
             }
         }
     }
 
     /**
-     * Отсортировать файлы по FK зависимостям (родители первыми).
-     *
-     * Циклические зависимости разрываются автоматически через sortWithCycleBreaking.
-     *
      * @param string[] $files
      * @return string[]
      */
     private function sortFilesByDependencies(array $files, ?string $connectionName): array
     {
-        // Построить маппинг "schema.table" => filePath
         $keyToFile = [];
         $tableKeys = [];
         foreach ($files as $filePath) {
-            $pathParts = explode(DIRECTORY_SEPARATOR, $filePath);
-            $schema = $pathParts[count($pathParts) - 2] ?? '';
-            $tableName = basename($filePath, '.sql');
+            [$schema, $tableName] = $this->extractSchemaAndTable($filePath);
             $key = $schema . '.' . $tableName;
-
             $keyToFile[$key] = $filePath;
             $tableKeys[] = $key;
         }
 
         $sortedKeys = $this->dependencyResolver->sortForImport($tableKeys, $connectionName);
 
-        // Переупорядочить файлы по отсортированным ключам
         $sortedFiles = [];
+        $seen = [];
         foreach ($sortedKeys as $key) {
-            if (isset($keyToFile[$key])) {
+            if (isset($keyToFile[$key]) && !isset($seen[$keyToFile[$key]])) {
                 $sortedFiles[] = $keyToFile[$key];
+                $seen[$keyToFile[$key]] = true;
             }
         }
-
-        // Добавить файлы, не попавшие в ключи (на всякий случай)
-        $sortedSet = array_flip($sortedFiles);
-        foreach ($files as $file) {
-            if (!isset($sortedSet[$file])) {
-                $sortedFiles[] = $file;
+        // Файлы, не попавшие в FK-граф — в конец
+        foreach ($files as $f) {
+            if (!isset($seen[$f])) {
+                $sortedFiles[] = $f;
+                $seen[$f] = true;
             }
         }
-
         return $sortedFiles;
     }
 
     /**
-     * Фильтрация файлов по схеме
-     *
      * @param string[] $files
      * @return string[]
      */
@@ -273,48 +247,53 @@ class DatabaseImporter
         }
 
         return array_values(array_filter($files, function (string $filePath) use ($schemaFilter) {
-            $pathParts = explode(DIRECTORY_SEPARATOR, $filePath);
-            $schema = $pathParts[count($pathParts) - 2] ?? '';
+            [$schema] = $this->extractSchemaAndTable($filePath);
             return $schema === $schemaFilter;
         }));
     }
 
     /**
-     * Построить путь к директории дампов
+     * Извлечь {schema, table} из пути database/dumps/{schema}/{table}.sql.
+     * Поддерживает оба разделителя для кросс-платформенности.
+     *
+     * @return array{0: string, 1: string}
      */
+    private function extractSchemaAndTable(string $filePath): array
+    {
+        $normalized = str_replace('\\', '/', $filePath);
+        $parts = explode('/', $normalized);
+        $count = count($parts);
+        $schema = $count >= 2 ? $parts[$count - 2] : '';
+        $tableName = basename($filePath, '.sql');
+        return [$schema, $tableName];
+    }
+
     private function buildDumpsPath(?string $connectionName): string
     {
         if ($connectionName !== null) {
             return $this->projectDir . '/' . DumpConfig::DUMPS_DIR . '/' . $connectionName;
         }
-
         return $this->projectDir . '/' . DumpConfig::DUMPS_DIR;
     }
 
-    /**
-     * Импортировать один файл дампа
-     *
-     * @param \Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface $connection
-     * @param bool $backslashEscapes
-     */
-    private function importDumpFile(string $filePath, int $current, int $total, $connection, $backslashEscapes = false): void
-    {
-        // Извлечение schema из пути: database/dumps/{schema}/{table}.sql
-        $pathParts = explode(DIRECTORY_SEPARATOR, $filePath);
-        $schema = $pathParts[count($pathParts) - 2] ?? '';
-        $tableName = basename($filePath, '.sql');
-
+    private function importDumpFile(
+        string $filePath,
+        int $current,
+        int $total,
+        DatabaseConnectionInterface $connection,
+        ?string $connectionName,
+        bool $backslashEscapes = false
+    ): void {
+        [$schema, $tableName] = $this->extractSchemaAndTable($filePath);
         $fullName = "{$schema}.{$tableName}";
         $this->logger->info("[{$current}/{$total}] {$fullName} ... ");
 
         try {
             $sql = $this->fileSystem->read($filePath);
 
-            // Валидация схемы перед импортом
             if ($this->schemaValidator !== null) {
                 $dumpColumns = $this->parser->parseColumnList($sql);
                 if ($dumpColumns !== null) {
-                    $connectionName = null; // текущее подключение уже выбрано
                     $validation = $this->schemaValidator->validate($schema, $tableName, $dumpColumns, $connectionName);
                     if (!$validation->isValid()) {
                         $this->logger->warning(
@@ -322,7 +301,7 @@ class DatabaseImporter
                         );
                         if (!$this->ignoreSchemaMismatch) {
                             $this->logger->warning(
-                                "[{$current}/{$total}] {$fullName} — пропущен. Используйте --ignore-schema-mismatch для импорта"
+                                "[{$current}/{$total}] {$fullName} — пропущен. Используйте --ignore-schema-mismatch"
                             );
                             return;
                         }
@@ -333,15 +312,23 @@ class DatabaseImporter
             $statements = $this->parser->parseFile($sql, $backslashEscapes);
 
             foreach ($statements as $statement) {
-                if (!empty(trim($statement))) {
-                    $connection->executeStatement($statement);
+                if (trim($statement) === '') {
+                    continue;
                 }
+                $connection->executeStatement($statement);
             }
 
             $this->logger->info("[{$current}/{$total}] {$fullName} ... OK");
-        } catch (\Exception $e) {
-            $this->logger->error("[{$current}/{$total}] {$fullName} ... ERROR: " . $e->getMessage());
+        } catch (\Throwable $e) {
+            $this->logger->error(
+                "[{$current}/{$total}] {$fullName} ... ERROR: " . $this->sanitizeMessage($e->getMessage())
+            );
             throw $e;
         }
+    }
+
+    private function sanitizeMessage(string $msg): string
+    {
+        return \Timbrs\DatabaseDumps\Util\ErrorMessageSanitizer::sanitize($msg);
     }
 }

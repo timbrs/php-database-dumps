@@ -9,11 +9,18 @@ use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Exception\ExportFailedException;
 use Timbrs\DatabaseDumps\Service\Generator\SqlGenerator;
-use Timbrs\DatabaseDumps\Service\Graph\SortResult;
 use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
+use Timbrs\DatabaseDumps\Service\Security\ProductionGuard;
 
 /**
- * Экспорт данных из БД в SQL дампы
+ * Экспорт данных из БД в SQL-дампы.
+ *
+ * Особенности безопасности:
+ * - При наличии ProductionGuard в конструкторе и НЕ установленном allowProdExport
+ *   экспорт блокируется в prod (защита от утечки PII).
+ * - Запись файла атомарная (writeAtomic): дамп никогда не остаётся «половинным»
+ *   при падении посреди.
+ * - При исключении частично записанный файл удаляется (cleanup).
  */
 class DatabaseDumper
 {
@@ -41,6 +48,12 @@ class DatabaseDumper
     /** @var DumpConfig */
     private $dumpConfig;
 
+    /** @var ProductionGuard|null */
+    private $productionGuard;
+
+    /** @var bool */
+    private $allowProdExport = false;
+
     public function __construct(
         DataFetcher $dataFetcher,
         SqlGenerator $sqlGenerator,
@@ -49,7 +62,8 @@ class DatabaseDumper
         string $projectDir,
         TableDependencyResolver $dependencyResolver,
         FakerInterface $faker,
-        DumpConfig $dumpConfig
+        DumpConfig $dumpConfig,
+        ProductionGuard $productionGuard = null
     ) {
         $this->dataFetcher = $dataFetcher;
         $this->sqlGenerator = $sqlGenerator;
@@ -59,18 +73,25 @@ class DatabaseDumper
         $this->dependencyResolver = $dependencyResolver;
         $this->faker = $faker;
         $this->dumpConfig = $dumpConfig;
+        $this->productionGuard = $productionGuard;
+    }
+
+    public function setAllowProdExport(bool $allow): void
+    {
+        $this->allowProdExport = $allow;
     }
 
     /**
-     * Экспортировать таблицу
+     * Экспортировать одну таблицу.
      */
     public function exportTable(TableConfig $config): void
     {
+        $this->guardProd();
         $this->doExportTable($config, null, null);
     }
 
     /**
-     * Экспортировать все таблицы
+     * Экспортировать список таблиц (с учётом FK-зависимостей).
      *
      * @param array<TableConfig> $tables
      */
@@ -80,13 +101,14 @@ class DatabaseDumper
             return;
         }
 
-        // Sort by FK dependencies (parents first)
-        $tableKeys = array_map(function (TableConfig $t) {
-            return $t->getFullTableName();
-        }, $tables);
+        $this->guardProd();
+
+        $tableKeys = [];
+        foreach ($tables as $t) {
+            $tableKeys[] = $t->getFullTableName();
+        }
 
         $connectionName = $tables[0]->getConnectionName();
-
         $sortResult = $this->dependencyResolver->sortForExportWithResult($tableKeys, $connectionName);
         $sortedKeys = $sortResult->getSorted();
 
@@ -95,76 +117,72 @@ class DatabaseDumper
             $tableMap[$t->getFullTableName()] = $t;
         }
 
-        // Прокинуть deferred-информацию в TableConfig
         if ($sortResult->hasDeferredEdges()) {
-            $this->logger->info('Обнаружены циклические FK-зависимости, разорваны рёбра: '
-                . count($sortResult->getDeferredEdges()));
+            $this->logger->info(
+                'Обнаружены циклические FK-зависимости, разорваны рёбра: '
+                . count($sortResult->getDeferredEdges())
+            );
             foreach ($sortResult->getDeferredEdges() as $edge) {
                 $sourceKey = $edge['source'];
-                if (isset($tableMap[$sourceKey]) && $edge['source_column'] !== '') {
-                    $existing = $tableMap[$sourceKey];
-                    $currentDeferred = $existing->getDeferredColumns();
-                    if ($currentDeferred === null) {
-                        $currentDeferred = [];
-                    }
-                    $currentDeferred[] = [
-                        'column' => $edge['source_column'],
-                        'reference_table' => $edge['target'],
-                        'reference_column' => $edge['target_column'],
-                    ];
-                    // Пересоздаём TableConfig с deferred-информацией
-                    $tableMap[$sourceKey] = new TableConfig(
-                        $existing->getSchema(),
-                        $existing->getTable(),
-                        $existing->getLimit(),
-                        $existing->getWhere(),
-                        $existing->getOrderBy(),
-                        $existing->getConnectionName(),
-                        $existing->getCascadeFrom(),
-                        $currentDeferred
-                    );
+                if (!isset($tableMap[$sourceKey]) || $edge['source_column'] === '') {
+                    continue;
                 }
+                $existing = $tableMap[$sourceKey];
+                $currentDeferred = $existing->getDeferredColumns() ?? [];
+                $currentDeferred[] = [
+                    'column' => $edge['source_column'],
+                    'reference_table' => $edge['target'],
+                    'reference_column' => $edge['target_column'],
+                ];
+                $tableMap[$sourceKey] = $existing->withDeferredColumns($currentDeferred);
             }
         }
 
-        $tables = [];
+        $ordered = [];
         foreach ($sortedKeys as $key) {
             if (isset($tableMap[$key])) {
-                $tables[] = $tableMap[$key];
+                $ordered[] = $tableMap[$key];
             }
         }
 
-        $total = count($tables);
+        $total = count($ordered);
         $current = 0;
-
-        foreach ($tables as $config) {
+        foreach ($ordered as $config) {
             $current++;
             $this->doExportTable($config, $current, $total);
         }
     }
 
-    /**
-     * @param int|null $current Номер текущей таблицы (null = одиночный экспорт)
-     * @param int|null $total Общее количество таблиц
-     */
+    private function guardProd(): void
+    {
+        if ($this->productionGuard !== null) {
+            $this->productionGuard->ensureSafeForExport($this->allowProdExport);
+        }
+    }
+
     private function doExportTable(TableConfig $config, ?int $current, ?int $total): void
     {
-        $prefix = ($current !== null && $total !== null)
-            ? "[{$current}/{$total}] "
-            : '';
+        $prefix = ($current !== null && $total !== null) ? "[{$current}/{$total}] " : '';
         $tableName = $config->getFullTableName();
 
-        try {
-            // 1. Загрузка данных
-            $rows = $this->dataFetcher->fetch($config);
+        $filename = $this->buildDumpPath($config);
+        $tmpPath = $filename . '.tmp.' . bin2hex(random_bytes(4));
 
-            // 2. Применение фейкера (замена ПД)
+        try {
+            $this->ensureDirectoryExists(dirname($filename));
+
+            // Streaming-выборка
+            $rows = $this->dataFetcher->iterate($config);
+
+            // Faker (если настроен) — применяется ПОСЛЕ выборки.
+            // Faker::apply работает с массивом, поэтому при наличии faker мы
+            // буферизуем по batchSize (через генератор SqlGenerator + InsertGenerator)
             $fakerTableConfig = $this->dumpConfig->getFakerConfig()->getTableFaker(
                 $config->getSchema(),
                 $config->getTable()
             );
             if ($fakerTableConfig !== null) {
-                $rows = $this->faker->apply(
+                $rows = $this->applyFakerStreaming(
                     $config->getSchema(),
                     $config->getTable(),
                     $fakerTableConfig,
@@ -172,40 +190,71 @@ class DatabaseDumper
                 );
             }
 
-            // 3. Потоковая генерация SQL и запись на диск
-            $filename = $this->buildDumpPath($config);
-            $this->ensureDirectoryExists(dirname($filename));
-
             $fetchQuery = $this->dataFetcher->getLastQuery();
 
+            // Пишем сначала в .tmp, по успеху — rename в финальный путь.
             $first = true;
-            foreach ($this->sqlGenerator->generateChunks($config, $rows, $fetchQuery) as $chunk) {
+            foreach ($this->sqlGenerator->generateChunks($config, $rows, $fetchQuery, null) as $chunk) {
                 if ($first) {
-                    $this->fileSystem->write($filename, $chunk);
+                    $this->fileSystem->write($tmpPath, $chunk);
                     $first = false;
                 } else {
-                    $this->fileSystem->append($filename, $chunk);
+                    $this->fileSystem->append($tmpPath, $chunk);
+                }
+            }
+
+            // Атомарный rename .tmp → .sql
+            if (file_exists($tmpPath)) {
+                if (!@rename($tmpPath, $filename)) {
+                    throw new \RuntimeException("Не удалось переименовать {$tmpPath} → {$filename}");
                 }
             }
 
             $size = $this->fileSystem->getFileSize($filename);
             $this->logger->info("{$prefix}{$tableName} ... OK ({$this->formatBytes($size)})");
         } catch (\Exception $e) {
-            $this->logger->error("{$prefix}{$tableName} ... ERROR: " . $e->getMessage());
+            // Cleanup незавершённого файла, чтобы импорт не подобрал битый дамп
+            if (file_exists($tmpPath)) {
+                @unlink($tmpPath);
+            }
+            $this->logger->error("{$prefix}{$tableName} ... ERROR: " . $this->sanitizeErrorMessage($e));
             throw ExportFailedException::fromException($tableName, $e);
         }
     }
 
     /**
-     * Построить путь к dump-файлу
+     * Стримовая обёртка над Faker::apply.
      *
-     * Дефолтное подключение: database/dumps/{schema}/{table}.sql
-     * Именованное подключение: database/dumps/{connection}/{schema}/{table}.sql
+     * Faker работает с массивом строк, чтобы согласовать значения внутри row;
+     * мы передаём небольшими батчами по 500 строк, сохраняя константное потребление памяти.
+     *
+     * @param array<string, string> $fakerTableConfig
+     * @param iterable<array<string, mixed>> $rows
+     * @return \Generator<int, array<string, mixed>>
      */
+    private function applyFakerStreaming(string $schema, string $table, array $fakerTableConfig, iterable $rows): \Generator
+    {
+        $buffer = [];
+        $bufferSize = 500;
+        foreach ($rows as $row) {
+            $buffer[] = $row;
+            if (count($buffer) >= $bufferSize) {
+                foreach ($this->faker->apply($schema, $table, $fakerTableConfig, $buffer) as $r) {
+                    yield $r;
+                }
+                $buffer = [];
+            }
+        }
+        if (!empty($buffer)) {
+            foreach ($this->faker->apply($schema, $table, $fakerTableConfig, $buffer) as $r) {
+                yield $r;
+            }
+        }
+    }
+
     private function buildDumpPath(TableConfig $config): string
     {
         $connectionName = $config->getConnectionName();
-
         $dumpsDir = DumpConfig::DUMPS_DIR;
 
         if ($connectionName !== null) {
@@ -215,9 +264,6 @@ class DatabaseDumper
         return $this->projectDir . "/{$dumpsDir}/{$config->getSchema()}/{$config->getTable()}.sql";
     }
 
-    /**
-     * Убедиться что директория существует
-     */
     private function ensureDirectoryExists(string $directory): void
     {
         if (!$this->fileSystem->exists($directory)) {
@@ -225,9 +271,6 @@ class DatabaseDumper
         }
     }
 
-    /**
-     * Форматировать байты в читаемый формат
-     */
     private function formatBytes(int $bytes): string
     {
         if ($bytes >= 1048576) {
@@ -237,5 +280,10 @@ class DatabaseDumper
             return round($bytes / 1024, 2) . ' KB';
         }
         return $bytes . ' bytes';
+    }
+
+    private function sanitizeErrorMessage(\Throwable $e): string
+    {
+        return \Timbrs\DatabaseDumps\Util\ErrorMessageSanitizer::sanitize($e->getMessage());
     }
 }

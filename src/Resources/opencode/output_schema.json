@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Контракт вывода агента dbdump-mapper",
+  "description": "Файлы в database/analysis/out/*.json. Каждый файл может содержать любой набор из трёх ключей.",
+  "type": "object",
+  "properties": {
+    "relationships": {
+      "type": "array",
+      "description": "Связи между таблицами, заданные в коде (включая отсутствующие во FK).",
+      "items": {
+        "type": "object",
+        "required": ["source_table", "source_column", "target_table", "target_column"],
+        "properties": {
+          "source_table": {"type": "string", "description": "schema.table дочерней таблицы"},
+          "source_column": {"type": "string", "description": "колонка-ссылка в дочерней таблице"},
+          "target_table": {"type": "string", "description": "schema.table родительской таблицы"},
+          "target_column": {"type": "string", "description": "колонка родителя (обычно PK)"},
+          "kind": {"type": "string", "enum": ["belongs_to", "has_many", "has_one", "morph", "raw_join", "other"]},
+          "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
+          "source": {"type": "string", "const": "code"}
+        }
+      }
+    },
+    "columns": {
+      "type": "array",
+      "description": "Карта использования колонок в коде.",
+      "items": {
+        "type": "object",
+        "required": ["table", "column"],
+        "properties": {
+          "table": {"type": "string", "description": "schema.table"},
+          "column": {"type": "string"},
+          "usages": {"type": "array", "items": {"type": "string", "enum": ["read", "write", "filter", "join", "order"]}},
+          "is_key": {"type": "boolean", "description": "ключевая бизнес-колонка (статус/признак/тип)"},
+          "note": {"type": "string"}
+        }
+      }
+    },
+    "criteria": {
+      "type": "array",
+      "description": "Именованные бизнес-сегменты для sample.criteria.",
+      "items": {
+        "type": "object",
+        "required": ["table", "name", "sql_where"],
+        "properties": {
+          "table": {"type": "string", "description": "schema.table"},
+          "name": {"type": "string", "description": "идентификатор сегмента [A-Za-z_][A-Za-z0-9_$]*"},
+          "sql_where": {"type": "string", "description": "валидный WHERE-фрагмент, без ';' и SQL-комментариев"},
+          "limit": {"type": "integer", "minimum": 1, "description": "квота строк на корзину (необязательно)"},
+          "source": {"type": "string", "const": "code"},
+          "confidence": {"type": "integer", "minimum": 0, "maximum": 100}
+        }
+      }
+    }
+  }
+}

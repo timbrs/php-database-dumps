@@ -2,21 +2,26 @@
 
 namespace Timbrs\DatabaseDumps\Bridge\Symfony\Command;
 
-use Timbrs\DatabaseDumps\Service\Importer\DatabaseImporter;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
+use Timbrs\DatabaseDumps\Bridge\Symfony\ConsoleLogger;
+use Timbrs\DatabaseDumps\Contract\LoggerInterface;
+use Timbrs\DatabaseDumps\Service\Importer\DatabaseImporter;
 
 class DbInitCommand extends Command
 {
     /** @var DatabaseImporter */
     private $importer;
+    /** @var LoggerInterface */
+    private $logger;
 
-    public function __construct(DatabaseImporter $importer)
+    public function __construct(DatabaseImporter $importer, LoggerInterface $logger)
     {
         $this->importer = $importer;
+        $this->logger = $logger;
         parent::__construct();
     }
 
@@ -49,6 +54,9 @@ HELP
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $io = new SymfonyStyle($input, $output);
+        if ($this->logger instanceof ConsoleLogger) {
+            $this->logger->setIo($io);
+        }
 
         $io->title('Инициализация БД с импортом дампов');
 

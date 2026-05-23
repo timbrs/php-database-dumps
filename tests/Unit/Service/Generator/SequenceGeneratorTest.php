@@ -31,22 +31,22 @@ class SequenceGeneratorTest extends TestCase
     public function testGenerateWithSequences(): void
     {
         $this->connection
-            ->expects($this->once())
-            ->method('fetchFirstColumn')
-            ->willReturn(['users.users_id_seq']);
+            ->method('fetchAllAssociative')
+            ->willReturn([
+                ['column_name' => 'id', 'sequence_name' => 'users.users_id_seq'],
+            ]);
 
         $sql = $this->generator->generate('users', 'users');
 
         $this->assertStringContainsString('Сброс sequences', $sql);
         $this->assertStringContainsString("setval('users.users_id_seq'", $sql);
-        $this->assertStringContainsString('MAX(id)', $sql);
+        $this->assertStringContainsString('MAX("id")', $sql);
     }
 
     public function testGenerateWithNoSequences(): void
     {
         $this->connection
-            ->expects($this->once())
-            ->method('fetchFirstColumn')
+            ->method('fetchAllAssociative')
             ->willReturn([]);
 
         $sql = $this->generator->generate('users', 'users');
@@ -58,13 +58,13 @@ class SequenceGeneratorTest extends TestCase
     public function testGenerateHandlesException(): void
     {
         $this->connection
-            ->expects($this->once())
-            ->method('fetchFirstColumn')
+            ->method('fetchAllAssociative')
             ->willThrowException(new \Exception('Database error'));
 
         $sql = $this->generator->generate('users', 'users');
 
-        $this->assertStringContainsString('Ошибка получения sequences', $sql);
-        $this->assertStringContainsString('Database error', $sql);
+        // Не утечь сообщение об ошибке в SQL — только статичный комментарий
+        $this->assertStringContainsString('Не удалось получить список sequences', $sql);
+        $this->assertStringNotContainsString('Database error', $sql);
     }
 }

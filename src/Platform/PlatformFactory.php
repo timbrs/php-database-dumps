@@ -3,6 +3,7 @@
 namespace Timbrs\DatabaseDumps\Platform;
 
 use Timbrs\DatabaseDumps\Contract\DatabasePlatformInterface;
+use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 
 /**
  * Фабрика для создания платформы по имени
@@ -17,24 +18,39 @@ class PlatformFactory
     public const OCI = 'oci';
 
     /**
-     * @param string $platformName Имя платформы (postgresql, pgsql, mysql, mariadb)
-     * @return DatabasePlatformInterface
-     * @throws \InvalidArgumentException
+     * Привести имя платформы к каноническому виду.
      */
-    public static function create(string $platformName): DatabasePlatformInterface
+    public static function canonicalize(string $platformName): string
     {
         $normalized = strtolower(trim($platformName));
 
         switch ($normalized) {
             case self::POSTGRESQL:
             case self::PGSQL:
-                return new PostgresPlatform();
+                return self::POSTGRESQL;
             case self::MYSQL:
             case self::MARIADB:
-                return new MySqlPlatform();
+                return self::MYSQL;
             case self::ORACLE:
             case self::OCI:
-                return new OraclePlatform();
+                return self::ORACLE;
+            default:
+                return $normalized;
+        }
+    }
+
+    /**
+     * @throws \InvalidArgumentException
+     */
+    public static function create(string $platformName, LoggerInterface $logger = null): DatabasePlatformInterface
+    {
+        switch (self::canonicalize($platformName)) {
+            case self::POSTGRESQL:
+                return new PostgresPlatform($logger);
+            case self::MYSQL:
+                return new MySqlPlatform($logger);
+            case self::ORACLE:
+                return new OraclePlatform($logger);
             default:
                 throw new \InvalidArgumentException("Неподдерживаемая платформа БД: {$platformName}");
         }

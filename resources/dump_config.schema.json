@@ -66,16 +66,62 @@
                 "$ref": "#/definitions/cascade_from_item"
               },
               "description": "Каскадная фильтрация по FK-родителю. Генерирует WHERE-подзапросы для связности данных."
+            },
+            "sample": {
+              "$ref": "#/definitions/sample",
+              "description": "Выборка по именованным критериям («все фломастеры»): объединение корзин без дублей."
             }
           },
           "additionalProperties": false
         }
       }
     },
+    "sample": {
+      "type": "object",
+      "description": "Набор именованных критериев выборки. Итог — объединение корзин без дублей (дедуп по PK).",
+      "properties": {
+        "criteria": {
+          "type": "array",
+          "description": "Именованные корзины: у каждой свой WHERE и квота.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_$]*$",
+                "description": "Идентификатор корзины"
+              },
+              "where": {
+                "type": "string",
+                "description": "SQL WHERE-фрагмент корзины (допустим EXISTS-подзапрос)"
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Квота строк на корзину"
+              }
+            },
+            "required": ["name", "where", "limit"],
+            "additionalProperties": false
+          }
+        },
+        "stratify_by": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_$]*$",
+          "description": "Колонка для разворачивания в по-корзине-на-DISTINCT-значение"
+        },
+        "per_value": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Квота строк для stratify_by"
+        }
+      },
+      "additionalProperties": false
+    },
     "faker_pattern": {
       "type": "string",
-      "enum": ["fio", "fio_short", "name", "email", "phone", "firstname", "lastname", "patronymic"],
-      "description": "Тип паттерна ПД: fio (Фамилия Имя Отчество), fio_short (Фамилия И.О.), name (Фамилия Имя), email, phone, firstname (имя), lastname (фамилия), patronymic (отчество)"
+      "enum": ["fio", "fio_short", "name", "email", "phone", "firstname", "lastname", "patronymic", "gender"],
+      "description": "Тип паттерна ПД: fio (Фамилия Имя Отчество), fio_short (Фамилия И.О.), name (Фамилия Имя), email, phone, firstname (имя), lastname (фамилия), patronymic (отчество), gender (пол)"
     },
     "faker": {
       "description": "Замена персональных данных. Ключ — имя схемы.",

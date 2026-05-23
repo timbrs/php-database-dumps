@@ -159,4 +159,222 @@ class TableConfigTest extends TestCase
         $config = TableConfig::fromArray('public', 'users', []);
         $this->assertNull($config->getDeferredColumns());
     }
+
+    public function testSampleDefaultIsNull(): void
+    {
+        $config = new TableConfig('public', 'clients');
+        $this->assertNull($config->getSample());
+        $this->assertFalse($config->hasSample());
+    }
+
+    public function testValidSampleWithCriteria(): void
+    {
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'red', 'where' => "status = 'red'", 'limit' => 10],
+                ['name' => 'newish', 'where' => "created_at >= NOW() - INTERVAL '30 days'", 'limit' => 50],
+            ],
+        ];
+        $config = TableConfig::fromArray('public', 'clients', [TableConfig::KEY_SAMPLE => $sample]);
+
+        $this->assertTrue($config->hasSample());
+        $this->assertSame($sample, $config->getSample());
+    }
+
+    public function testValidSampleWithExistsSubquery(): void
+    {
+        // EXISTS-подзапрос со сбалансированными скобками/кавычками проходит validateClause.
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                [
+                    'name' => 'vip',
+                    'where' => "EXISTS (SELECT 1 FROM public.client_flags f WHERE f.client_id = clients.id AND f.flag = 'vip')",
+                    'limit' => 30,
+                ],
+            ],
+        ];
+        $config = new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+        $this->assertTrue($config->hasSample());
+    }
+
+    public function testValidSampleWithStratifyBy(): void
+    {
+        $sample = [
+            TableConfig::SAMPLE_KEY_STRATIFY_BY => 'status',
+            TableConfig::SAMPLE_KEY_PER_VALUE => 10,
+        ];
+        $config = TableConfig::fromArray('public', 'clients', [TableConfig::KEY_SAMPLE => $sample]);
+        $this->assertTrue($config->hasSample());
+    }
+
+    public function testSampleRejectsEmptyDefinition(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new TableConfig('public', 'clients', null, null, null, null, null, null, []);
+    }
+
+    public function testSampleRejectsCriterionWithSemicolon(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'evil', 'where' => "status = 'red'; DROP TABLE users", 'limit' => 10],
+            ],
+        ];
+        new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+    }
+
+    public function testSampleRejectsCriterionWithoutLimit(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'red', 'where' => "status = 'red'"],
+            ],
+        ];
+        new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+    }
+
+    public function testSampleRejectsNonIntLimit(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'red', 'where' => "status = 'red'", 'limit' => 'ten'],
+            ],
+        ];
+        new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+    }
+
+    public function testSampleRejectsInvalidCriterionName(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'red-zone', 'where' => "status = 'red'", 'limit' => 10],
+            ],
+        ];
+        new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+    }
+
+    public function testSampleRejectsInvalidStratifyByIdentifier(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $sample = [TableConfig::SAMPLE_KEY_STRATIFY_BY => 'sta;tus'];
+        new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+    }
+
+    public function testSampleRejectsCriterionWithHashComment(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'evil', 'where' => "status = 'red' # comment", 'limit' => 10],
+            ],
+        ];
+        new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+    }
+
+    public function testWhereRejectsHashComment(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new TableConfig('public', 'clients', 10, 'id > 0 # drop');
+    }
+
+    public function testSampleRejectsZeroPerValue(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $sample = [
+            TableConfig::SAMPLE_KEY_STRATIFY_BY => 'status',
+            TableConfig::SAMPLE_KEY_PER_VALUE => 0,
+        ];
+        new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+    }
+
+    public function testSampleRejectsNonIntPerValue(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $sample = [
+            TableConfig::SAMPLE_KEY_STRATIFY_BY => 'status',
+            TableConfig::SAMPLE_KEY_PER_VALUE => 5.5,
+        ];
+        new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+    }
+
+    public function testSampleRejectsZeroCriterionLimit(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'red', 'where' => "status = 'red'", 'limit' => 0],
+            ],
+        ];
+        new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+    }
+
+    public function testSampleRejectsNonArrayCriteria(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $sample = [TableConfig::SAMPLE_KEY_CRITERIA => 'not-an-array'];
+        new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+    }
+
+    public function testSampleRejectsNonArrayCriterion(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $sample = [TableConfig::SAMPLE_KEY_CRITERIA => ['not-an-array']];
+        new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+    }
+
+    public function testSampleRejectsEmptyCriterionWhere(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'red', 'where' => '', 'limit' => 10],
+            ],
+        ];
+        new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+    }
+
+    public function testSampleAcceptsStratifyWithDefaultPerValue(): void
+    {
+        // per_value не задан — допустимо, билдер подставит DEFAULT_PER_VALUE.
+        $sample = [TableConfig::SAMPLE_KEY_STRATIFY_BY => 'status'];
+        $config = new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+        $this->assertTrue($config->hasSample());
+    }
+
+    public function testSampleAcceptsCriteriaAndStratifyTogether(): void
+    {
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'red', 'where' => "status = 'red'", 'limit' => 10],
+            ],
+            TableConfig::SAMPLE_KEY_STRATIFY_BY => 'region',
+            TableConfig::SAMPLE_KEY_PER_VALUE => 5,
+        ];
+        $config = new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+        $this->assertTrue($config->hasSample());
+    }
+
+    public function testFromArrayRejectsNonArraySample(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        TableConfig::fromArray('public', 'clients', [TableConfig::KEY_SAMPLE => 'nope']);
+    }
+
+    public function testWithDeferredColumnsPreservesSample(): void
+    {
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'red', 'where' => "status = 'red'", 'limit' => 10],
+            ],
+        ];
+        $config = new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+        $updated = $config->withDeferredColumns([
+            ['column' => 'parent_id', 'reference_table' => 'public.x', 'reference_column' => 'id'],
+        ]);
+        $this->assertSame($sample, $updated->getSample());
+    }
 }

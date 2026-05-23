@@ -7,6 +7,9 @@ use Timbrs\DatabaseDumps\Config\TableConfig;
 use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
+use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
+use Timbrs\DatabaseDumps\Service\Analysis\AnalysisReportWriter;
+use Timbrs\DatabaseDumps\Service\Faker\LlmPatternDetector;
 use Timbrs\DatabaseDumps\Service\Faker\PatternDetector;
 use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
 use Symfony\Component\Yaml\Yaml;
@@ -45,6 +48,18 @@ class ConfigGenerator
     /** @var PatternDetector */
     private $patternDetector;
 
+    /** @var LlmPatternDetector|null */
+    private $llmDetector;
+
+    /** @var ColumnStatisticsInspector|null */
+    private $statisticsInspector;
+
+    /** @var CriteriaSuggester|null */
+    private $criteriaSuggester;
+
+    /** @var AnalysisReportWriter|null */
+    private $reportWriter;
+
     /** @var bool */
     private $cascadeEnabled;
 
@@ -54,11 +69,30 @@ class ConfigGenerator
     /** @var bool */
     private $splitBySchema;
 
+    /** @var bool */
+    private $aiEnabled = false;
+
+    /** @var bool Авто-генерация sample.criteria из категориальных колонок */
+    private $criteriaEnabled = false;
+
+    /** @var bool Глубокий анализ: профилирование + отчёт */
+    private $deepEnabled = false;
+
     /** @var string */
     private $mode = self::MODE_ALL;
 
     /** @var string|null */
     private $modeScope;
+
+    /**
+     * Накопитель данных анализа для отчёта.
+     *
+     * @var array<int, array<string, mixed>>
+     */
+    private $analysisTables = [];
+
+    /** @var string|null Корень хост-проекта (для каталога database/analysis) */
+    private $projectDir;
 
     public function __construct(
         TableInspector $inspector,
@@ -71,7 +105,12 @@ class ConfigGenerator
         PatternDetector $patternDetector,
         bool $cascadeEnabled = true,
         bool $fakerEnabled = true,
-        bool $splitBySchema = true
+        bool $splitBySchema = true,
+        LlmPatternDetector $llmDetector = null,
+        ColumnStatisticsInspector $statisticsInspector = null,
+        CriteriaSuggester $criteriaSuggester = null,
+        AnalysisReportWriter $reportWriter = null,
+        ?string $projectDir = null
     ) {
         $this->inspector = $inspector;
         $this->filter = $filter;
@@ -84,6 +123,11 @@ class ConfigGenerator
         $this->cascadeEnabled = $cascadeEnabled;
         $this->fakerEnabled = $fakerEnabled;
         $this->splitBySchema = $splitBySchema;
+        $this->llmDetector = $llmDetector;
+        $this->statisticsInspector = $statisticsInspector;
+        $this->criteriaSuggester = $criteriaSuggester;
+        $this->reportWriter = $reportWriter;
+        $this->projectDir = $projectDir !== null ? rtrim($projectDir, '/\\') : null;
     }
 
     /**
@@ -111,6 +155,40 @@ class ConfigGenerator
     }
 
     /**
+     * Включить LLM-детекцию ПД (если LLM сконфигурирован и доступен).
+     *
+     * При недоступном LLM детекция тихо деградирует на regex.
+     */
+    public function setAiEnabled(bool $enabled): void
+    {
+        $this->aiEnabled = $enabled;
+    }
+
+    /**
+     * Включить авто-генерацию sample.criteria из категориальных колонок (--criteria).
+     */
+    public function setCriteriaEnabled(bool $enabled): void
+    {
+        $this->criteriaEnabled = $enabled;
+    }
+
+    /**
+     * Включить глубокий анализ: профилирование + отчёт (--deep).
+     */
+    public function setDeepEnabled(bool $enabled): void
+    {
+        $this->deepEnabled = $enabled;
+    }
+
+    /**
+     * Доступен ли LLM (для авто-режима --ai).
+     */
+    public function isLlmAvailable(): bool
+    {
+        return $this->llmDetector !== null && $this->llmDetector->isAvailable();
+    }
+
+    /**
      * @param string $mode Режим: MODE_ALL, MODE_SCHEMA, MODE_NEW, MODE_TABLE
      * @param string|null $scope Область действия (имя схемы или schema.table)
      */
@@ -130,21 +208,26 @@ class ConfigGenerator
         $totalStats = ['full' => 0, 'partial' => 0, 'skipped' => 0, 'empty' => 0];
         $config = [];
         $baseConfig = [];
+        $this->analysisTables = [];
         /** @var array<string, true> $existingTableSet */
         $existingTableSet = [];
+
+        if ($this->aiEnabled && ($this->llmDetector === null || !$this->llmDetector->isAvailable())) {
+            $this->logger->warning(
+                'AI-режим запрошен, но LLM недоступен (DBDUMP_LLM_URL не задан) — '
+                . 'детекция ПД выполняется regex-эвристиками.'
+            );
+        }
 
         // Загрузка существующего конфига для не-ALL режимов
         if ($this->mode !== self::MODE_ALL) {
             $baseConfig = $this->loadExistingConfigArray($outputPath);
 
-            if ($this->mode === self::MODE_SCHEMA && $this->modeScope !== null) {
-                $this->removeSchemaFromConfig($baseConfig, $this->modeScope);
-            } elseif ($this->mode === self::MODE_TABLE && $this->modeScope !== null) {
-                $parts = explode('.', $this->modeScope, 2);
-                $this->removeTableFromConfig($baseConfig, $parts[0], $parts[1]);
-            } elseif ($this->mode === self::MODE_NEW) {
+            if ($this->mode === self::MODE_NEW) {
                 $existingTableSet = $this->buildExistingTableSet($baseConfig);
             }
+            // SCHEMA / TABLE: НЕ удаляем существующие записи, чтобы сохранить пользовательские
+            // правки (where/order_by/limit/cascade_from/faker). При мёрже эти поля имеют приоритет.
         }
 
         // Дефолтное подключение
@@ -206,7 +289,38 @@ class ConfigGenerator
             $this->fileSystem->write($outputPath, $yaml);
         }
 
+        $this->writeAnalysisReport($outputPath);
+
         return $totalStats;
+    }
+
+    /**
+     * Записать отчёт анализа (REPORT.md + analysis_result.json) рядом с конфигом
+     * в каталог analysis/ — только в deep-режиме и при наличии writer'а.
+     */
+    private function writeAnalysisReport(string $outputPath): void
+    {
+        if (!$this->deepEnabled || $this->reportWriter === null || empty($this->analysisTables)) {
+            return;
+        }
+
+        // Каталог анализа — сиблинг database/dumps (database/analysis), якорится на корне
+        // проекта, чтобы совпадать с prepare-analysis/apply-analysis независимо от того,
+        // где лежит сам dump_config.yaml (в Symfony — config/, в Laravel — database/).
+        $analysisDir = $this->projectDir !== null
+            ? $this->projectDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR
+            : dirname($outputPath) . '/analysis';
+        $analysis = [
+            'generated_at' => gmdate('Y-m-d\TH:i:s\Z'),
+            'tables' => $this->analysisTables,
+        ];
+
+        try {
+            $paths = $this->reportWriter->write($analysisDir, $analysis);
+            $this->logger->info('Отчёт анализа записан: ' . $paths['report']);
+        } catch (\Exception $e) {
+            $this->logger->warning('Не удалось записать отчёт анализа: ' . $e->getMessage());
+        }
     }
 
     /**
@@ -230,6 +344,9 @@ class ConfigGenerator
 
         /** @var array<array{schema: string, table: string}> $nonEmptyTables */
         $nonEmptyTables = [];
+
+        /** @var array<string, int> $rowCounts key = "schema.table" */
+        $rowCounts = [];
 
         $tables = $this->inspector->listTables($connectionName);
 
@@ -283,6 +400,7 @@ class ConfigGenerator
             }
 
             $nonEmptyTables[] = ['schema' => $schema, 'table' => $table];
+            $rowCounts[$schema . '.' . $table] = $count;
 
             if ($count <= $threshold) {
                 $this->logger->info("{$prefix} ... full_export ({$count} строк)");
@@ -322,7 +440,7 @@ class ConfigGenerator
                 $schema = $tableInfo['schema'];
                 $table = $tableInfo['table'];
                 $this->logger->info("[{$fakerCurrent}/{$fakerTotal}] Анализ таблицы: {$schema}.{$table}");
-                $patterns = $this->patternDetector->detect($schema, $table, $connectionName);
+                $patterns = $this->detectPatterns($schema, $table, $connectionName);
                 if (!empty($patterns)) {
                     if (!isset($fakerSection[$schema])) {
                         $fakerSection[$schema] = [];
@@ -339,12 +457,113 @@ class ConfigGenerator
             }
         }
 
+        // Глубокий анализ: профилирование, авто-критерии, накопление данных отчёта.
+        if (($this->criteriaEnabled || $this->deepEnabled) && $this->statisticsInspector !== null) {
+            $this->enrichWithAnalysis($partialExport, $fakerSection, $rowCounts, $connectionName);
+        }
+
         return [
             DumpConfig::KEY_FULL_EXPORT => $fullExport,
             DumpConfig::KEY_PARTIAL_EXPORT => $partialExport,
             DumpConfig::KEY_FAKER => $fakerSection,
             'stats' => $stats,
         ];
+    }
+
+    /**
+     * Профилирование partial-таблиц, авто-генерация sample.criteria и накопление
+     * данных для отчёта.
+     *
+     * sample добавляется только таблицам БЕЗ cascade_from (они top-level сущности):
+     * у детей выборка управляется каскадом, а DataFetcher при наличии sample
+     * игнорирует cascade — смешивать нельзя.
+     *
+     * @param array<string, array<string, array<string, mixed>>> &$partialExport
+     * @param array<string, array<string, array<string, string>>> $fakerSection
+     * @param array<string, int> $rowCounts
+     */
+    private function enrichWithAnalysis(
+        array &$partialExport,
+        array $fakerSection,
+        array $rowCounts,
+        ?string $connectionName
+    ): void {
+        if ($this->statisticsInspector === null) {
+            return;
+        }
+
+        $connLabel = $connectionName ?? 'default';
+        $piiSource = ($this->aiEnabled && $this->llmDetector !== null && $this->llmDetector->isAvailable())
+            ? 'llm'
+            : 'regex';
+
+        foreach ($partialExport as $schema => $tables) {
+            foreach ($tables as $table => $conf) {
+                $fullKey = $schema . '.' . $table;
+                $profiles = $this->statisticsInspector->profileTable($schema, $table, $connectionName);
+
+                $criteria = [];
+                $hasCascade = isset($partialExport[$schema][$table][TableConfig::KEY_CASCADE_FROM]);
+                $hasUserSample = isset($partialExport[$schema][$table][TableConfig::KEY_SAMPLE]);
+
+                if ($this->criteriaSuggester !== null && !$hasCascade && !$hasUserSample) {
+                    $criteria = $this->criteriaSuggester->suggest($profiles, $connectionName);
+                    if (!empty($criteria)) {
+                        $partialExport[$schema][$table][TableConfig::KEY_SAMPLE] =
+                            $this->criteriaSuggester->toSampleConfig($criteria);
+                        $this->logger->info(sprintf(
+                            'sample.criteria для %s: %d корзин(ы) из категориальных колонок',
+                            $fullKey,
+                            count($criteria)
+                        ));
+                    }
+                }
+
+                if ($this->deepEnabled) {
+                    $this->analysisTables[] = [
+                        'connection' => $connLabel,
+                        'schema' => $schema,
+                        'table' => $table,
+                        'export_mode' => 'partial',
+                        'row_count' => $rowCounts[$fullKey] ?? null,
+                        'criteria' => $criteria,
+                        'pii' => $this->buildPiiReport($fakerSection[$schema][$table] ?? [], $piiSource),
+                        'profiles' => array_map(function (ColumnProfile $p) {
+                            return $p->toArray();
+                        }, $profiles),
+                    ];
+                }
+            }
+        }
+    }
+
+    /**
+     * @param array<string, string> $patterns column => pattern
+     * @return array<int, array{column: string, pattern: string, source: string}>
+     */
+    private function buildPiiReport(array $patterns, string $source): array
+    {
+        $result = [];
+        foreach ($patterns as $column => $pattern) {
+            $result[] = ['column' => (string) $column, 'pattern' => (string) $pattern, 'source' => $source];
+        }
+        return $result;
+    }
+
+    /**
+     * Выбрать детектор ПД: LLM (если включён и доступен) либо regex.
+     *
+     * LLM-детектор сам делает fallback на regex при сбое запроса, поэтому здесь
+     * достаточно проверить доступность.
+     *
+     * @return array<string, string> column => pattern_type
+     */
+    private function detectPatterns(string $schema, string $table, ?string $connectionName): array
+    {
+        if ($this->aiEnabled && $this->llmDetector !== null && $this->llmDetector->isAvailable()) {
+            return $this->llmDetector->detect($schema, $table, $connectionName);
+        }
+        return $this->patternDetector->detect($schema, $table, $connectionName);
     }
 
     /**
@@ -722,8 +941,16 @@ class ConfigGenerator
                 if (!isset($result[DumpConfig::KEY_PARTIAL_EXPORT][$schema])) {
                     $result[DumpConfig::KEY_PARTIAL_EXPORT][$schema] = [];
                 }
-                foreach ($tables as $table => $conf) {
-                    $result[DumpConfig::KEY_PARTIAL_EXPORT][$schema][$table] = $conf;
+                foreach ($tables as $table => $generatedConf) {
+                    $existingConf = $result[DumpConfig::KEY_PARTIAL_EXPORT][$schema][$table] ?? null;
+                    if (is_array($existingConf)) {
+                        // Pользовательские правки имеют приоритет: сохраняем where/order_by/limit/cascade_from
+                        // если они уже заданы. Добавляем только отсутствующие поля.
+                        $result[DumpConfig::KEY_PARTIAL_EXPORT][$schema][$table] =
+                            $this->mergePartialTableConfig($existingConf, $generatedConf);
+                    } else {
+                        $result[DumpConfig::KEY_PARTIAL_EXPORT][$schema][$table] = $generatedConf;
+                    }
                 }
             }
         }
@@ -736,8 +963,20 @@ class ConfigGenerator
                 if (!isset($result[DumpConfig::KEY_FAKER][$schema])) {
                     $result[DumpConfig::KEY_FAKER][$schema] = [];
                 }
-                foreach ($tables as $table => $columns) {
-                    $result[DumpConfig::KEY_FAKER][$schema][$table] = $columns;
+                foreach ($tables as $table => $generatedColumns) {
+                    $existingColumns = $result[DumpConfig::KEY_FAKER][$schema][$table] ?? [];
+                    if (is_array($existingColumns) && !empty($existingColumns)) {
+                        // Сохраняем существующие маппинги колонок (пользователь мог их подправить).
+                        // Добавляем только колонки, которые ещё не были в конфиге.
+                        foreach ($generatedColumns as $col => $pattern) {
+                            if (!isset($existingColumns[$col])) {
+                                $existingColumns[$col] = $pattern;
+                            }
+                        }
+                        $result[DumpConfig::KEY_FAKER][$schema][$table] = $existingColumns;
+                    } else {
+                        $result[DumpConfig::KEY_FAKER][$schema][$table] = $generatedColumns;
+                    }
                 }
             }
         }
@@ -770,5 +1009,27 @@ class ConfigGenerator
         $total['partial'] += $add['partial'];
         $total['skipped'] += $add['skipped'];
         $total['empty'] += $add['empty'];
+    }
+
+    /**
+     * Мёрж сгенерированной конфигурации одной partial-таблицы с существующей.
+     *
+     * Сохраняем пользовательские правки (where, order_by, limit, cascade_from):
+     * если поле задано в существующем — оставляем его.
+     * Добавляем только отсутствующие поля из сгенерированного.
+     *
+     * @param array<string, mixed> $existing
+     * @param array<string, mixed> $generated
+     * @return array<string, mixed>
+     */
+    private function mergePartialTableConfig(array $existing, array $generated): array
+    {
+        $merged = $existing;
+        foreach ($generated as $key => $value) {
+            if (!array_key_exists($key, $merged)) {
+                $merged[$key] = $value;
+            }
+        }
+        return $merged;
     }
 }

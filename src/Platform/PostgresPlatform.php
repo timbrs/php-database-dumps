@@ -3,21 +3,24 @@
 namespace Timbrs\DatabaseDumps\Platform;
 
 use Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface;
-use Timbrs\DatabaseDumps\Contract\DatabasePlatformInterface;
+use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 
 /**
  * Платформа PostgreSQL
  */
-class PostgresPlatform implements DatabasePlatformInterface
+class PostgresPlatform extends AbstractPlatform
 {
-    public function quoteIdentifier(string $identifier): string
+    /** @var LoggerInterface|null */
+    private $logger;
+
+    public function __construct(LoggerInterface $logger = null)
     {
-        return '"' . $identifier . '"';
+        $this->logger = $logger;
     }
 
-    public function getFullTableName(string $schema, string $table): string
+    protected function getIdentifierQuote(): string
     {
-        return $this->quoteIdentifier($schema) . '.' . $this->quoteIdentifier($table);
+        return '"';
     }
 
     public function getTruncateStatement(string $schema, string $table): string
@@ -25,17 +28,26 @@ class PostgresPlatform implements DatabasePlatformInterface
         return 'TRUNCATE TABLE ' . $this->getFullTableName($schema, $table) . ' CASCADE;';
     }
 
+    /**
+     * Генерирует SETVAL для всех sequences таблицы (включая IDENTITY-колонки PG 10+).
+     *
+     * - Идентификатор колонки подставляется через quoteIdentifier (защита от инъекций).
+     * - Имя sequence экранируется через одинарные кавычки (по правилам Postgres).
+     * - MAX берётся по фактической PK/serial-колонке, а не по жёсткому 'id'.
+     */
     public function getSequenceResetSql(string $schema, string $table, DatabaseConnectionInterface $connection): string
     {
         $sql = "-- Сброс sequences\n";
 
         try {
-            $sequences = $connection->fetchFirstColumn(
-                "SELECT pg_get_serial_sequence(:table_name, column_name) as sequence_name
+            // Запрос покрывает SERIAL/BIGSERIAL и GENERATED ... AS IDENTITY (PG 10+).
+            $rows = $connection->fetchAllAssociative(
+                "SELECT column_name AS column_name,
+                        pg_get_serial_sequence(:table_name, column_name) AS sequence_name
                  FROM information_schema.columns
                  WHERE table_schema = :schema
-                 AND table_name = :table
-                 AND column_default LIKE 'nextval%'",
+                   AND table_name = :table
+                   AND (column_default LIKE 'nextval(%' OR is_identity = 'YES')",
                 [
                     'schema' => $schema,
                     'table' => $table,
@@ -43,14 +55,32 @@ class PostgresPlatform implements DatabasePlatformInterface
                 ]
             );
 
-            foreach ($sequences as $sequence) {
-                if ($sequence) {
-                    $fullTable = $this->getFullTableName($schema, $table);
-                    $sql .= "SELECT setval('{$sequence}', (SELECT COALESCE(MAX(id), 1) FROM {$fullTable}));\n";
+            $fullTable = $this->getFullTableName($schema, $table);
+
+            foreach ($rows as $row) {
+                $sequenceName = isset($row['sequence_name']) ? $row['sequence_name'] : null;
+                $columnName = isset($row['column_name']) ? $row['column_name'] : null;
+
+                if (!$sequenceName || !$columnName) {
+                    continue;
                 }
+
+                $quotedColumn = $this->quoteIdentifier($columnName);
+                // Экранируем одиночную кавычку в имени sequence (защита от инъекции через имена)
+                $escapedSequence = str_replace("'", "''", $sequenceName);
+
+                $sql .= "SELECT setval('{$escapedSequence}', "
+                    . "(SELECT COALESCE(MAX({$quotedColumn}), 1) FROM {$fullTable}));\n";
             }
         } catch (\Exception $e) {
-            $sql .= '-- Ошибка получения sequences: ' . $e->getMessage() . "\n";
+            if ($this->logger !== null) {
+                $this->logger->warning(
+                    'Ошибка получения sequences для ' . $schema . '.' . $table . ': ' . $e->getMessage()
+                );
+            }
+            // В сам SQL пишем только статичный комментарий — без сообщения исключения,
+            // чтобы не утекали детали драйвера/данных в файлы дампа.
+            $sql .= "-- Не удалось получить список sequences (детали в логе)\n";
         }
 
         return $sql;
@@ -59,10 +89,5 @@ class PostgresPlatform implements DatabasePlatformInterface
     public function getRandomFunctionSql(): string
     {
         return 'RANDOM()';
-    }
-
-    public function getLimitSql(int $limit): string
-    {
-        return 'LIMIT ' . $limit;
     }
 }

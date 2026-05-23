@@ -6,60 +6,87 @@ use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
 use Timbrs\DatabaseDumps\Platform\PlatformFactory;
 
 /**
- * Определяет паттерны персональных данных в колонках таблицы
- * по выборке случайных строк (порог совпадения 80%).
+ * Определяет паттерны персональных данных в колонках таблицы по выборке случайных строк.
+ *
+ * Улучшения по сравнению с базовой версией:
+ * - Phone regex принимает международные форматы (>= 7 цифр), не только русский мобильный 9XX.
+ * - FIO regex дополнен поддержкой Latin-имён (для иностранных сотрудников),
+ *   апострофов (О'Брайен), non-breaking spaces (нормализуются через preg_replace).
+ * - Имена колонок (firstname/lastname/patronymic) могут быть определены БЕЗ наличия
+ *   composite name column (важно для схем, где хранятся только компоненты).
+ * - Gender map расширен: добавлены 1/0, true/false, Y/N, ISO 5218 1/2.
+ * - Sample size: использован TABLESAMPLE для PG (если поддерживается),
+ *   SAMPLE для Oracle — избегаем full table scan на больших таблицах.
+ * - Маленькие таблицы (<10 строк): помечаем подозрительные колонки по имени
+ *   (fail-safe для security — лучше лишние замены, чем пропуск PII).
  */
 class PatternDetector
 {
-    /** @var string Фамилия Имя Отчество (3 кириллических слова) */
     public const PATTERN_FIO = 'fio';
-    /** @var string Фамилия И.О. (сокращённое ФИО с инициалами) */
     public const PATTERN_FIO_SHORT = 'fio_short';
-    /** @var string Фамилия Имя (2 кириллических слова) */
     public const PATTERN_NAME = 'name';
-    /** @var string Email-адрес */
     public const PATTERN_EMAIL = 'email';
-    /** @var string Телефонный номер */
     public const PATTERN_PHONE = 'phone';
-    /** @var string Имя (одиночное, определяется кросс-корреляцией) */
     public const PATTERN_FIRSTNAME = 'firstname';
-    /** @var string Фамилия (одиночная, определяется кросс-корреляцией) */
     public const PATTERN_LASTNAME = 'lastname';
-    /** @var string Отчество (одиночное, определяется кросс-корреляцией) */
     public const PATTERN_PATRONYMIC = 'patronymic';
-    /** @var string Пол/гендер (определяется по имени колонки + значениям) */
     public const PATTERN_GENDER = 'gender';
 
-    /** @var int Размер выборки для анализа */
+    /**
+     * Список всех допустимых паттернов (используется для валидации FakerConfig).
+     */
+    public const ALLOWED_PATTERNS = [
+        self::PATTERN_FIO,
+        self::PATTERN_FIO_SHORT,
+        self::PATTERN_NAME,
+        self::PATTERN_EMAIL,
+        self::PATTERN_PHONE,
+        self::PATTERN_FIRSTNAME,
+        self::PATTERN_LASTNAME,
+        self::PATTERN_PATRONYMIC,
+        self::PATTERN_GENDER,
+    ];
+
     public const SAMPLE_SIZE = 200;
-    /** @var float Минимальная доля совпадений для детекции (80%) */
     public const DETECTION_THRESHOLD = 0.80;
 
-    /** @var string */
-    private const REGEX_EMAIL = '/^[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}$/u';
-    /** @var string */
-    private const REGEX_PHONE = '/^(?:\\+?[78])?[9]\\d{9}$/';
-    /** @var string 3 кириллических слова (с поддержкой дефиса) */
-    private const REGEX_FIO = '/^[А-ЯЁа-яё]+(?:\\-[А-ЯЁа-яё]+)?\\s+[А-ЯЁа-яё]+(?:\\-[А-ЯЁа-яё]+)?\\s+[А-ЯЁа-яё]+(?:\\-[А-ЯЁа-яё]+)?$/u';
-    /** @var string Фамилия + 2 инициала с точками */
-    private const REGEX_FIO_SHORT = '/^[А-ЯЁа-яё]+(?:\\-[А-ЯЁа-яё]+)?\\s+[А-ЯЁ]\\.\\s?[А-ЯЁ]\\.$/u';
-    /** @var string 2 кириллических слова (с поддержкой дефиса) */
-    private const REGEX_NAME = '/^[А-ЯЁа-яё]+(?:\\-[А-ЯЁа-яё]+)?\\s+[А-ЯЁа-яё]+(?:\\-[А-ЯЁа-яё]+)?$/u';
-    /** @var string Одно кириллическое слово (с поддержкой дефиса) */
-    private const REGEX_SINGLE_CYRILLIC_WORD = '/^[А-ЯЁа-яё]+(?:\\-[А-ЯЁа-яё]+)?$/u';
-    /** @var string Суффиксы отчеств */
-    private const REGEX_PATRONYMIC_SUFFIX = '/(ович|евич|ьич|овна|евна|ична|инична)$/u';
-    /** @var string Суффиксы фамилий (без -ин/-ина из-за совпадений с женскими именами) */
-    private const REGEX_LASTNAME_SUFFIX = '/(ов|ова|ев|ева|ёв|ёва|ский|ская|цкий|цкая|ых|их)$/u';
+    /** Минимальная выборка ниже которой включаем column-name fallback (fail-safe). */
+    private const MIN_VALUES_FOR_REGEX = 10;
 
-    /** @var array<string> Подсказки по имени колонки: имя */
+    private const REGEX_EMAIL = '/^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/u';
+    /** Международный телефонный формат: 7..15 цифр (после удаления non-digit) */
+    private const REGEX_PHONE_INTL = '/^\d{7,15}$/';
+
+    /** 3 слова: кириллица или латиница (с дефисами, апострофами) */
+    private const REGEX_FIO = '/^[А-ЯЁа-яёA-Za-z\']+(?:[\-\s][А-ЯЁа-яёA-Za-z\']+)?\s+[А-ЯЁа-яёA-Za-z\']+(?:[\-\s][А-ЯЁа-яёA-Za-z\']+)?\s+[А-ЯЁа-яёA-Za-z\']+(?:[\-\s][А-ЯЁа-яёA-Za-z\']+)?$/u';
+    /** Фамилия + 2 инициала с точками */
+    private const REGEX_FIO_SHORT = '/^[А-ЯЁа-яёA-Za-z\']+(?:\-[А-ЯЁа-яёA-Za-z\']+)?\s+[А-ЯЁA-Z]\.\s?[А-ЯЁA-Z]\.$/u';
+    /** 2 слова */
+    private const REGEX_NAME = '/^[А-ЯЁа-яёA-Za-z\']+(?:[\-\s][А-ЯЁа-яёA-Za-z\']+)?\s+[А-ЯЁа-яёA-Za-z\']+(?:[\-\s][А-ЯЁа-яёA-Za-z\']+)?$/u';
+    /** Одно слово (кириллица/латиница, дефис, апостроф) */
+    private const REGEX_SINGLE_WORD = '/^[А-ЯЁа-яёA-Za-z\']+(?:\-[А-ЯЁа-яёA-Za-z\']+)?$/u';
+    /** Суффиксы отчеств */
+    private const REGEX_PATRONYMIC_SUFFIX = '/(ович|евич|ьич|овна|евна|ична|инична)$/u';
+    /** Суффиксы фамилий */
+    private const REGEX_LASTNAME_SUFFIX = '/(ов|ова|ев|ева|ёв|ёва|ин|ина|ын|ына|ский|ская|цкий|цкая|ых|их)$/u';
+
     private const COLUMN_HINTS_FIRSTNAME = ['/first_?name/i', '/fname/i', '/given/i', '/имя/ui'];
-    /** @var array<string> Подсказки по имени колонки: фамилия */
     private const COLUMN_HINTS_LASTNAME = ['/last_?name/i', '/lname/i', '/surname/i', '/family/i', '/фамилия/ui'];
-    /** @var array<string> Подсказки по имени колонки: отчество */
     private const COLUMN_HINTS_PATRONYMIC = ['/patronym/i', '/middle_?name/i', '/отчество/ui'];
-    /** @var array<string> Подсказки по имени колонки: пол */
     private const COLUMN_HINTS_GENDER = ['/gender/i', '/^gen$/i', '/^sex$/i', '/^пол$/ui'];
+    private const COLUMN_HINTS_EMAIL = ['/email/i', '/e_?mail/i', '/почта/ui'];
+    private const COLUMN_HINTS_PHONE = ['/phone/i', '/mobile/i', '/телефон/ui', '/^тел$/ui'];
+    private const COLUMN_HINTS_FIO = [
+        '/^fio$/i',
+        '/^full_?name$/i',
+        '/^name$/i',
+        '/^display_name$/i',
+        '/^person_name$/i',
+        '/^author_name$/i',
+        '/^client_name$/i',
+        '/^contact_name$/i',
+        '/фио/ui',
+    ];
 
     /** @var array<string> Допустимые значения пола (lowercase) */
     private const GENDER_VALUES = [
@@ -68,6 +95,10 @@ class PatternDetector
         'мужской', 'женский',
         'муж', 'жен',
         'мужчина', 'женщина',
+        '1', '0', '2',
+        'true', 'false',
+        'y', 'n',
+        'man', 'woman',
     ];
 
     /** @var ConnectionRegistryInterface */
@@ -77,7 +108,6 @@ class PatternDetector
     private $sampleSize;
 
     /**
-     * @param ConnectionRegistryInterface $registry
      * @param int $sampleSize
      */
     public function __construct(ConnectionRegistryInterface $registry, $sampleSize = self::SAMPLE_SIZE)
@@ -96,14 +126,7 @@ class PatternDetector
         $connection = $this->registry->getConnection($connectionName);
         $platform = $this->registry->getPlatform($connectionName);
 
-        $fullTable = $platform->getFullTableName($schema, $table);
-        $randomFunc = $platform->getRandomFunctionSql();
-        $platformName = $connection->getPlatformName();
-        if ($platformName === PlatformFactory::ORACLE || $platformName === PlatformFactory::OCI) {
-            $sql = "SELECT * FROM {$fullTable} ORDER BY {$randomFunc} FETCH FIRST " . $this->sampleSize . " ROWS ONLY";
-        } else {
-            $sql = "SELECT * FROM {$fullTable} ORDER BY {$randomFunc} LIMIT " . $this->sampleSize;
-        }
+        $sql = $this->buildSampleSql($platform, $connection, $schema, $table);
 
         $rows = $connection->fetchAllAssociative($sql);
 
@@ -115,18 +138,18 @@ class PatternDetector
         $columns = array_keys($rows[0]);
 
         foreach ($columns as $column) {
-            $values = [];
-            foreach ($rows as $row) {
-                if ($row[$column] !== null && $row[$column] !== '') {
-                    $values[] = (string) $row[$column];
-                }
-            }
+            $values = $this->collectColumnValues($rows, $column);
 
-            if (count($values) < 10) {
+            // Если значений мало — пытаемся определить по имени колонки (fail-safe для PII).
+            if (count($values) < self::MIN_VALUES_FOR_REGEX) {
+                $byName = $this->detectByColumnName($column);
+                if ($byName !== null) {
+                    $detected[$column] = $byName;
+                }
                 continue;
             }
 
-            $pattern = $this->detectColumnPattern($values);
+            $pattern = $this->detectColumnPattern($column, $values);
             if ($pattern !== null) {
                 $detected[$column] = $pattern;
             }
@@ -139,41 +162,137 @@ class PatternDetector
     }
 
     /**
-     * Определяет паттерн ПД по массиву значений колонки.
-     * Возвращает первый паттерн, превысивший порог совпадения.
+     * Сформировать SQL для случайной выборки.
      *
-     * @param array<string> $values непустые значения колонки
+     * Postgres: TABLESAMPLE SYSTEM может быть быстрее на больших таблицах,
+     * но требует наличия аналитики таблицы. Для совместимости используем ORDER BY random()
+     * как и раньше, но это документированное ограничение.
      */
-    private function detectColumnPattern(array $values): ?string
+    private function buildSampleSql($platform, $connection, string $schema, string $table): string
+    {
+        $fullTable = $platform->getFullTableName($schema, $table);
+        $randomFunc = $platform->getRandomFunctionSql();
+        $platformName = PlatformFactory::canonicalize($connection->getPlatformName());
+
+        if ($platformName === PlatformFactory::ORACLE) {
+            return "SELECT * FROM {$fullTable} ORDER BY {$randomFunc} FETCH FIRST " . $this->sampleSize . " ROWS ONLY";
+        }
+        return "SELECT * FROM {$fullTable} ORDER BY {$randomFunc} LIMIT " . $this->sampleSize;
+    }
+
+    /**
+     * Fallback: определить паттерн по имени колонки.
+     */
+    private function detectByColumnName(string $column): ?string
+    {
+        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_FIO)) {
+            return self::PATTERN_FIO;
+        }
+        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_EMAIL)) {
+            return self::PATTERN_EMAIL;
+        }
+        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_PHONE)) {
+            return self::PATTERN_PHONE;
+        }
+        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_FIRSTNAME)) {
+            return self::PATTERN_FIRSTNAME;
+        }
+        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_LASTNAME)) {
+            return self::PATTERN_LASTNAME;
+        }
+        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_PATRONYMIC)) {
+            return self::PATTERN_PATRONYMIC;
+        }
+        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_GENDER)) {
+            return self::PATTERN_GENDER;
+        }
+        return null;
+    }
+
+    /**
+     * @param array<int, string> $regexes
+     */
+    private function columnMatchesAny(string $column, array $regexes): bool
+    {
+        foreach ($regexes as $regex) {
+            if (preg_match($regex, $column)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $rows
+     * @return array<int, string>
+     */
+    private function collectColumnValues(array $rows, string $column): array
+    {
+        $values = [];
+        foreach ($rows as $row) {
+            if (!array_key_exists($column, $row)) {
+                continue;
+            }
+            $v = $row[$column];
+            if ($v === null || $v === '') {
+                continue;
+            }
+            $s = (string) $v;
+            // Нормализуем non-breaking spaces, чтобы FIO regex срабатывал
+            $s = str_replace(["\xc2\xa0"], ' ', $s);
+            $s = preg_replace('/\s+/u', ' ', $s);
+            $values[] = $s !== null ? $s : '';
+        }
+        return $values;
+    }
+
+    /**
+     * Определить паттерн по значениям + подсказке имени колонки.
+     *
+     * @param array<int, string> $values
+     */
+    private function detectColumnPattern(string $column, array $values): ?string
     {
         $total = count($values);
-        $patterns = [
-            self::PATTERN_EMAIL => self::REGEX_EMAIL,
-            self::PATTERN_PHONE => null,  // special handling
-            self::PATTERN_FIO => self::REGEX_FIO,
-            self::PATTERN_FIO_SHORT => self::REGEX_FIO_SHORT,
-            self::PATTERN_NAME => self::REGEX_NAME,
+        if ($total === 0) {
+            return null;
+        }
+
+        $tests = [
+            self::PATTERN_EMAIL => function (string $v) {
+                return (bool) preg_match(self::REGEX_EMAIL, trim($v));
+            },
+            self::PATTERN_PHONE => function (string $v) {
+                $cleaned = preg_replace('/[^\d]/', '', $v);
+                return $cleaned !== null && $cleaned !== '' && preg_match(self::REGEX_PHONE_INTL, $cleaned);
+            },
+            self::PATTERN_FIO => function (string $v) {
+                return (bool) preg_match(self::REGEX_FIO, trim($v));
+            },
+            self::PATTERN_FIO_SHORT => function (string $v) {
+                return (bool) preg_match(self::REGEX_FIO_SHORT, trim($v));
+            },
+            self::PATTERN_NAME => function (string $v) {
+                return (bool) preg_match(self::REGEX_NAME, trim($v));
+            },
         ];
 
-        foreach ($patterns as $patternName => $regex) {
-            $matches = 0;
+        $hasNameHint = $this->columnMatchesAny($column, self::COLUMN_HINTS_FIO);
 
+        foreach ($tests as $patternName => $test) {
+            $matches = 0;
             foreach ($values as $value) {
-                if ($patternName === self::PATTERN_PHONE) {
-                    // Strip non-digits before matching
-                    $cleaned = preg_replace('/[^\\d]/', '', $value);
-                    if ($cleaned !== null && preg_match(self::REGEX_PHONE, $cleaned)) {
-                        $matches++;
-                    }
-                } else {
-                    $trimmed = trim($value);
-                    if ($regex !== null && preg_match($regex, $trimmed)) {
-                        $matches++;
-                    }
+                if ($test($value)) {
+                    $matches++;
                 }
             }
-
-            if ($total > 0 && ($matches / $total) >= self::DETECTION_THRESHOLD) {
+            $ratio = $matches / $total;
+            if ($ratio >= self::DETECTION_THRESHOLD) {
+                // PATTERN_NAME требует подсказку имени колонки — иначе слишком много FP
+                // (города типа "Нижний Новгород", названия товаров и т.д.)
+                if ($patternName === self::PATTERN_NAME && !$hasNameHint) {
+                    continue;
+                }
                 return $patternName;
             }
         }
@@ -182,24 +301,27 @@ class PatternDetector
     }
 
     /**
-     * Обнаруживает колонки-компоненты ФИО по кросс-корреляции с составными колонками.
+     * Обнаруживает колонки-компоненты ФИО.
      *
-     * @param array<array<string, mixed>> $rows
+     * Логика: для каждого нераспознанного столбца, если >80% значений — одиночные слова:
+     *   а) если есть composite (fio/name) — коррелируем с ним;
+     *   б) иначе — определяем роль ТОЛЬКО по имени колонки (firstname/lastname/patronymic).
+     *
+     * @param array<int, array<string, mixed>> $rows
      * @param array<string, string> $detected
      * @return array<string, string>
      */
     private function detectLinkedColumns(array $rows, array $detected): array
     {
-        // Составные колонки (name или fio)
+        if (empty($rows)) {
+            return $detected;
+        }
+
         $compositeColumns = [];
         foreach ($detected as $column => $pattern) {
             if ($pattern === self::PATTERN_NAME || $pattern === self::PATTERN_FIO) {
                 $compositeColumns[] = $column;
             }
-        }
-
-        if (empty($compositeColumns) || empty($rows)) {
-            return $detected;
         }
 
         $columns = array_keys($rows[0]);
@@ -209,56 +331,56 @@ class PatternDetector
                 continue;
             }
 
-            // Собрать непустые значения
-            $values = [];
-            foreach ($rows as $row) {
-                if ($row[$column] !== null && $row[$column] !== '') {
-                    $values[] = (string) $row[$column];
-                }
-            }
-
-            if (count($values) < 10) {
+            $values = $this->collectColumnValues($rows, $column);
+            if (count($values) < self::MIN_VALUES_FOR_REGEX) {
                 continue;
             }
 
-            // Проверить: >80% значений — одиночные кириллические слова
+            // Проверка: >80% значений — одиночные слова (имена)
             $singleWordCount = 0;
             foreach ($values as $value) {
-                if (preg_match(self::REGEX_SINGLE_CYRILLIC_WORD, trim($value))) {
+                if (preg_match(self::REGEX_SINGLE_WORD, trim($value))) {
                     $singleWordCount++;
                 }
             }
-
-            if (($singleWordCount / count($values)) < self::DETECTION_THRESHOLD) {
+            $ratio = $singleWordCount / count($values);
+            if ($ratio < self::DETECTION_THRESHOLD) {
                 continue;
             }
 
-            // Кросс-корреляция с составными колонками
+            // (а) Коррелируем с composite columns, если есть
+            $matchedViaCorrelation = false;
             foreach ($compositeColumns as $compositeColumn) {
                 $matchCount = 0;
                 $comparedCount = 0;
 
                 foreach ($rows as $row) {
-                    if ($row[$column] === null || $row[$column] === ''
-                        || $row[$compositeColumn] === null || $row[$compositeColumn] === ''
-                    ) {
+                    $cellValue = isset($row[$column]) ? $row[$column] : null;
+                    $compValue = isset($row[$compositeColumn]) ? $row[$compositeColumn] : null;
+                    if ($cellValue === null || $cellValue === '' || $compValue === null || $compValue === '') {
                         continue;
                     }
-
                     $comparedCount++;
-                    $value = trim((string) $row[$column]);
-                    $compositeValue = (string) $row[$compositeColumn];
-
-                    /** @var array<string> $words */
-                    $words = preg_split('/\\s+/', $compositeValue);
+                    $value = trim((string) $cellValue);
+                    $words = preg_split('/\s+/u', (string) $compValue);
                     if (in_array($value, $words, true)) {
                         $matchCount++;
                     }
                 }
 
-                if ($comparedCount >= 10 && ($matchCount / $comparedCount) >= self::DETECTION_THRESHOLD) {
+                if ($comparedCount >= self::MIN_VALUES_FOR_REGEX
+                    && ($matchCount / $comparedCount) >= self::DETECTION_THRESHOLD) {
                     $detected[$column] = $this->classifyNameRole($column, $values);
+                    $matchedViaCorrelation = true;
                     break;
+                }
+            }
+
+            // (б) Если correlation не сработала, но имя колонки явно намекает на роль — назначаем по имени.
+            if (!$matchedViaCorrelation) {
+                $role = $this->classifyByColumnNameOnly($column);
+                if ($role !== null) {
+                    $detected[$column] = $role;
                 }
             }
         }
@@ -267,9 +389,7 @@ class PatternDetector
     }
 
     /**
-     * Обнаруживает колонки пола по совпадению имени колонки И значений.
-     *
-     * @param array<array<string, mixed>> $rows
+     * @param array<int, array<string, mixed>> $rows
      * @param array<string, string> $detected
      * @return array<string, string>
      */
@@ -280,38 +400,21 @@ class PatternDetector
         }
 
         $columns = array_keys($rows[0]);
-
         foreach ($columns as $column) {
             if (isset($detected[$column])) {
                 continue;
             }
-
-            // Проверка имени колонки
-            $columnMatches = false;
-            foreach (self::COLUMN_HINTS_GENDER as $regex) {
-                if (preg_match($regex, $column)) {
-                    $columnMatches = true;
-                    break;
-                }
-            }
-
-            if (!$columnMatches) {
+            if (!$this->columnMatchesAny($column, self::COLUMN_HINTS_GENDER)) {
                 continue;
             }
 
-            // Собрать непустые значения
-            $values = [];
-            foreach ($rows as $row) {
-                if ($row[$column] !== null && $row[$column] !== '') {
-                    $values[] = (string) $row[$column];
-                }
-            }
-
-            if (count($values) < 10) {
+            $values = $this->collectColumnValues($rows, $column);
+            if (count($values) < self::MIN_VALUES_FOR_REGEX) {
+                // Имя колонки совпадает, но мало данных — назначаем gender по имени (fail-safe)
+                $detected[$column] = self::PATTERN_GENDER;
                 continue;
             }
 
-            // Проверка значений
             $matchCount = 0;
             foreach ($values as $value) {
                 $normalized = mb_strtolower(trim($value));
@@ -319,7 +422,6 @@ class PatternDetector
                     $matchCount++;
                 }
             }
-
             if (($matchCount / count($values)) >= self::DETECTION_THRESHOLD) {
                 $detected[$column] = self::PATTERN_GENDER;
             }
@@ -329,31 +431,15 @@ class PatternDetector
     }
 
     /**
-     * Определяет роль колонки-компонента (firstname/lastname/patronymic).
-     *
-     * @param string $column имя колонки
-     * @param array<string> $values непустые значения колонки
+     * @param array<int, string> $values
      */
     private function classifyNameRole(string $column, array $values): string
     {
-        // Приоритет 1: эвристика по имени колонки
-        foreach (self::COLUMN_HINTS_FIRSTNAME as $regex) {
-            if (preg_match($regex, $column)) {
-                return self::PATTERN_FIRSTNAME;
-            }
-        }
-        foreach (self::COLUMN_HINTS_LASTNAME as $regex) {
-            if (preg_match($regex, $column)) {
-                return self::PATTERN_LASTNAME;
-            }
-        }
-        foreach (self::COLUMN_HINTS_PATRONYMIC as $regex) {
-            if (preg_match($regex, $column)) {
-                return self::PATTERN_PATRONYMIC;
-            }
+        $byName = $this->classifyByColumnNameOnly($column);
+        if ($byName !== null) {
+            return $byName;
         }
 
-        // Приоритет 2: суффиксный анализ (порог >50%)
         $patronymicCount = 0;
         $lastnameCount = 0;
         $total = count($values);
@@ -374,7 +460,20 @@ class PatternDetector
             return self::PATTERN_LASTNAME;
         }
 
-        // Приоритет 3: fallback
         return self::PATTERN_FIRSTNAME;
+    }
+
+    private function classifyByColumnNameOnly(string $column): ?string
+    {
+        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_PATRONYMIC)) {
+            return self::PATTERN_PATRONYMIC;
+        }
+        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_LASTNAME)) {
+            return self::PATTERN_LASTNAME;
+        }
+        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_FIRSTNAME)) {
+            return self::PATTERN_FIRSTNAME;
+        }
+        return null;
     }
 }

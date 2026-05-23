@@ -11,6 +11,7 @@ use Timbrs\DatabaseDumps\Platform\OraclePlatform;
 use Timbrs\DatabaseDumps\Platform\PostgresPlatform;
 use Timbrs\DatabaseDumps\Service\Dumper\CascadeWhereResolver;
 use Timbrs\DatabaseDumps\Service\Dumper\DataFetcher;
+use Timbrs\DatabaseDumps\Service\Dumper\SampleQueryBuilder;
 
 class DataFetcherTest extends TestCase
 {
@@ -234,6 +235,113 @@ class DataFetcherTest extends TestCase
     public function testGetLastQueryReturnsNullBeforeFetch(): void
     {
         $this->assertNull($this->fetcher->getLastQuery());
+    }
+
+    public function testFetchDelegatesToSampleQueryBuilderWhenSamplePresent(): void
+    {
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'red', 'where' => "status = 'red'", 'limit' => 10],
+            ],
+        ];
+        $config = new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+
+        $sampleBuilder = $this->createMock(SampleQueryBuilder::class);
+        $sampleBuilder
+            ->expects($this->once())
+            ->method('build')
+            ->with($config)
+            ->willReturn('SELECT * FROM "public"."clients" WHERE "id" IN (\'1\', \'2\')');
+
+        $dumpConfig = new DumpConfig([], []);
+        $fetcher = new DataFetcher($this->registryWithPostgres(), $this->cascadeResolver, $dumpConfig, $sampleBuilder);
+
+        $this->connection
+            ->expects($this->once())
+            ->method('fetchAllAssociative')
+            ->with($this->stringContains('WHERE "id" IN (\'1\', \'2\')'))
+            ->willReturn([]);
+
+        $fetcher->fetch($config);
+    }
+
+    public function testIterateDelegatesToSampleQueryBuilder(): void
+    {
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'red', 'where' => "status = 'red'", 'limit' => 10],
+            ],
+        ];
+        $config = new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+
+        $sampleBuilder = $this->createMock(SampleQueryBuilder::class);
+        $sampleBuilder
+            ->expects($this->once())
+            ->method('build')
+            ->with($config)
+            ->willReturn('SELECT * FROM "public"."clients" WHERE "id" IN (\'1\')');
+
+        $dumpConfig = new DumpConfig([], []);
+        $fetcher = new DataFetcher($this->registryWithPostgres(), $this->cascadeResolver, $dumpConfig, $sampleBuilder);
+
+        $this->connection
+            ->expects($this->once())
+            ->method('iterateAssociative')
+            ->with($this->stringContains('WHERE "id" IN (\'1\')'))
+            ->willReturnCallback(function () {
+                yield ['id' => 1];
+            });
+
+        $rows = iterator_to_array($fetcher->iterate($config));
+        $this->assertCount(1, $rows);
+        $this->assertSame('SELECT * FROM "public"."clients" WHERE "id" IN (\'1\')', $fetcher->getLastQuery());
+    }
+
+    public function testSampleBypassesCascadeResolver(): void
+    {
+        // При наличии sample cascade-резолвер НЕ вызывается (sample строит SQL сам).
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'red', 'where' => "status = 'red'", 'limit' => 10],
+            ],
+        ];
+        $cascadeFrom = [
+            ['parent' => 'public.users', 'fk_column' => 'user_id', 'parent_column' => 'id'],
+        ];
+        $config = new TableConfig('public', 'clients', null, null, null, null, $cascadeFrom, null, $sample);
+
+        $cascadeResolver = $this->createMock(CascadeWhereResolver::class);
+        $cascadeResolver->expects($this->never())->method('resolve');
+
+        $sampleBuilder = $this->createMock(SampleQueryBuilder::class);
+        $sampleBuilder->method('build')->willReturn('SELECT * FROM "public"."clients" WHERE "id" IN (\'1\')');
+
+        $dumpConfig = new DumpConfig([], []);
+        $fetcher = new DataFetcher($this->registryWithPostgres(), $cascadeResolver, $dumpConfig, $sampleBuilder);
+
+        $this->connection->method('fetchAllAssociative')->willReturn([]);
+        $fetcher->fetch($config);
+    }
+
+    public function testFetchWithSampleButNoBuilderThrows(): void
+    {
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'red', 'where' => "status = 'red'", 'limit' => 10],
+            ],
+        ];
+        $config = new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+
+        $this->expectException(\RuntimeException::class);
+        $this->fetcher->fetch($config);
+    }
+
+    private function registryWithPostgres(): ConnectionRegistryInterface
+    {
+        $registry = $this->createMock(ConnectionRegistryInterface::class);
+        $registry->method('getConnection')->willReturn($this->connection);
+        $registry->method('getPlatform')->willReturn(new PostgresPlatform());
+        return $registry;
     }
 
     public function testFetchWithCascadeFromReturningNull(): void

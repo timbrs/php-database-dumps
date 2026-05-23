@@ -120,26 +120,30 @@ class SqlGeneratorTest extends TestCase
         $this->assertStringContainsString('Режим: partial (limit 100)', $chunks[0]);
     }
 
-    public function testGenerateIncludesFetchQuery(): void
+    public function testGenerateIncludesFetchQueryFlag(): void
     {
         $config = new TableConfig('users', 'users');
         $rows = [['id' => 1, 'name' => 'User 1']];
-        $query = 'SELECT * FROM "users"."users"';
+        // SQL запроса БОЛЬШЕ НЕ ВЫВОДИТСЯ в дамп — защита от утечки данных
+        // (WHERE мог содержать чувствительные значения).
+        $query = 'SELECT * FROM "users"."users" WHERE email = \'admin@example.com\'';
 
         $sql = $this->generator->generate($config, $rows, $query);
 
-        $this->assertStringContainsString('-- Запрос: SELECT * FROM "users"."users"', $sql);
+        $this->assertStringNotContainsString('admin@example.com', $sql);
+        // Может быть только обобщённый маркер
+        $this->assertStringContainsString('DataFetcher', $sql);
     }
 
-    public function testGenerateChunksIncludesFetchQuery(): void
+    public function testGenerateChunksDoesNotLeakFetchQuery(): void
     {
         $config = new TableConfig('users', 'users');
         $rows = [['id' => 1, 'name' => 'User 1']];
-        $query = 'SELECT * FROM "users"."users" WHERE is_active = true ORDER BY id LIMIT 500';
+        $query = "SELECT * FROM users WHERE password = 'secret'";
 
         $chunks = iterator_to_array($this->generator->generateChunks($config, $rows, $query));
 
-        $this->assertStringContainsString('-- Запрос: ' . $query, $chunks[0]);
+        $this->assertStringNotContainsString('secret', $chunks[0]);
     }
 
     public function testGenerateWithoutFetchQuery(): void
@@ -149,7 +153,7 @@ class SqlGeneratorTest extends TestCase
 
         $sql = $this->generator->generate($config, $rows);
 
-        $this->assertStringNotContainsString('-- Запрос:', $sql);
+        $this->assertStringNotContainsString('DataFetcher', $sql);
     }
 
     public function testGenerateChunksEmptyRows(): void

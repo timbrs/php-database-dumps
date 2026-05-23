@@ -141,8 +141,9 @@ class RussianFakerTest extends TestCase
         $this->assertNotEquals($result[0]['display_name'], $result[1]['display_name']);
     }
 
-    public function testFioSeedPriorityOverOtherColumns(): void
+    public function testFioReplacementDeterministicForSameFio(): void
     {
+        // Одинаковое ФИО → одинаковая замена ФИО (но email может отличаться из-за PK).
         $fakerConfig = [
             'full_name' => PatternDetector::PATTERN_FIO,
             'email' => PatternDetector::PATTERN_EMAIL,
@@ -157,9 +158,25 @@ class RussianFakerTest extends TestCase
         $result1 = $this->faker->apply('public', 'users', $fakerConfig, $rows1);
         $result2 = $this->faker->apply('public', 'users', $fakerConfig, $rows2);
 
-        // Одинаковое ФИО → одинаковый seed → одинаковая замена, независимо от email
         $this->assertEquals($result1[0]['full_name'], $result2[0]['full_name']);
-        $this->assertEquals($result1[0]['email'], $result2[0]['email']);
+        // email РАЗНЫЙ для разных PK (защита от UNIQUE-коллизий)
+        $this->assertNotEquals($result1[0]['email'], $result2[0]['email']);
+    }
+
+    public function testEmailUniqueForSameFioDifferentPk(): void
+    {
+        // Сценарий UNIQUE-индекса: 50 человек с одинаковым ФИО — все email уникальны.
+        $fakerConfig = [
+            'full_name' => PatternDetector::PATTERN_FIO,
+            'email' => PatternDetector::PATTERN_EMAIL,
+        ];
+        $rows = [];
+        for ($i = 1; $i <= 50; $i++) {
+            $rows[] = ['id' => $i, 'full_name' => 'Иванов Иван Иванович', 'email' => "x{$i}@old.com"];
+        }
+        $result = $this->faker->apply('public', 'users', $fakerConfig, $rows);
+        $emails = array_column($result, 'email');
+        $this->assertCount(50, array_unique($emails), 'Emails должны быть уникальны при одинаковом ФИО');
     }
 
     public function testFioAndFioShortConsistentInSameRow(): void

@@ -2,9 +2,9 @@
 
 namespace Timbrs\DatabaseDumps\Adapter;
 
+use Illuminate\Database\Connection;
 use Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface;
 use Timbrs\DatabaseDumps\Platform\PlatformFactory;
-use Illuminate\Database\Connection;
 
 /**
  * Адаптер для Laravel Database Connection
@@ -19,48 +19,70 @@ class LaravelDatabaseAdapter implements DatabaseConnectionInterface
         $this->connection = $connection;
     }
 
-    public function executeStatement(string $sql): void
+    /**
+     * @param array<string, mixed> $params
+     */
+    public function executeStatement(string $sql, array $params = []): void
     {
-        $this->connection->statement($sql);
+        if (empty($params)) {
+            $this->connection->statement($sql);
+            return;
+        }
+        $this->connection->statement($sql, $params);
     }
 
     /**
+     * @param array<string, mixed> $params
      * @return array<int, array<string, mixed>>
      */
-    public function fetchAllAssociative(string $sql): array
+    public function fetchAllAssociative(string $sql, array $params = []): array
     {
-        if ($this->connection->getDriverName() === PlatformFactory::PGSQL) {
+        $platform = $this->getPlatformName();
+
+        // PG: используем PDO напрямую для boolean-нормализации.
+        if ($platform === PlatformFactory::POSTGRESQL && empty($params)) {
             return $this->fetchViaPdoWithBooleans($sql);
         }
 
-        $results = $this->connection->select($sql);
-
-        return array_map(function ($row) {
+        $results = $this->connection->select($sql, $params);
+        $rows = array_map(function ($row) {
             return (array) $row;
         }, $results);
+
+        if ($platform === PlatformFactory::ORACLE) {
+            $rows = array_map([$this, 'normalizeOracleRow'], $rows);
+        }
+
+        return $rows;
     }
 
     /**
-     * @param string $sql
-     * @return array<int, array<string, mixed>>
+     * @param array<string, mixed> $params
+     * @return \Generator<int, array<string, mixed>>
      */
-    private function fetchViaPdoWithBooleans($sql)
+    public function iterateAssociative(string $sql, array $params = []): \Generator
     {
-        $stmt = $this->connection->getPdo()->query($sql);
-        if ($stmt === false) {
-            return array();
+        // Laravel cursor() даёт PDO-курсор без загрузки в память.
+        // Generator из cursor() закрывает PDOStatement при GC (при выходе из
+        // foreach или break). На MySQL c unbuffered query это важно, чтобы
+        // не получить "commands out of sync" при следующем запросе.
+        $cursor = $this->connection->cursor($sql, $params);
+        try {
+            foreach ($cursor as $row) {
+                $arr = (array) $row;
+                if ($this->getPlatformName() === PlatformFactory::ORACLE) {
+                    $arr = $this->normalizeOracleRow($arr);
+                }
+                yield $arr;
+            }
+        } finally {
+            // unset форсирует GC, очистка PDOStatement
+            unset($cursor);
         }
-
-        $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
-        if (empty($rows)) {
-            return $rows;
-        }
-
-        return BooleanNormalizer::normalize($stmt, $rows);
     }
 
     /**
-     * @param array<mixed> $params
+     * @param array<string, mixed> $params
      * @return array<int, mixed>
      */
     public function fetchFirstColumn(string $sql, array $params = []): array
@@ -78,8 +100,14 @@ class LaravelDatabaseAdapter implements DatabaseConnectionInterface
      */
     public function quote($value): string
     {
-        if (is_string($value)) {
-            return $this->connection->getPdo()->quote($value);
+        if ($value === null) {
+            return 'NULL';
+        }
+        if (is_bool($value)) {
+            return $value ? '1' : '0';
+        }
+        if (is_int($value) || is_float($value)) {
+            return (string) $value;
         }
 
         return $this->connection->getPdo()->quote((string) $value);
@@ -121,5 +149,37 @@ class LaravelDatabaseAdapter implements DatabaseConnectionInterface
             default:
                 return $driver;
         }
+    }
+
+    private function fetchViaPdoWithBooleans(string $sql): array
+    {
+        $stmt = $this->connection->getPdo()->query($sql);
+        if ($stmt === false) {
+            return [];
+        }
+        try {
+            $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+            if (empty($rows)) {
+                return $rows;
+            }
+            return BooleanNormalizer::normalize($stmt, $rows);
+        } finally {
+            $stmt->closeCursor();
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     * @return array<string, mixed>
+     */
+    private function normalizeOracleRow(array $row): array
+    {
+        $normalized = array_change_key_case($row, CASE_LOWER);
+        foreach ($normalized as $key => $value) {
+            if (is_resource($value)) {
+                $normalized[$key] = stream_get_contents($value);
+            }
+        }
+        return $normalized;
     }
 }

@@ -735,9 +735,12 @@ class ConfigGeneratorTest extends TestCase
         $parsed = Yaml::parse($writtenContent);
         // public.roles сохранена из существующего конфига
         $this->assertContains('roles', $parsed[DumpConfig::KEY_FULL_EXPORT]['public']);
-        // billing.old_table заменена на billing.invoices
+        // billing.invoices сгенерирована
         $this->assertContains('invoices', $parsed[DumpConfig::KEY_FULL_EXPORT]['billing']);
-        $this->assertNotContains('old_table', $parsed[DumpConfig::KEY_FULL_EXPORT]['billing']);
+        // billing.old_table СОХРАНЕНА в конфиге (поведение изменено: НЕ удаляем существующее
+        // при mode=schema, чтобы не терять пользовательские настройки. Для удаления используйте
+        // ручное редактирование YAML).
+        $this->assertContains('old_table', $parsed[DumpConfig::KEY_FULL_EXPORT]['billing']);
     }
 
     public function testGenerateModeTableMergesWithExisting(): void
@@ -790,9 +793,10 @@ class ConfigGeneratorTest extends TestCase
         // full_export: users и roles сохранены
         $this->assertContains('users', $parsed[DumpConfig::KEY_FULL_EXPORT]['public']);
         $this->assertContains('roles', $parsed[DumpConfig::KEY_FULL_EXPORT]['public']);
-        // partial_export: orders обновлён с новыми параметрами
-        $this->assertEquals(500, $parsed[DumpConfig::KEY_PARTIAL_EXPORT]['public']['orders']['limit']);
-        $this->assertEquals('id DESC', $parsed[DumpConfig::KEY_PARTIAL_EXPORT]['public']['orders']['order_by']);
+        // partial_export: пользовательский limit=100 СОХРАНЁН (новое поведение —
+        // защита ручных правок). order_by — пользовательский тоже сохраняется.
+        $this->assertEquals(100, $parsed[DumpConfig::KEY_PARTIAL_EXPORT]['public']['orders']['limit']);
+        $this->assertEquals('created_at DESC', $parsed[DumpConfig::KEY_PARTIAL_EXPORT]['public']['orders']['order_by']);
     }
 
     public function testGenerateModeNewAppendsOnly(): void

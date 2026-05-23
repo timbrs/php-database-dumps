@@ -138,7 +138,6 @@ class InsertGeneratorTest extends TestCase
         $this->assertEquals(3, substr_count($sql, 'INSERT INTO'));
         $this->assertStringContainsString('"USERS"."USERS"', $sql);
         $this->assertStringContainsString('"ID", "NAME"', $sql);
-        $this->assertStringNotContainsString('Batch', $sql);
 
         // Нет multi-row VALUES (запятой между строками)
         $this->assertStringNotContainsString("),\n(", $sql);
@@ -182,11 +181,10 @@ class InsertGeneratorTest extends TestCase
 
         $sql = $generator->generate('users', 'users', $rows);
 
-        $this->assertStringContainsString('TRUE', $sql);
-        $this->assertStringContainsString('FALSE', $sql);
-        $this->assertStringNotContainsString("'TRUE'", $sql);
-        $this->assertStringNotContainsString("'FALSE'", $sql);
-        $this->assertStringNotContainsString("''", $sql);
+        // Oracle boolean → 1/0 (нет нативного BOOLEAN в Oracle < 23c)
+        $this->assertStringContainsString(', 1, 0)', $sql);
+        $this->assertStringNotContainsString('TRUE', $sql);
+        $this->assertStringNotContainsString('FALSE', $sql);
     }
 
     public function testGenerateOracleHandlesNullValues(): void

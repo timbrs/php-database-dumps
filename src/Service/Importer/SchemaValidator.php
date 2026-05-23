@@ -6,7 +6,10 @@ use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
 use Timbrs\DatabaseDumps\Platform\PlatformFactory;
 
 /**
- * Валидация соответствия схемы дампа текущей структуре БД
+ * Валидация соответствия схемы дампа текущей структуре БД.
+ *
+ * Все запросы к information_schema/all_tab_columns используют параметризованный
+ * SQL (защита от инъекций через имена схем/таблиц).
  */
 class SchemaValidator
 {
@@ -19,13 +22,7 @@ class SchemaValidator
     }
 
     /**
-     * Сравнить столбцы из дампа со столбцами в БД
-     *
-     * @param string $schema
-     * @param string $table
      * @param array<string> $dumpColumns Столбцы из INSERT-выражения дампа
-     * @param string|null $connectionName
-     * @return ValidationResult
      */
     public function validate(string $schema, string $table, array $dumpColumns, ?string $connectionName = null): ValidationResult
     {
@@ -36,7 +33,7 @@ class SchemaValidator
         $dbColumns = $this->getTableColumns($schema, $table, $connectionName);
 
         if (empty($dbColumns)) {
-            // Таблица не найдена в БД — все столбцы дампа отсутствуют
+            // Таблица не найдена в БД
             return new ValidationResult($dumpColumns, []);
         }
 
@@ -61,30 +58,34 @@ class SchemaValidator
     }
 
     /**
-     * Получить список столбцов таблицы из БД
-     *
      * @return array<string>
      */
     private function getTableColumns(string $schema, string $table, ?string $connectionName): array
     {
         $connection = $this->registry->getConnection($connectionName);
-        $platformName = $connection->getPlatformName();
+        $platform = PlatformFactory::canonicalize($connection->getPlatformName());
 
-        if ($platformName === PlatformFactory::ORACLE || $platformName === PlatformFactory::OCI) {
-            $sql = "SELECT LOWER(column_name) AS column_name FROM all_tab_columns "
-                . "WHERE owner = UPPER('" . $schema . "') AND table_name = UPPER('" . $table . "') "
-                . "ORDER BY column_id";
+        if ($platform === PlatformFactory::ORACLE) {
+            $sql = "SELECT LOWER(column_name) AS column_name FROM all_tab_columns
+                    WHERE owner = :owner AND table_name = :table
+                    ORDER BY column_id";
+            $params = ['owner' => strtoupper($schema), 'table' => strtoupper($table)];
         } else {
-            $sql = "SELECT column_name FROM information_schema.columns "
-                . "WHERE table_schema = '" . $schema . "' AND table_name = '" . $table . "' "
-                . "ORDER BY ordinal_position";
+            $sql = "SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = :schema AND table_name = :table
+                    ORDER BY ordinal_position";
+            $params = ['schema' => $schema, 'table' => $table];
         }
 
-        $rows = $connection->fetchAllAssociative($sql);
+        $rows = $connection->fetchAllAssociative($sql, $params);
 
         $columns = [];
         foreach ($rows as $row) {
-            $columns[] = $row['column_name'];
+            // Поддержка разных регистров ключа (Doctrine/PDO/Laravel)
+            $value = $row['column_name'] ?? ($row['COLUMN_NAME'] ?? null);
+            if ($value !== null) {
+                $columns[] = (string) $value;
+            }
         }
 
         return $columns;

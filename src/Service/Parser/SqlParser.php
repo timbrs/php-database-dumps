@@ -3,7 +3,10 @@
 namespace Timbrs\DatabaseDumps\Service\Parser;
 
 /**
- * Парсинг SQL файлов
+ * Парсинг SQL дампов.
+ *
+ * Тонкая обёртка над StatementSplitter + утилитарный parseColumnList для
+ * извлечения списка колонок из первого INSERT (используется SchemaValidator).
  */
 class SqlParser
 {
@@ -16,65 +19,86 @@ class SqlParser
     }
 
     /**
-     * Распарсить SQL файл на отдельные statements
+     * Распарсить SQL дамп на отдельные statements.
      *
-     * @param string $sqlContent
-     * @param bool $backslashEscapes Включить MySQL-style backslash-экранирование
      * @return array<string>
      */
-    public function parseFile(string $sqlContent, $backslashEscapes = false): array
+    public function parseFile(string $sqlContent, bool $backslashEscapes = false): array
     {
         return $this->splitter->split($sqlContent, $backslashEscapes);
     }
 
     /**
-     * Извлечь список столбцов из первого INSERT-выражения в SQL
+     * Извлечь список столбцов из первого INSERT-выражения.
      *
-     * @param string $sqlContent
-     * @return array<string>|null Список столбцов или null, если INSERT не найден
+     * Использует character-by-character парсер, аналогичный StatementSplitter,
+     * чтобы корректно работать с запятыми в строковых литералах внутри INSERT
+     * (теоретически — внутри списка колонок их быть не должно, но защищаемся).
+     *
+     * @return array<string>|null
      */
     public function parseColumnList(string $sqlContent): ?array
     {
-        // Ищем первый INSERT INTO ... (columns) VALUES
-        if (preg_match('/INSERT\s+INTO\s+\S+\s*\(([^)]+)\)\s*VALUES/i', $sqlContent, $matches)) {
-            $columnsStr = $matches[1];
-            $columns = array_map(function ($col) {
-                // Убираем кавычки и пробелы
-                $col = trim($col);
-                $col = trim($col, '"');
-                $col = trim($col, '`');
-                $col = trim($col, '[]');
-                return $col;
-            }, explode(',', $columnsStr));
-
-            return array_values(array_filter($columns, function ($col) {
-                return $col !== '';
-            }));
+        if (!preg_match('/INSERT\s+INTO\s+\S+\s*\(/i', $sqlContent, $matches, PREG_OFFSET_CAPTURE)) {
+            return null;
         }
 
-        return null;
-    }
+        $offset = $matches[0][1] + strlen($matches[0][0]);
+        $len = strlen($sqlContent);
+        $depth = 1;
+        $collected = '';
 
-    /**
-     * Проверить, является ли SQL валидным (базовая проверка)
-     */
-    public function isValid(string $sql): bool
-    {
-        $sql = trim($sql);
+        for ($i = $offset; $i < $len; $i++) {
+            $c = $sqlContent[$i];
 
-        if (empty($sql)) {
-            return false;
+            // Пропускаем кавычки целиком, чтобы запятая внутри не сбила
+            if ($c === '"' || $c === '`' || $c === "'") {
+                $closing = $c;
+                $collected .= $c;
+                $i++;
+                while ($i < $len) {
+                    $cc = $sqlContent[$i];
+                    $collected .= $cc;
+                    if ($cc === $closing) {
+                        if ($i + 1 < $len && $sqlContent[$i + 1] === $closing) {
+                            $collected .= $sqlContent[$i + 1];
+                            $i++;
+                            continue;
+                        }
+                        break;
+                    }
+                    $i++;
+                }
+                continue;
+            }
+
+            if ($c === '(') {
+                $depth++;
+                $collected .= $c;
+                continue;
+            }
+            if ($c === ')') {
+                $depth--;
+                if ($depth === 0) {
+                    break;
+                }
+                $collected .= $c;
+                continue;
+            }
+            $collected .= $c;
         }
 
-        // Базовая проверка на наличие SQL ключевых слов
-        $keywords = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'CREATE', 'DROP', 'ALTER', 'SET'];
-
-        foreach ($keywords as $keyword) {
-            if (stripos($sql, $keyword) === 0) {
-                return true;
+        $columns = [];
+        foreach (explode(',', $collected) as $col) {
+            $col = trim($col);
+            $col = trim($col, '"');
+            $col = trim($col, '`');
+            $col = trim($col, '[]');
+            if ($col !== '') {
+                $columns[] = $col;
             }
         }
 
-        return false;
+        return $columns;
     }
 }

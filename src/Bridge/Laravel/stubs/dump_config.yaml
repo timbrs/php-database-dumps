@@ -17,6 +17,19 @@
 #        logs:
 #            limit: 500
 #            where: "created_at > NOW() - INTERVAL '30 days'"
+#        # Выборка по именованным критериям («все фломастеры»): объединение корзин без дублей
+#        clients:
+#            limit: 100              # общий потолок на объединённую выборку (необяз.)
+#            sample:
+#                criteria:
+#                    - { name: red,      where: "status = 'red'",   limit: 10 }
+#                    - { name: inactive, where: "is_active = false", limit: 20 }
+#                stratify_by: status # сахар: по корзине на каждое DISTINCT-значение
+#                per_value: 10
+
+# LLM для углублённого анализа (prepare-config --ai/--deep) настраивается через окружение:
+#   DBDUMP_LLM_URL, DBDUMP_LLM_MODEL, DBDUMP_LLM_TOKEN, DBDUMP_LLM_TIMEOUT, DBDUMP_LLM_ENABLED
+# либо через config/database-dumps.php (секция 'llm').
 
 # Дополнительные подключения (ключи = имена из config/database.php)
 #connections:
