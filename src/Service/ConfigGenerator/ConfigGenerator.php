@@ -4,6 +4,7 @@ namespace Timbrs\DatabaseDumps\Service\ConfigGenerator;
 
 use Timbrs\DatabaseDumps\Config\DumpConfig;
 use Timbrs\DatabaseDumps\Config\TableConfig;
+use Timbrs\DatabaseDumps\Contract\AiClientInterface;
 use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
@@ -186,6 +187,17 @@ class ConfigGenerator
     public function isLlmAvailable(): bool
     {
         return $this->llmDetector !== null && $this->llmDetector->isAvailable();
+    }
+
+    /**
+     * Подменить LLM-клиент после интерактивной настройки, чтобы свежие
+     * настройки вступили в силу в этом же запуске prepare-config.
+     */
+    public function refreshLlmClient(AiClientInterface $client): void
+    {
+        if ($this->llmDetector !== null) {
+            $this->llmDetector->setAiClient($client);
+        }
     }
 
     /**

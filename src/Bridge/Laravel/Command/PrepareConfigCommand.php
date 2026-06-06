@@ -4,7 +4,11 @@ namespace Timbrs\DatabaseDumps\Bridge\Laravel\Command;
 
 use Illuminate\Console\Command;
 use Timbrs\DatabaseDumps\Bridge\Laravel\LaravelLogger;
+use Timbrs\DatabaseDumps\Config\AiConfig;
+use Timbrs\DatabaseDumps\Contract\HttpTransportInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
+use Timbrs\DatabaseDumps\Service\Ai\AiClientFactory;
+use Timbrs\DatabaseDumps\Service\Ai\AiConfigStore;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigGenerator;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ModeParser;
 
@@ -38,17 +42,32 @@ class PrepareConfigCommand extends Command
     /** @var string */
     private $configPath;
 
+    /** @var AiConfigStore */
+    private $aiConfigStore;
+
+    /** @var HttpTransportInterface */
+    private $transport;
+
+    /** @var string */
+    private $projectDir;
+
     public function __construct(
         ConfigGenerator $generator,
         ModeParser $modeParser,
         LoggerInterface $logger,
-        string $configPath
+        string $configPath,
+        AiConfigStore $aiConfigStore,
+        HttpTransportInterface $transport,
+        string $projectDir
     ) {
         parent::__construct();
         $this->generator = $generator;
         $this->modeParser = $modeParser;
         $this->logger = $logger;
         $this->configPath = $configPath;
+        $this->aiConfigStore = $aiConfigStore;
+        $this->transport = $transport;
+        $this->projectDir = rtrim($projectDir, '/\\');
     }
 
     public function handle(): int
@@ -105,6 +124,9 @@ class PrepareConfigCommand extends Command
                 $this->generator->setCriteriaEnabled(true);
             }
 
+            // Первый запуск без настроек LLM — предложить настроить (основной сценарий).
+            $this->ensureLlmConfigured();
+
             // AI: --no-ai отключает; --ai/--deep включают; иначе авто (если LLM сконфигурирован).
             if ($this->option('no-ai')) {
                 $this->generator->setAiEnabled(false);
@@ -136,6 +158,78 @@ class PrepareConfigCommand extends Command
             }
             return self::FAILURE;
         }
+    }
+
+    /**
+     * Первый запуск: если LLM ещё не настроен (нет ни env, ни сохранённого файла) —
+     * предложить задать API URL, модель и token. Ответ сохраняется в
+     * database/dbdump_llm.json и применяется немедленно. LLM — основной сценарий.
+     */
+    private function ensureLlmConfigured(): void
+    {
+        // Пользователь явно отказался от ИИ или среда неинтерактивна — не спрашиваем.
+        if ($this->option('no-ai') || ($this->input !== null && !$this->input->isInteractive())) {
+            return;
+        }
+        // Уже настроено (env-переменные или сохранённый файл) — ничего не спрашиваем.
+        if ($this->aiConfigStore->resolve($this->projectDir)->getUrl() !== ''
+            || $this->aiConfigStore->exists($this->projectDir)
+        ) {
+            return;
+        }
+
+        $this->line('');
+        $this->info('Настройка LLM — основной сценарий анализа');
+        $this->line('LLM уточняет анализ: PII-классификация (точнее regex), профилирование, подсказки по выборке.');
+        $this->line('Настройки сохранятся в ' . $this->aiConfigStore->path($this->projectDir) . '.');
+
+        if (!$this->confirm('Настроить LLM сейчас?', true)) {
+            // Запоминаем отказ, чтобы не спрашивать при каждом запуске.
+            $this->aiConfigStore->save($this->projectDir, AiConfig::fromArray(['url' => '', 'enabled' => false]));
+            $this->warn('Пропущено. Анализ пойдёт на regex-эвристиках. Позже: dbdump:configure-llm');
+            return;
+        }
+
+        $url = null;
+        while ($url === null) {
+            $answer = trim((string) $this->ask('API URL (base, например https://gpt.example.com/v1)'));
+            if (self::isValidUrl($answer)) {
+                $url = $answer;
+            } else {
+                $this->error('Нужен корректный http(s) URL с хостом.');
+            }
+        }
+
+        $model = (string) $this->ask('Модель', AiConfig::DEFAULT_MODEL);
+
+        $tokenInput = $this->secret('Token (Enter — без токена)');
+        $token = ($tokenInput === null || $tokenInput === '') ? null : $tokenInput;
+
+        $config = AiConfig::fromArray([
+            'url' => $url,
+            'model' => $model,
+            'token' => $token,
+            'enabled' => true,
+        ]);
+        $this->aiConfigStore->save($this->projectDir, $config);
+        $this->info('Настройки LLM сохранены.');
+        $this->warn('Файл может содержать token — добавьте его в .gitignore. ИИ-детекция включена для этого запуска.');
+
+        // Применяем немедленно: подменяем клиент в уже построенном детекторе.
+        $this->generator->refreshLlmClient(AiClientFactory::create($this->transport, $config));
+    }
+
+    private static function isValidUrl(string $url): bool
+    {
+        if ($url === '') {
+            return false;
+        }
+        $parts = parse_url($url);
+        if ($parts === false || !isset($parts['scheme'], $parts['host'])) {
+            return false;
+        }
+        $scheme = strtolower($parts['scheme']);
+        return ($scheme === 'http' || $scheme === 'https') && $parts['host'] !== '';
     }
 
     private function printUsage(): void

@@ -96,6 +96,14 @@ class LlmPatternDetector
     }
 
     /**
+     * Заменить LLM-клиент (например, после интерактивной настройки в том же запуске).
+     */
+    public function setAiClient(AiClientInterface $aiClient): void
+    {
+        $this->aiClient = $aiClient;
+    }
+
+    /**
      * Классифицировать колонки таблицы через LLM.
      *
      * @return array<string, string> column_name => pattern_type

@@ -290,7 +290,10 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(ConfigGenerator::class),
                 $app->make(ModeParser::class),
                 $app->make(LoggerInterface::class),
-                $app['config']->get('database-dumps.config_path')
+                $app['config']->get('database-dumps.config_path'),
+                $app->make(AiConfigStore::class),
+                $app->make(HttpTransportInterface::class),
+                $app['config']->get('database-dumps.project_dir')
             );
         });
 

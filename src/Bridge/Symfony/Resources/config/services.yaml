@@ -153,6 +153,7 @@ services:
     Timbrs\DatabaseDumps\Bridge\Symfony\Command\PrepareConfigCommand:
         arguments:
             $configPath: '%database_dumps.config_path%'
+            $projectDir: '%kernel.project_dir%'
 
     Timbrs\DatabaseDumps\Bridge\Symfony\Command\ConfigureLlmCommand:
         arguments:

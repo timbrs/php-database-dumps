@@ -67,6 +67,19 @@ class LlmPatternDetectorTest extends TestCase
         ], $result);
     }
 
+    public function testSetAiClientSwapsUnderlyingClient(): void
+    {
+        $this->aiClient->method('isAvailable')->willReturn(false);
+        $detector = $this->detector();
+        $this->assertFalse($detector->isAvailable());
+
+        $newClient = $this->createMock(AiClientInterface::class);
+        $newClient->method('isAvailable')->willReturn(true);
+
+        $detector->setAiClient($newClient);
+        $this->assertTrue($detector->isAvailable());
+    }
+
     public function testSurnameMapsToLastname(): void
     {
         $this->aiClient->method('isAvailable')->willReturn(true);

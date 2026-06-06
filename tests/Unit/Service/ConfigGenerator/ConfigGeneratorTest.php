@@ -4,6 +4,7 @@ namespace Timbrs\DatabaseDumps\Tests\Unit\Service\ConfigGenerator;
 
 use Timbrs\DatabaseDumps\Config\DumpConfig;
 use Timbrs\DatabaseDumps\Config\TableConfig;
+use Timbrs\DatabaseDumps\Contract\AiClientInterface;
 use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
@@ -11,6 +12,7 @@ use Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigGenerator;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigSplitter;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ServiceTableFilter;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\TableInspector;
+use Timbrs\DatabaseDumps\Service\Faker\LlmPatternDetector;
 use Timbrs\DatabaseDumps\Service\Faker\PatternDetector;
 use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
 use PHPUnit\Framework\TestCase;
@@ -108,6 +110,47 @@ class ConfigGeneratorTest extends TestCase
         $parsed = Yaml::parse($writtenContent);
         $this->assertArrayHasKey(DumpConfig::KEY_FULL_EXPORT, $parsed);
         $this->assertContains('roles', $parsed[DumpConfig::KEY_FULL_EXPORT]['public']);
+    }
+
+    public function testRefreshLlmClientEnablesAvailabilityInSameRun(): void
+    {
+        $offline = $this->createMock(AiClientInterface::class);
+        $offline->method('isAvailable')->willReturn(false);
+
+        $detector = new LlmPatternDetector($offline, $this->patternDetector, $this->registry);
+
+        $generator = new ConfigGenerator(
+            $this->inspector,
+            $this->filter,
+            $this->fileSystem,
+            $this->logger,
+            $this->registry,
+            $this->dependencyResolver,
+            $this->configSplitter,
+            $this->patternDetector,
+            true,
+            true,
+            false,
+            $detector
+        );
+
+        $this->assertFalse($generator->isLlmAvailable());
+
+        $online = $this->createMock(AiClientInterface::class);
+        $online->method('isAvailable')->willReturn(true);
+        $generator->refreshLlmClient($online);
+
+        $this->assertTrue($generator->isLlmAvailable());
+    }
+
+    public function testRefreshLlmClientIsNoopWithoutDetector(): void
+    {
+        $online = $this->createMock(AiClientInterface::class);
+        $online->method('isAvailable')->willReturn(true);
+
+        // У базового генератора (setUp) детектор не задан — вызов безопасен.
+        $this->generator->refreshLlmClient($online);
+        $this->assertFalse($this->generator->isLlmAvailable());
     }
 
     public function testGeneratePartialExportTables(): void
