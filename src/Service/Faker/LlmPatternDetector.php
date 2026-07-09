@@ -119,6 +119,7 @@ class LlmPatternDetector
         }
 
         try {
+            $this->info(sprintf('  выборка примеров из %s.%s (до %d строк)…', $schema, $table, $this->sampleSize));
             $samples = $this->fetchColumnSamples($schema, $table, $connectionName);
             if (empty($samples)) {
                 return $regexHints;
@@ -129,6 +130,7 @@ class LlmPatternDetector
                 ['role' => 'user', 'content' => $this->buildUserPrompt($schema, $table, $samples, $regexHints)],
             ];
 
+            $this->info(sprintf('  LLM-классификация %s.%s (%d колонок)…', $schema, $table, count($samples)));
             $response = $this->aiClient->chatJson($messages, 0.1);
             return $this->mapResponse($response);
         } catch (\Throwable $e) {
@@ -316,6 +318,13 @@ class LlmPatternDetector
     {
         if ($this->logger !== null) {
             $this->logger->warning($message);
+        }
+    }
+
+    private function info(string $message): void
+    {
+        if ($this->logger !== null) {
+            $this->logger->info($message);
         }
     }
 }

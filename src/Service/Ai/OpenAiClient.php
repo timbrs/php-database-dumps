@@ -82,8 +82,18 @@ class OpenAiClient implements AiClientInterface
         for ($attempt = 0; $attempt < self::MAX_ATTEMPTS; $attempt++) {
             if ($attempt > 0) {
                 // 5s, 15s, 45s
-                $this->doSleep(5 * (int) pow(3, $attempt - 1));
+                $wait = 5 * (int) pow(3, $attempt - 1);
+                $this->info(sprintf('Пауза %d сек перед повтором LLM-запроса…', $wait));
+                $this->doSleep($wait);
             }
+
+            $this->info(sprintf(
+                'LLM-запрос (попытка %d/%d, модель %s, таймаут %d сек)…',
+                $attempt + 1,
+                self::MAX_ATTEMPTS,
+                $this->config->getModel(),
+                $this->config->getTimeout()
+            ));
 
             try {
                 $result = $this->transport->post($url, $headers, $payload, $this->config->getTimeout());
@@ -264,6 +274,13 @@ class OpenAiClient implements AiClientInterface
     {
         if ($this->logger !== null) {
             $this->logger->warning($message);
+        }
+    }
+
+    private function info(string $message): void
+    {
+        if ($this->logger !== null) {
+            $this->logger->info($message);
         }
     }
 }

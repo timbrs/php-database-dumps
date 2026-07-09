@@ -228,7 +228,8 @@ class PrepareConfigCommand extends Command
         $this->warn('Файл может содержать token — добавьте его в .gitignore. ИИ-детекция включена для этого запуска.');
 
         // Применяем немедленно: подменяем клиент в уже построенном детекторе.
-        $this->generator->refreshLlmClient(AiClientFactory::create($this->transport, $config));
+        // Логгер передаём, чтобы запросы/ретраи нового клиента были видны в консоли.
+        $this->generator->refreshLlmClient(AiClientFactory::create($this->transport, $config, $this->logger));
     }
 
     private static function isValidUrl(string $url): bool
