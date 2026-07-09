@@ -8,6 +8,7 @@ use Timbrs\DatabaseDumps\Contract\AiClientInterface;
 use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
+use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisReportWriter;
 use Timbrs\DatabaseDumps\Service\Faker\LlmPatternDetector;
@@ -92,8 +93,11 @@ class ConfigGenerator
      */
     private $analysisTables = [];
 
-    /** @var string|null Корень хост-проекта (для каталога database/analysis) */
+    /** @var string|null Корень хост-проекта (для каталога {data_dir}/analysis) */
     private $projectDir;
+
+    /** @var DbdumpConfigStore|null */
+    private $configStore;
 
     public function __construct(
         TableInspector $inspector,
@@ -111,7 +115,8 @@ class ConfigGenerator
         ColumnStatisticsInspector $statisticsInspector = null,
         CriteriaSuggester $criteriaSuggester = null,
         AnalysisReportWriter $reportWriter = null,
-        ?string $projectDir = null
+        ?string $projectDir = null,
+        DbdumpConfigStore $configStore = null
     ) {
         $this->inspector = $inspector;
         $this->filter = $filter;
@@ -129,6 +134,18 @@ class ConfigGenerator
         $this->criteriaSuggester = $criteriaSuggester;
         $this->reportWriter = $reportWriter;
         $this->projectDir = $projectDir !== null ? rtrim($projectDir, '/\\') : null;
+        $this->configStore = $configStore;
+    }
+
+    /**
+     * Базовый каталог данных (относительный): из store, иначе дефолт 'database'.
+     */
+    private function dataDir(): string
+    {
+        if ($this->configStore !== null && $this->projectDir !== null) {
+            return $this->configStore->getDataDir($this->projectDir);
+        }
+        return DbdumpConfigStore::DEFAULT_DATA_DIR;
     }
 
     /**
@@ -320,7 +337,7 @@ class ConfigGenerator
         // проекта, чтобы совпадать с prepare-analysis/apply-analysis независимо от того,
         // где лежит сам dump_config.yaml (в Symfony — config/, в Laravel — database/).
         $analysisDir = $this->projectDir !== null
-            ? $this->projectDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR
+            ? $this->projectDir . '/' . $this->dataDir() . '/' . AnalysisPackageBuilder::ANALYSIS_DIR
             : dirname($outputPath) . '/analysis';
         $analysis = [
             'generated_at' => gmdate('Y-m-d\TH:i:s\Z'),

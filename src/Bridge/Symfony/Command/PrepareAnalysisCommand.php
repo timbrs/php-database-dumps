@@ -7,6 +7,7 @@ use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
+use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
 use Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher;
@@ -32,13 +33,17 @@ class PrepareAnalysisCommand extends Command
     /** @var string */
     private $configPath;
 
+    /** @var DbdumpConfigStore */
+    private $configStore;
+
     public function __construct(
         AnalysisPackageBuilder $builder,
         OpencodeRunner $runner,
         AnalysisIngestor $ingestor,
         ConfigEnricher $enricher,
         string $projectDir,
-        string $configPath
+        string $configPath,
+        DbdumpConfigStore $configStore
     ) {
         $this->builder = $builder;
         $this->runner = $runner;
@@ -46,6 +51,7 @@ class PrepareAnalysisCommand extends Command
         $this->enricher = $enricher;
         $this->projectDir = rtrim($projectDir, '/\\');
         $this->configPath = $configPath;
+        $this->configStore = $configStore;
         parent::__construct();
     }
 
@@ -92,10 +98,12 @@ class PrepareAnalysisCommand extends Command
             return Command::SUCCESS;
         }
 
-        $io->note('Запуск OPENCODE автономно (--dangerously-skip-permissions). Агент пишет только в database/analysis/out/.');
+        $dataDir = $this->configStore->getDataDir($this->projectDir);
+        $outRel = $dataDir . '/' . AnalysisPackageBuilder::OUT_DIR;
+        $io->note("Запуск OPENCODE автономно (--dangerously-skip-permissions). Агент пишет только в {$outRel}/.");
         foreach ($schemaFiles as $schema => $absPath) {
-            $relFile = AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.' . $schema . '.json';
-            $prompt = "Обработай схему {$schema} по инструкции; результат запиши в database/analysis/out/{$schema}.json";
+            $relFile = $dataDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.' . $schema . '.json';
+            $prompt = "Обработай схему {$schema} по инструкции; результат запиши в {$outRel}/{$schema}.json";
             $io->section("Схема: {$schema}");
             $code = $this->runner->runAgent($this->projectDir, $relFile, $prompt);
             if ($code !== 0) {
@@ -103,7 +111,7 @@ class PrepareAnalysisCommand extends Command
             }
         }
 
-        $outDir = $this->projectDir . '/' . AnalysisPackageBuilder::OUT_DIR;
+        $outDir = $this->projectDir . '/' . $outRel;
         $ingested = $this->ingestor->ingest($outDir);
         $stats = $this->enricher->enrich($this->configPath, $ingested);
 
@@ -120,13 +128,14 @@ class PrepareAnalysisCommand extends Command
      */
     private function printManualInstructions(SymfonyStyle $io, array $schemaFiles): void
     {
+        $dataDir = $this->configStore->getDataDir($this->projectDir);
         $io->section('Запуск OPENCODE вручную (скопируйте команды)');
         if (empty($schemaFiles)) {
-            $io->text($this->runner->manualCommandHint(AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.json'));
+            $io->text($this->runner->manualCommandHint($dataDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.json'));
         } else {
             $io->text('# по чанку на схему (рекомендуется для больших БД):');
             foreach ($schemaFiles as $schema => $absPath) {
-                $relFile = AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.' . $schema . '.json';
+                $relFile = $dataDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.' . $schema . '.json';
                 $io->text($this->runner->manualCommandHint($relFile));
             }
         }

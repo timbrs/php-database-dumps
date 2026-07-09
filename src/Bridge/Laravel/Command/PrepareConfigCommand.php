@@ -8,9 +8,10 @@ use Timbrs\DatabaseDumps\Config\AiConfig;
 use Timbrs\DatabaseDumps\Contract\HttpTransportInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\Ai\AiClientFactory;
-use Timbrs\DatabaseDumps\Service\Ai\AiConfigStore;
+use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigGenerator;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ModeParser;
+use Timbrs\DatabaseDumps\Util\EnvFileWriter;
 
 class PrepareConfigCommand extends Command
 {
@@ -42,7 +43,7 @@ class PrepareConfigCommand extends Command
     /** @var string */
     private $configPath;
 
-    /** @var AiConfigStore */
+    /** @var DbdumpConfigStore */
     private $aiConfigStore;
 
     /** @var HttpTransportInterface */
@@ -51,14 +52,18 @@ class PrepareConfigCommand extends Command
     /** @var string */
     private $projectDir;
 
+    /** @var EnvFileWriter */
+    private $envWriter;
+
     public function __construct(
         ConfigGenerator $generator,
         ModeParser $modeParser,
         LoggerInterface $logger,
         string $configPath,
-        AiConfigStore $aiConfigStore,
+        DbdumpConfigStore $aiConfigStore,
         HttpTransportInterface $transport,
-        string $projectDir
+        string $projectDir,
+        EnvFileWriter $envWriter
     ) {
         parent::__construct();
         $this->generator = $generator;
@@ -68,6 +73,7 @@ class PrepareConfigCommand extends Command
         $this->aiConfigStore = $aiConfigStore;
         $this->transport = $transport;
         $this->projectDir = rtrim($projectDir, '/\\');
+        $this->envWriter = $envWriter;
     }
 
     public function handle(): int
@@ -173,8 +179,9 @@ class PrepareConfigCommand extends Command
 
     /**
      * Первый запуск: если LLM ещё не настроен (нет ни env, ни сохранённого файла) —
-     * предложить задать API URL, модель и token. Ответ сохраняется в
-     * database/dbdump_llm.json и применяется немедленно. LLM — основной сценарий.
+     * предложить задать API URL, модель и token. Несекретное сохраняется в
+     * config/database-dumps.php, токен — в .env.local; применяется немедленно.
+     * LLM — основной сценарий.
      */
     private function ensureLlmConfigured(): void
     {
@@ -224,8 +231,11 @@ class PrepareConfigCommand extends Command
             'enabled' => true,
         ]);
         $this->aiConfigStore->save($this->projectDir, $config);
-        $this->info('Настройки LLM сохранены.');
-        $this->warn('Файл может содержать token — добавьте его в .gitignore. ИИ-детекция включена для этого запуска.');
+        if ($token !== null) {
+            $envPath = $this->envWriter->setVar($this->projectDir, AiConfig::ENV_TOKEN, $token);
+            $this->line('Токен записан в ' . $envPath . '. Настройки — в ' . $this->aiConfigStore->path($this->projectDir) . '.');
+        }
+        $this->info('Настройки LLM сохранены. ИИ-детекция включена для этого запуска.');
 
         // Применяем немедленно: подменяем клиент в уже построенном детекторе.
         // Логгер передаём, чтобы запросы/ретраи нового клиента были видны в консоли.

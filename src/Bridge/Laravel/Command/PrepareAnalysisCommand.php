@@ -5,6 +5,7 @@ namespace Timbrs\DatabaseDumps\Bridge\Laravel\Command;
 use Illuminate\Console\Command;
 use Timbrs\DatabaseDumps\Bridge\Laravel\LaravelLogger;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
+use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
 use Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher;
@@ -41,6 +42,9 @@ class PrepareAnalysisCommand extends Command
     /** @var string */
     private $configPath;
 
+    /** @var DbdumpConfigStore */
+    private $configStore;
+
     public function __construct(
         AnalysisPackageBuilder $builder,
         OpencodeRunner $runner,
@@ -48,7 +52,8 @@ class PrepareAnalysisCommand extends Command
         ConfigEnricher $enricher,
         LoggerInterface $logger,
         string $projectDir,
-        string $configPath
+        string $configPath,
+        DbdumpConfigStore $configStore
     ) {
         parent::__construct();
         $this->builder = $builder;
@@ -58,6 +63,7 @@ class PrepareAnalysisCommand extends Command
         $this->logger = $logger;
         $this->projectDir = rtrim($projectDir, '/\\');
         $this->configPath = $configPath;
+        $this->configStore = $configStore;
     }
 
     public function handle(): int
@@ -94,10 +100,12 @@ class PrepareAnalysisCommand extends Command
             return self::SUCCESS;
         }
 
-        $this->line('Запуск OPENCODE автономно (--dangerously-skip-permissions). Агент пишет только в database/analysis/out/.');
+        $dataDir = $this->configStore->getDataDir($this->projectDir);
+        $outRel = $dataDir . '/' . AnalysisPackageBuilder::OUT_DIR;
+        $this->line("Запуск OPENCODE автономно (--dangerously-skip-permissions). Агент пишет только в {$outRel}/.");
         foreach ($schemaFiles as $schema => $absPath) {
-            $relFile = AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.' . $schema . '.json';
-            $prompt = "Обработай схему {$schema} по инструкции; результат запиши в database/analysis/out/{$schema}.json";
+            $relFile = $dataDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.' . $schema . '.json';
+            $prompt = "Обработай схему {$schema} по инструкции; результат запиши в {$outRel}/{$schema}.json";
             $this->line("— схема: {$schema}");
             $code = $this->runner->runAgent($this->projectDir, $relFile, $prompt);
             if ($code !== 0) {
@@ -105,7 +113,7 @@ class PrepareAnalysisCommand extends Command
             }
         }
 
-        $outDir = $this->projectDir . '/' . AnalysisPackageBuilder::OUT_DIR;
+        $outDir = $this->projectDir . '/' . $outRel;
         $ingested = $this->ingestor->ingest($outDir);
         $stats = $this->enricher->enrich($this->configPath, $ingested);
 
@@ -123,13 +131,14 @@ class PrepareAnalysisCommand extends Command
     private function printManualInstructions(array $schemaFiles): void
     {
         $this->line('');
+        $dataDir = $this->configStore->getDataDir($this->projectDir);
         $this->line('Запуск OPENCODE вручную (скопируйте команды):');
         if (empty($schemaFiles)) {
-            $this->line($this->runner->manualCommandHint(AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.json'));
+            $this->line($this->runner->manualCommandHint($dataDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.json'));
         } else {
             $this->line('# по чанку на схему (рекомендуется для больших БД):');
             foreach ($schemaFiles as $schema => $absPath) {
-                $relFile = AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.' . $schema . '.json';
+                $relFile = $dataDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.' . $schema . '.json';
                 $this->line($this->runner->manualCommandHint($relFile));
             }
         }

@@ -132,9 +132,9 @@ php bin/console app:dbdump:prepare-config all
 3. `Модель` — имя модели (по умолчанию `openai/gpt-oss-120b`);
 4. `Token` — Bearer-токен; **можно оставить пустым** (Enter).
 
-Ответы сохраняются в `database/dbdump_llm.json` и **применяются сразу в этом же запуске**. Повторно спрашивать не будет. Если откажетесь — выбор тоже запомнится (анализ пойдёт на regex); включить позже — командой `configure-llm` (см. ниже).
+Несекретные ответы (URL/модель) сохраняются в `config/database-dumps.php`, а `Token` — в `.env.local` (`DBDUMP_LLM_TOKEN`, при отсутствии — в `.env`); настройки **применяются сразу в этом же запуске**. Повторно спрашивать не будет. Если откажетесь — выбор тоже запомнится (анализ пойдёт на regex); включить позже — командой `configure-llm` (см. ниже).
 
-> ⚠️ Файл `database/dbdump_llm.json` может содержать token — добавьте его в `.gitignore`.
+> ℹ️ Токен в файл настроек не пишется — он хранится в `.env.local`, поэтому `config/database-dumps.php` безопасно коммитить. В Symfony этот файл подтягивается только вне prod.
 
 Результат: `dump_config.yaml` (+ per-schema файлы) с автоопределёнными `full_export`/`partial_export`, секцией `faker` (LLM-детекция ПД) и каскадами по FK.
 
@@ -171,7 +171,7 @@ php artisan dbdump:configure-llm                 # Laravel
 php bin/console app:dbdump:configure-llm         # Symfony
 ```
 
-Интерактивно меняет URL/модель/token, умеет проверить соединение и пересохранить `database/dbdump_llm.json`.
+Интерактивно меняет URL/модель/token, умеет проверить соединение и пересохранить настройки: несекретное — в `config/database-dumps.php`, токен — в `.env.local` (`DBDUMP_LLM_TOKEN`).
 
 ## Быстрый старт
 
@@ -461,8 +461,10 @@ connections:
 ```
 
 **Куда сохраняются дампы:**
-- Основное подключение: `database/dumps/{schema}/{table}.sql`
-- Именованное подключение: `database/dumps/{connection}/{schema}/{table}.sql`
+- Основное подключение: `{data_dir}/dumps/{schema}/{table}.sql`
+- Именованное подключение: `{data_dir}/dumps/{connection}/{schema}/{table}.sql`
+
+`data_dir` — базовый каталог данных (по умолчанию `database`), от него считаются дампы (`{data_dir}/dumps`), анализ (`{data_dir}/analysis`) и хуки (`{data_dir}/before_exec`, `{data_dir}/after_exec`). Изменить можно в `config/database-dumps.php` (ключ `data_dir`, например `'var/database'`) или через env `DBDUMP_DATA_DIR`. В prod всегда используется дефолт `database`.
 
 **Опция `--connection`:**
 
@@ -525,7 +527,7 @@ php artisan dbdump:prepare-config new
 | `--no-faker` | Пропустить обнаружение персональных данных | — |
 | `--no-split` | Генерировать единый YAML без разделения по схемам | — |
 | `--criteria` | Авто-генерация `sample.criteria` из категориальных колонок | — |
-| `--ai` / `--no-ai` | Включить/отключить LLM-детекцию ПД (авто: включается, если LLM настроен — env `DBDUMP_LLM_URL` или `database/dbdump_llm.json`). `--no-ai` также подавляет авто-запрос настройки LLM при первом запуске | авто |
+| `--ai` / `--no-ai` | Включить/отключить LLM-детекцию ПД (авто: включается, если LLM настроен — env `DBDUMP_LLM_URL` или `config/database-dumps.php`). `--no-ai` также подавляет авто-запрос настройки LLM при первом запуске | авто |
 | `--deep` | Глубокий анализ: профилирование + ИИ + `sample.criteria` + отчёт `database/analysis/REPORT.md` | — |
 
 **Как распределяются таблицы:**
@@ -547,7 +549,7 @@ php artisan dbdump:prepare-config new
 
 ### Настройка LLM (интерактивно)
 
-**При первом запуске `prepare-config`** (если настройки LLM ещё не заданы и сессия интерактивна) пакет сам предложит настроить LLM — спросит `API URL`, `Модель` и `Token` (token можно оставить пустым), сохранит ответы в `database/dbdump_llm.json` и применит их немедленно в этом же запуске. Отказ тоже запоминается, чтобы не спрашивать снова. Авто-запрос подавляется флагом `--no-ai` и в неинтерактивном режиме (`--no-interaction`, CI).
+**При первом запуске `prepare-config`** (если настройки LLM ещё не заданы и сессия интерактивна) пакет сам предложит настроить LLM — спросит `API URL`, `Модель` и `Token` (token можно оставить пустым), сохранит несекретное в `config/database-dumps.php`, токен — в `.env.local` (`DBDUMP_LLM_TOKEN`), и применит настройки немедленно в этом же запуске. Отказ тоже запоминается, чтобы не спрашивать снова. Авто-запрос подавляется флагом `--no-ai` и в неинтерактивном режиме (`--no-interaction`, CI).
 
 Настроить или изменить LLM в любой момент можно явной командой — она дополнительно умеет проверить соединение:
 
@@ -556,7 +558,7 @@ php artisan dbdump:configure-llm                 # Laravel
 php bin/console app:dbdump:configure-llm         # Symfony
 ```
 
-После настройки `--ai`/`--deep` и `prepare-analysis` подхватывают параметры автоматически. Приоритет источников: переменные окружения `DBDUMP_LLM_*` (если задан URL) перекрывают сохранённый файл. Файл может содержать token — добавьте `database/dbdump_llm.json` в `.gitignore`.
+После настройки `--ai`/`--deep` и `prepare-analysis` подхватывают параметры автоматически. Приоритет источников: переменные окружения `DBDUMP_LLM_*` (если задан URL) перекрывают файл `config/database-dumps.php`; токен всегда берётся из окружения (`.env.local` → `.env`) и в файл настроек не пишется. В Symfony файл подтягивается только вне prod.
 
 ### LLM-детекция ПД и профилирование
 

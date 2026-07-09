@@ -5,6 +5,7 @@ namespace Timbrs\DatabaseDumps\Bridge\Laravel\Command;
 use Illuminate\Console\Command;
 use Timbrs\DatabaseDumps\Bridge\Laravel\LaravelLogger;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
+use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
 use Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher;
@@ -32,12 +33,16 @@ class ApplyAnalysisCommand extends Command
     /** @var string */
     private $configPath;
 
+    /** @var DbdumpConfigStore */
+    private $configStore;
+
     public function __construct(
         AnalysisIngestor $ingestor,
         ConfigEnricher $enricher,
         LoggerInterface $logger,
         string $projectDir,
-        string $configPath
+        string $configPath,
+        DbdumpConfigStore $configStore
     ) {
         parent::__construct();
         $this->ingestor = $ingestor;
@@ -45,6 +50,7 @@ class ApplyAnalysisCommand extends Command
         $this->logger = $logger;
         $this->projectDir = rtrim($projectDir, '/\\');
         $this->configPath = $configPath;
+        $this->configStore = $configStore;
     }
 
     public function handle(): int
@@ -52,7 +58,8 @@ class ApplyAnalysisCommand extends Command
         $this->setupLogger();
         $this->info('Применение результатов анализа кода');
 
-        $outDir = $this->projectDir . '/' . AnalysisPackageBuilder::OUT_DIR;
+        $outDir = $this->projectDir . '/' . $this->configStore->getDataDir($this->projectDir)
+            . '/' . AnalysisPackageBuilder::OUT_DIR;
 
         try {
             $ingested = $this->ingestor->ingest($outDir);

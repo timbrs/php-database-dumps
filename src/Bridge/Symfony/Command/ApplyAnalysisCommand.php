@@ -6,6 +6,7 @@ use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
+use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
 use Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher;
@@ -24,12 +25,21 @@ class ApplyAnalysisCommand extends Command
     /** @var string */
     private $configPath;
 
-    public function __construct(AnalysisIngestor $ingestor, ConfigEnricher $enricher, string $projectDir, string $configPath)
-    {
+    /** @var DbdumpConfigStore */
+    private $configStore;
+
+    public function __construct(
+        AnalysisIngestor $ingestor,
+        ConfigEnricher $enricher,
+        string $projectDir,
+        string $configPath,
+        DbdumpConfigStore $configStore
+    ) {
         $this->ingestor = $ingestor;
         $this->enricher = $enricher;
         $this->projectDir = rtrim($projectDir, '/\\');
         $this->configPath = $configPath;
+        $this->configStore = $configStore;
         parent::__construct();
     }
 
@@ -45,7 +55,8 @@ class ApplyAnalysisCommand extends Command
         $io = new SymfonyStyle($input, $output);
         $io->title('Применение результатов анализа кода');
 
-        $outDir = $this->projectDir . '/' . AnalysisPackageBuilder::OUT_DIR;
+        $outDir = $this->projectDir . '/' . $this->configStore->getDataDir($this->projectDir)
+            . '/' . AnalysisPackageBuilder::OUT_DIR;
 
         try {
             $ingested = $this->ingestor->ingest($outDir);

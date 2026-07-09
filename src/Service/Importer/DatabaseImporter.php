@@ -9,6 +9,7 @@ use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Exception\ImportFailedException;
 use Timbrs\DatabaseDumps\Platform\PlatformFactory;
+use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
 use Timbrs\DatabaseDumps\Service\Parser\SqlParser;
 use Timbrs\DatabaseDumps\Service\Security\ProductionGuard;
@@ -26,8 +27,9 @@ use Timbrs\DatabaseDumps\Service\Security\ProductionGuard;
  */
 class DatabaseImporter
 {
-    public const BEFORE_EXEC_DIR = 'database/before_exec';
-    public const AFTER_EXEC_DIR = 'database/after_exec';
+    /** Суффиксы каталогов хуков относительно data_dir (полный путь: {data_dir}/before_exec). */
+    public const BEFORE_EXEC_DIR = 'before_exec';
+    public const AFTER_EXEC_DIR = 'after_exec';
 
     /** @var ConnectionRegistryInterface */
     private $registry;
@@ -52,6 +54,9 @@ class DatabaseImporter
     /** @var SchemaValidator|null */
     private $schemaValidator;
 
+    /** @var DbdumpConfigStore|null */
+    private $configStore;
+
     /** @var bool */
     private $ignoreSchemaMismatch = false;
 
@@ -66,7 +71,8 @@ class DatabaseImporter
         LoggerInterface $logger,
         string $projectDir,
         TableDependencyResolver $dependencyResolver,
-        SchemaValidator $schemaValidator = null
+        SchemaValidator $schemaValidator = null,
+        DbdumpConfigStore $configStore = null
     ) {
         $this->registry = $registry;
         $this->dumpConfig = $dumpConfig;
@@ -79,6 +85,17 @@ class DatabaseImporter
         $this->projectDir = $projectDir;
         $this->dependencyResolver = $dependencyResolver;
         $this->schemaValidator = $schemaValidator;
+        $this->configStore = $configStore;
+    }
+
+    /**
+     * Базовый каталог данных (относительный): из store, иначе дефолт 'database'.
+     */
+    private function dataDir(): string
+    {
+        return $this->configStore !== null
+            ? $this->configStore->getDataDir($this->projectDir)
+            : DbdumpConfigStore::DEFAULT_DATA_DIR;
     }
 
     public function setIgnoreSchemaMismatch(bool $ignore): void
@@ -116,7 +133,7 @@ class DatabaseImporter
         $this->transactionManager->transaction(function () use ($connectionName, $skipBefore, $skipAfter, $schemaFilter) {
             if (!$skipBefore && $connectionName === null) {
                 $this->logger->info('1. Выполнение before_exec скриптов');
-                $this->scriptExecutor->executeScripts($this->projectDir . '/' . self::BEFORE_EXEC_DIR);
+                $this->scriptExecutor->executeScripts($this->projectDir . '/' . $this->dataDir() . '/' . self::BEFORE_EXEC_DIR);
             }
 
             $this->logger->info('2. Импорт SQL дампов');
@@ -124,7 +141,7 @@ class DatabaseImporter
 
             if (!$skipAfter && $connectionName === null) {
                 $this->logger->info('3. Выполнение after_exec скриптов');
-                $this->scriptExecutor->executeScripts($this->projectDir . '/' . self::AFTER_EXEC_DIR);
+                $this->scriptExecutor->executeScripts($this->projectDir . '/' . $this->dataDir() . '/' . self::AFTER_EXEC_DIR);
             }
         }, $connectionName);
     }
@@ -270,10 +287,11 @@ class DatabaseImporter
 
     private function buildDumpsPath(?string $connectionName): string
     {
+        $dumpsDir = $this->projectDir . '/' . $this->dataDir() . '/' . DumpConfig::DUMPS_DIR;
         if ($connectionName !== null) {
-            return $this->projectDir . '/' . DumpConfig::DUMPS_DIR . '/' . $connectionName;
+            return $dumpsDir . '/' . $connectionName;
         }
-        return $this->projectDir . '/' . DumpConfig::DUMPS_DIR;
+        return $dumpsDir;
     }
 
     private function importDumpFile(

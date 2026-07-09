@@ -7,6 +7,7 @@ use Timbrs\DatabaseDumps\Config\DumpConfig;
 use Timbrs\DatabaseDumps\Config\TableConfig;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
+use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigSplitter;
 
 /**
@@ -39,19 +40,24 @@ class ConfigEnricher
     /** @var LoggerInterface */
     private $logger;
 
-    /** @var string|null Корень хост-проекта (для каталога database/analysis) */
+    /** @var string|null Корень хост-проекта (для каталога {data_dir}/analysis) */
     private $projectDir;
+
+    /** @var DbdumpConfigStore|null */
+    private $configStore;
 
     public function __construct(
         FileSystemInterface $fileSystem,
         ConfigSplitter $configSplitter,
         LoggerInterface $logger,
-        ?string $projectDir = null
+        ?string $projectDir = null,
+        DbdumpConfigStore $configStore = null
     ) {
         $this->fileSystem = $fileSystem;
         $this->configSplitter = $configSplitter;
         $this->logger = $logger;
         $this->projectDir = $projectDir !== null ? rtrim($projectDir, '/\\') : null;
+        $this->configStore = $configStore;
     }
 
     /**
@@ -384,7 +390,10 @@ class ConfigEnricher
     private function resolveAnalysisDir(string $configPath): string
     {
         if ($this->projectDir !== null) {
-            return $this->projectDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR;
+            $dataDir = $this->configStore !== null
+                ? $this->configStore->getDataDir($this->projectDir)
+                : DbdumpConfigStore::DEFAULT_DATA_DIR;
+            return $this->projectDir . '/' . $dataDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR;
         }
         return dirname($configPath) . '/analysis';
     }

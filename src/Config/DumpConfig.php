@@ -13,7 +13,8 @@ class DumpConfig
     public const KEY_INCLUDES = 'includes';
     public const KEY_FAKER = 'faker';
     public const KEY_SETTINGS = 'settings';
-    public const DUMPS_DIR = 'database/dumps';
+    /** Суффикс каталога дампов относительно data_dir (полный путь: {data_dir}/dumps). */
+    public const DUMPS_DIR = 'dumps';
 
     public const SETTING_BATCH_SIZE = 'batch_size';
     public const SETTING_SAMPLE_SIZE = 'sample_size';

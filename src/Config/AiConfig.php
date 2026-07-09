@@ -105,7 +105,7 @@ class AiConfig
     }
 
     /**
-     * Создать из массива сохранённых настроек (см. AiConfigStore).
+     * Создать из массива сохранённых настроек (см. DbdumpConfigStore).
      *
      * @param array<string, mixed> $data
      */

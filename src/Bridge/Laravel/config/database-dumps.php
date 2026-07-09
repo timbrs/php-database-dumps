@@ -6,6 +6,17 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Базовый каталог данных
+    |--------------------------------------------------------------------------
+    |
+    | От него считаются дампы ({data_dir}/dumps), анализ ({data_dir}/analysis)
+    | и хуки ({data_dir}/before_exec, {data_dir}/after_exec). По умолчанию
+    | 'database'; можно задать, например, 'var/database'.
+    */
+    'data_dir' => env('DBDUMP_DATA_DIR', 'database'),
+
+    /*
+    |--------------------------------------------------------------------------
     | LLM (прямой клиент для анализа данных)
     |--------------------------------------------------------------------------
     |
@@ -16,13 +27,12 @@ return [
     | OpenAI-совместимый endpoint, например https://llm.example.com/v1
     |
     | Проще всего настроить интерактивно: `php artisan dbdump:configure-llm`
-    | (сохранит URL/модель/token в database/dbdump_llm.json). Значения ниже
-    | (через env) перекрывают сохранённый файл.
+    | (сохранит URL/модель в этот файл). Токен НЕ хранится здесь — держите его
+    | в .env.local: DBDUMP_LLM_TOKEN=... (env перекрывает значения ниже).
     */
     'llm' => [
         'url' => env('DBDUMP_LLM_URL', ''),
         'model' => env('DBDUMP_LLM_MODEL', 'openai/gpt-oss-120b'),
-        'token' => env('DBDUMP_LLM_TOKEN'),
         'timeout' => (int) env('DBDUMP_LLM_TIMEOUT', 120),
         // null = auto (включено, если задан url)
         'enabled' => env('DBDUMP_LLM_ENABLED'),

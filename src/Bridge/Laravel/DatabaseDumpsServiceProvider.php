@@ -24,8 +24,8 @@ use Timbrs\DatabaseDumps\Contract\HttpTransportInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Platform\PlatformFactory;
 use Timbrs\DatabaseDumps\Service\Ai\AiClientFactory;
-use Timbrs\DatabaseDumps\Service\Ai\AiConfigStore;
 use Timbrs\DatabaseDumps\Service\Ai\CurlHttpTransport;
+use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisReportWriter;
@@ -64,6 +64,7 @@ use Timbrs\DatabaseDumps\Service\Importer\TransactionManager;
 use Timbrs\DatabaseDumps\Service\Parser\SqlParser;
 use Timbrs\DatabaseDumps\Service\Parser\StatementSplitter;
 use Timbrs\DatabaseDumps\Service\Security\ProductionGuard;
+use Timbrs\DatabaseDumps\Util\EnvFileWriter;
 use Timbrs\DatabaseDumps\Util\FileSystemHelper;
 use Timbrs\DatabaseDumps\Util\YamlConfigLoader;
 
@@ -219,17 +220,29 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
             );
         });
 
-        // LLM (прямой клиент для анализа данных)
-        $this->app->singleton(AiConfigStore::class, function ($app) {
-            return new AiConfigStore($app->make(FileSystemInterface::class));
+        // Единое хранилище настроек (data_dir + LLM) + запись токена в .env
+        $this->app->singleton(DbdumpConfigStore::class, function ($app) {
+            return new DbdumpConfigStore(
+                $app->make(FileSystemInterface::class),
+                $app->make(EnvironmentConfig::class)
+            );
+        });
+        $this->app->singleton(EnvFileWriter::class, function ($app) {
+            return new EnvFileWriter($app->make(FileSystemInterface::class));
         });
         $this->app->singleton(AiConfig::class, function ($app) {
-            // Приоритет: явная секция llm в config (если url задан) → env/файл (AiConfigStore).
+            $projectDir = $app['config']->get('database-dumps.project_dir');
+            // Store читает config/database-dumps.php (та же секция llm) + накладывает
+            // токен из окружения и prod-гейтинг. Явная секция llm — как fallback.
+            $resolved = $app->make(DbdumpConfigStore::class)->resolve($projectDir);
+            if ($resolved->getUrl() !== '') {
+                return $resolved;
+            }
             $cfg = $app['config']->get('database-dumps.llm', []);
             if (is_array($cfg) && !empty($cfg['url'])) {
                 return AiConfig::fromArray($cfg);
             }
-            return $app->make(AiConfigStore::class)->resolve($app['config']->get('database-dumps.project_dir'));
+            return $resolved;
         });
         $this->app->singleton(HttpTransportInterface::class, CurlHttpTransport::class);
         $this->app->singleton(AiClientInterface::class, function ($app) {
@@ -281,7 +294,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(ColumnStatisticsInspector::class),
                 $app->make(CriteriaSuggester::class),
                 $app->make(AnalysisReportWriter::class),
-                $app['config']->get('database-dumps.project_dir')
+                $app['config']->get('database-dumps.project_dir'),
+                $app->make(DbdumpConfigStore::class)
             );
         });
 
@@ -291,9 +305,10 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(ModeParser::class),
                 $app->make(LoggerInterface::class),
                 $app['config']->get('database-dumps.config_path'),
-                $app->make(AiConfigStore::class),
+                $app->make(DbdumpConfigStore::class),
                 $app->make(HttpTransportInterface::class),
-                $app['config']->get('database-dumps.project_dir')
+                $app['config']->get('database-dumps.project_dir'),
+                $app->make(EnvFileWriter::class)
             );
         });
 
@@ -307,7 +322,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(TableDependencyResolver::class),
                 $app->make(ColumnStatisticsInspector::class),
                 $app->make(LoggerInterface::class),
-                $app['config']->get('database-dumps.project_dir')
+                $app['config']->get('database-dumps.project_dir'),
+                $app->make(DbdumpConfigStore::class)
             );
         });
         $this->app->singleton(AnalysisIngestor::class, function ($app) {
@@ -321,7 +337,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(FileSystemInterface::class),
                 $app->make(ConfigSplitter::class),
                 $app->make(LoggerInterface::class),
-                $app['config']->get('database-dumps.project_dir')
+                $app['config']->get('database-dumps.project_dir'),
+                $app->make(DbdumpConfigStore::class)
             );
         });
         $this->app->singleton(OpencodeRunner::class, function ($app) {
@@ -330,9 +347,10 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
 
         $this->app->singleton(ConfigureLlmCommand::class, function ($app) {
             return new ConfigureLlmCommand(
-                $app->make(AiConfigStore::class),
+                $app->make(DbdumpConfigStore::class),
                 $app->make(HttpTransportInterface::class),
-                $app['config']->get('database-dumps.project_dir')
+                $app['config']->get('database-dumps.project_dir'),
+                $app->make(EnvFileWriter::class)
             );
         });
 
@@ -344,7 +362,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(ConfigEnricher::class),
                 $app->make(LoggerInterface::class),
                 $app['config']->get('database-dumps.project_dir'),
-                $app['config']->get('database-dumps.config_path')
+                $app['config']->get('database-dumps.config_path'),
+                $app->make(DbdumpConfigStore::class)
             );
         });
         $this->app->singleton(ApplyAnalysisCommand::class, function ($app) {
@@ -353,7 +372,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(ConfigEnricher::class),
                 $app->make(LoggerInterface::class),
                 $app['config']->get('database-dumps.project_dir'),
-                $app['config']->get('database-dumps.config_path')
+                $app['config']->get('database-dumps.config_path'),
+                $app->make(DbdumpConfigStore::class)
             );
         });
 
@@ -367,7 +387,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(TableDependencyResolver::class),
                 $app->make(FakerInterface::class),
                 $app->make(DumpConfig::class),
-                $app->make(ProductionGuard::class)
+                $app->make(ProductionGuard::class),
+                $app->make(DbdumpConfigStore::class)
             );
         });
 
@@ -383,7 +404,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(LoggerInterface::class),
                 $app['config']->get('database-dumps.project_dir'),
                 $app->make(TableDependencyResolver::class),
-                $app->make(SchemaValidator::class)
+                $app->make(SchemaValidator::class),
+                $app->make(DbdumpConfigStore::class)
             );
         });
     }

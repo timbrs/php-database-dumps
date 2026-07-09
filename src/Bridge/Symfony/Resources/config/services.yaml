@@ -30,11 +30,14 @@ services:
     Timbrs\DatabaseDumps\Config\EnvironmentConfig:
         factory: ['Timbrs\DatabaseDumps\Config\EnvironmentConfig', 'fromEnv']
 
-    # LLM (прямой клиент для анализа данных)
-    Timbrs\DatabaseDumps\Service\Ai\AiConfigStore: ~
+    # Единое хранилище настроек (data_dir + LLM) в config/database-dumps.php
+    Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore: ~
+
+    # Запись токена в .env.local/.env
+    Timbrs\DatabaseDumps\Util\EnvFileWriter: ~
 
     Timbrs\DatabaseDumps\Config\AiConfig:
-        factory: ['@Timbrs\DatabaseDumps\Service\Ai\AiConfigStore', 'resolve']
+        factory: ['@Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore', 'resolve']
         arguments:
             $projectDir: '%kernel.project_dir%'
 

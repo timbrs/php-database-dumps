@@ -6,6 +6,7 @@ use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Platform\PlatformFactory;
+use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ColumnProfile;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ColumnStatisticsInspector;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ServiceTableFilter;
@@ -26,8 +27,9 @@ use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
  */
 class AnalysisPackageBuilder
 {
-    public const ANALYSIS_DIR = 'database/analysis';
-    public const OUT_DIR = 'database/analysis/out';
+    /** Суффиксы каталогов анализа относительно data_dir (полный путь: {data_dir}/analysis). */
+    public const ANALYSIS_DIR = 'analysis';
+    public const OUT_DIR = 'analysis/out';
     public const OPENCODE_AGENTS_DIR = '.opencode/agents';
     public const OPENCODE_COMMANDS_DIR = '.opencode/commands';
 
@@ -55,6 +57,9 @@ class AnalysisPackageBuilder
     /** @var string */
     private $projectDir;
 
+    /** @var DbdumpConfigStore|null */
+    private $configStore;
+
     public function __construct(
         FileSystemInterface $fileSystem,
         ConnectionRegistryInterface $registry,
@@ -63,7 +68,8 @@ class AnalysisPackageBuilder
         TableDependencyResolver $dependencyResolver,
         ColumnStatisticsInspector $statisticsInspector,
         LoggerInterface $logger,
-        string $projectDir
+        string $projectDir,
+        DbdumpConfigStore $configStore = null
     ) {
         $this->fileSystem = $fileSystem;
         $this->registry = $registry;
@@ -73,6 +79,17 @@ class AnalysisPackageBuilder
         $this->statisticsInspector = $statisticsInspector;
         $this->logger = $logger;
         $this->projectDir = rtrim($projectDir, '/\\');
+        $this->configStore = $configStore;
+    }
+
+    /**
+     * Базовый каталог данных (относительный): из store, иначе дефолт 'database'.
+     */
+    private function dataDir(): string
+    {
+        return $this->configStore !== null
+            ? $this->configStore->getDataDir($this->projectDir)
+            : DbdumpConfigStore::DEFAULT_DATA_DIR;
     }
 
     /**
@@ -83,8 +100,9 @@ class AnalysisPackageBuilder
      */
     public function build(?string $connectionName = null): array
     {
-        $analysisDir = $this->projectDir . '/' . self::ANALYSIS_DIR;
-        $outDir = $this->projectDir . '/' . self::OUT_DIR;
+        $dataDir = $this->dataDir();
+        $analysisDir = $this->projectDir . '/' . $dataDir . '/' . self::ANALYSIS_DIR;
+        $outDir = $this->projectDir . '/' . $dataDir . '/' . self::OUT_DIR;
         $agentsDir = $this->projectDir . '/' . self::OPENCODE_AGENTS_DIR;
         $commandsDir = $this->projectDir . '/' . self::OPENCODE_COMMANDS_DIR;
 

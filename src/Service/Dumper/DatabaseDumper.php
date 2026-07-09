@@ -8,6 +8,7 @@ use Timbrs\DatabaseDumps\Contract\FakerInterface;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Exception\ExportFailedException;
+use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Generator\SqlGenerator;
 use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
 use Timbrs\DatabaseDumps\Service\Security\ProductionGuard;
@@ -54,6 +55,9 @@ class DatabaseDumper
     /** @var bool */
     private $allowProdExport = false;
 
+    /** @var DbdumpConfigStore|null */
+    private $configStore;
+
     public function __construct(
         DataFetcher $dataFetcher,
         SqlGenerator $sqlGenerator,
@@ -63,7 +67,8 @@ class DatabaseDumper
         TableDependencyResolver $dependencyResolver,
         FakerInterface $faker,
         DumpConfig $dumpConfig,
-        ProductionGuard $productionGuard = null
+        ProductionGuard $productionGuard = null,
+        DbdumpConfigStore $configStore = null
     ) {
         $this->dataFetcher = $dataFetcher;
         $this->sqlGenerator = $sqlGenerator;
@@ -74,6 +79,7 @@ class DatabaseDumper
         $this->faker = $faker;
         $this->dumpConfig = $dumpConfig;
         $this->productionGuard = $productionGuard;
+        $this->configStore = $configStore;
     }
 
     public function setAllowProdExport(bool $allow): void
@@ -255,13 +261,23 @@ class DatabaseDumper
     private function buildDumpPath(TableConfig $config): string
     {
         $connectionName = $config->getConnectionName();
-        $dumpsDir = DumpConfig::DUMPS_DIR;
+        $dumpsDir = $this->dataDir() . '/' . DumpConfig::DUMPS_DIR;
 
         if ($connectionName !== null) {
             return $this->projectDir . "/{$dumpsDir}/{$connectionName}/{$config->getSchema()}/{$config->getTable()}.sql";
         }
 
         return $this->projectDir . "/{$dumpsDir}/{$config->getSchema()}/{$config->getTable()}.sql";
+    }
+
+    /**
+     * Базовый каталог данных (относительный): из store, иначе дефолт 'database'.
+     */
+    private function dataDir(): string
+    {
+        return $this->configStore !== null
+            ? $this->configStore->getDataDir($this->projectDir)
+            : DbdumpConfigStore::DEFAULT_DATA_DIR;
     }
 
     private function ensureDirectoryExists(string $directory): void

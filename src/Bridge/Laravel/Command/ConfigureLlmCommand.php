@@ -5,12 +5,14 @@ namespace Timbrs\DatabaseDumps\Bridge\Laravel\Command;
 use Illuminate\Console\Command;
 use Timbrs\DatabaseDumps\Config\AiConfig;
 use Timbrs\DatabaseDumps\Contract\HttpTransportInterface;
-use Timbrs\DatabaseDumps\Service\Ai\AiConfigStore;
+use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Ai\OpenAiClient;
+use Timbrs\DatabaseDumps\Util\EnvFileWriter;
 
 /**
- * Интерактивная настройка LLM: спрашивает наличие LLM, URL, модель и token,
- * сохраняет в database/dbdump_llm.json (AiConfigStore).
+ * Интерактивная настройка LLM: спрашивает наличие LLM, URL, модель и token.
+ * Несекретное сохраняется в config/database-dumps.php (DbdumpConfigStore),
+ * токен — в .env.local/.env (EnvFileWriter, DBDUMP_LLM_TOKEN).
  */
 class ConfigureLlmCommand extends Command
 {
@@ -20,7 +22,7 @@ class ConfigureLlmCommand extends Command
     /** @var string */
     protected $description = 'Настроить LLM для анализа (URL, модель, token) и сохранить';
 
-    /** @var AiConfigStore */
+    /** @var DbdumpConfigStore */
     private $store;
 
     /** @var HttpTransportInterface */
@@ -29,12 +31,20 @@ class ConfigureLlmCommand extends Command
     /** @var string */
     private $projectDir;
 
-    public function __construct(AiConfigStore $store, HttpTransportInterface $transport, string $projectDir)
-    {
+    /** @var EnvFileWriter */
+    private $envWriter;
+
+    public function __construct(
+        DbdumpConfigStore $store,
+        HttpTransportInterface $transport,
+        string $projectDir,
+        EnvFileWriter $envWriter
+    ) {
         parent::__construct();
         $this->store = $store;
         $this->transport = $transport;
         $this->projectDir = rtrim($projectDir, '/\\');
+        $this->envWriter = $envWriter;
     }
 
     public function handle(): int
@@ -66,11 +76,9 @@ class ConfigureLlmCommand extends Command
         $hasToken = $current->getToken() !== null;
         // Ввод видимый (не secret), чтобы было видно вставляемый токен.
         $tokenInput = $this->ask('Token' . ($hasToken ? ' (Enter — оставить текущий)' : ' (Enter — без токена; ввод виден)'));
-        if ($tokenInput === null || $tokenInput === '') {
-            $token = $current->getToken();
-        } else {
-            $token = $tokenInput;
-        }
+        // Новый токен — только если пользователь что-то ввёл; иначе оставляем текущий (из env).
+        $newToken = ($tokenInput === null || $tokenInput === '') ? null : (string) $tokenInput;
+        $token = $newToken !== null ? $newToken : $current->getToken();
 
         $config = AiConfig::fromArray([
             'url' => $url,
@@ -100,8 +108,12 @@ class ConfigureLlmCommand extends Command
 
         $this->store->save($this->projectDir, $config);
         $this->info('Настройки LLM сохранены.');
-        $this->line('Файл: ' . $this->store->path($this->projectDir));
-        $this->warn('Файл может содержать token — добавьте его в .gitignore.');
+        $this->line('Файл: ' . $this->store->path($this->projectDir) . ' (без токена)');
+
+        if ($newToken !== null) {
+            $envPath = $this->envWriter->setVar($this->projectDir, AiConfig::ENV_TOKEN, $newToken);
+            $this->line('Токен записан в ' . $envPath . ' (' . AiConfig::ENV_TOKEN . ').');
+        }
         $this->line('Переменные окружения DBDUMP_LLM_* (если заданы) перекрывают этот файл.');
 
         return self::SUCCESS;
