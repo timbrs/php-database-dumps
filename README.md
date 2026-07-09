@@ -179,7 +179,11 @@ php bin/console app:dbdump:configure-llm         # Symfony
 
 ### Symfony
 
-1. Бандл регистрируется автоматически через Symfony Flex.
+1. Зарегистрируйте бандл вручную в `config/bundles.php` (Flex-рецепта нет):
+
+```php
+Timbrs\DatabaseDumps\Bridge\Symfony\DatabaseDumpsBundle::class => ['dev' => true, 'test' => true],
+```
 
 2. Создайте файл `config/dump_config.yaml`:
 
@@ -625,14 +629,16 @@ php artisan dbdump:apply-analysis                  # Laravel
 
 ### Регистрация бандла
 
-Бандл регистрируется автоматически через Symfony Flex. Если нет — добавьте в `config/bundles.php`:
+Flex-рецепта у пакета нет, поэтому бандл нужно зарегистрировать вручную. Добавьте в `config/bundles.php`:
 
 ```php
 return [
     // ...
-    Timbrs\DatabaseDumps\Bridge\Symfony\DatabaseDumpsBundle::class => ['all' => true],
+    Timbrs\DatabaseDumps\Bridge\Symfony\DatabaseDumpsBundle::class => ['dev' => true, 'test' => true],
 ];
 ```
+
+Регистрация в `dev`/`test` соответствует установке через `composer require --dev`. Если пакет ставится в prod (без `--dev`), регистрируйте бандл как `['all' => true]`.
 
 Укажите платформу в `services.yaml`:
 
@@ -1111,7 +1117,11 @@ composer require --dev timbrs/database-dumps
 
 ### Symfony
 
-1. The bundle registers automatically via Symfony Flex.
+1. Register the bundle manually in `config/bundles.php` (there is no Flex recipe):
+
+```php
+Timbrs\DatabaseDumps\Bridge\Symfony\DatabaseDumpsBundle::class => ['dev' => true, 'test' => true],
+```
 
 2. Create `config/dump_config.yaml`:
 
@@ -1430,14 +1440,16 @@ php artisan dbdump:prepare-config new
 
 ### Bundle Registration
 
-The bundle registers automatically via Symfony Flex. If not, add to `config/bundles.php`:
+The package ships no Flex recipe, so the bundle must be registered manually. Add it to `config/bundles.php`:
 
 ```php
 return [
     // ...
-    Timbrs\DatabaseDumps\Bridge\Symfony\DatabaseDumpsBundle::class => ['all' => true],
+    Timbrs\DatabaseDumps\Bridge\Symfony\DatabaseDumpsBundle::class => ['dev' => true, 'test' => true],
 ];
 ```
+
+Registering under `dev`/`test` matches installation via `composer require --dev`. If the package is installed for prod (without `--dev`), register the bundle as `['all' => true]`.
 
 Set the platform in `services.yaml`:
 
