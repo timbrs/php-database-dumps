@@ -50,8 +50,8 @@ class ConfigureLlmCommand extends Command
 
         if (!$io->confirm('Использовать LLM для анализа (PII, профилирование, подсказки)?', $current->isEnabled())) {
             $this->store->save($this->projectDir, AiConfig::fromArray(['url' => '', 'enabled' => false]));
-            $io->success('LLM отключён. Анализ будет работать на regex-эвристиках.');
-            $io->text('Файл настроек: ' . $this->store->path($this->projectDir));
+            $io->writeln('<info>LLM отключён.</info> Анализ будет работать на regex-эвристиках.');
+            $io->writeln('Файл настроек: ' . $this->store->path($this->projectDir));
             return Command::SUCCESS;
         }
 
@@ -70,8 +70,9 @@ class ConfigureLlmCommand extends Command
         $model = $io->ask('Модель', $current->getModel());
 
         $hasToken = $current->getToken() !== null;
-        $tokenInput = $io->askHidden(
-            'Token' . ($hasToken ? ' (Enter — оставить текущий)' : ' (Enter — без токена)')
+        // Ввод видимый (не askHidden), чтобы было видно вставляемый токен.
+        $tokenInput = $io->ask(
+            'Token' . ($hasToken ? ' (Enter — оставить текущий)' : ' (Enter — без токена; ввод виден)')
         );
         if ($tokenInput === null || $tokenInput === '') {
             $token = $current->getToken(); // пусто = оставить текущий (или null)
@@ -88,27 +89,47 @@ class ConfigureLlmCommand extends Command
         ]);
 
         if ($io->confirm('Проверить соединение с LLM сейчас?', true)) {
+            $io->writeln('Проверяю соединение с LLM…');
             $result = (new OpenAiClient($this->transport, $config))->ping();
+            $io->newLine();
             if ($result['ok']) {
-                $io->success('Соединение с LLM успешно.');
+                $io->writeln('<info>OK:</info> соединение с LLM успешно установлено.');
+                $reply = isset($result['reply']) ? (string) $result['reply'] : '';
+                if ($reply !== '') {
+                    $io->writeln('Ответ модели на «ping»: ' . self::oneLine($reply));
+                }
             } else {
-                $io->warning('Не удалось соединиться с LLM: ' . ($result['error'] ?? 'неизвестная ошибка'));
+                $io->writeln('<comment>ОШИБКА:</comment> не удалось соединиться с LLM.');
+                $io->writeln('Причина: ' . ($result['error'] ?? 'неизвестная ошибка'));
+                $io->newLine();
                 if (!$io->confirm('Сохранить настройки всё равно?', true)) {
-                    $io->note('Отменено, ничего не сохранено.');
+                    $io->writeln('Отменено, ничего не сохранено.');
                     return Command::SUCCESS;
                 }
             }
+            $io->newLine();
         }
 
         $this->store->save($this->projectDir, $config);
-        $io->success('Настройки LLM сохранены.');
-        $io->text('Файл: ' . $this->store->path($this->projectDir));
-        $io->note([
-            'Файл может содержать token — добавьте его в .gitignore.',
-            'Переменные окружения DBDUMP_LLM_* (если заданы) перекрывают этот файл.',
-        ]);
+        $io->writeln('<info>Готово:</info> настройки LLM сохранены.');
+        $io->writeln('Файл: ' . $this->store->path($this->projectDir));
+        $io->writeln('Примечание: файл может содержать token — добавьте его в .gitignore.');
+        $io->writeln('Переменные окружения DBDUMP_LLM_* (если заданы) перекрывают этот файл.');
 
         return Command::SUCCESS;
+    }
+
+    /**
+     * Схлопнуть переносы/пробелы и обрезать длинный ответ модели до одной читаемой строки.
+     */
+    private static function oneLine(string $s): string
+    {
+        $collapsed = preg_replace('/\s+/u', ' ', $s);
+        $s = trim($collapsed === null ? $s : $collapsed);
+        if (function_exists('mb_strlen') && mb_strlen($s) > 200) {
+            return mb_substr($s, 0, 200) . '…';
+        }
+        return strlen($s) > 200 ? substr($s, 0, 200) . '…' : $s;
     }
 
     private static function isValidUrl(string $url): bool

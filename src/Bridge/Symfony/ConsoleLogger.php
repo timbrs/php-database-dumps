@@ -37,14 +37,16 @@ class ConsoleLogger implements LoggerInterface
     public function error(string $message): void
     {
         if ($this->io !== null) {
-            $this->io->error($message);
+            // Плоский вывод с цветом текста, а не блок $io->error(): блочная
+            // заливка в ряде терминальных тем рендерится тёмным-по-тёмному (текст не виден).
+            $this->io->writeln('<fg=red>ОШИБКА:</> ' . $message);
         }
     }
 
     public function warning(string $message): void
     {
         if ($this->io !== null) {
-            $this->io->warning($message);
+            $this->io->writeln('<comment>Предупреждение:</comment> ' . $message);
         }
     }
 

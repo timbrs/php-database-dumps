@@ -116,7 +116,7 @@ class OpenAiClient implements AiClientInterface
      * Лёгкая preflight-проверка доступности LLM: один запрос, без ретраев/backoff,
      * короткий таймаут. Используется командой настройки для проверки соединения.
      *
-     * @return array{ok: bool, error: string|null}
+     * @return array{ok: bool, error: string|null, reply?: string|null}
      */
     public function ping(): array
     {
@@ -151,7 +151,13 @@ class OpenAiClient implements AiClientInterface
             return ['ok' => false, 'error' => 'HTTP ' . $result['status'] . ': ' . $this->truncate($result['body'], 300)];
         }
 
-        return ['ok' => true, 'error' => null];
+        // Успешный HTTP-статус, но убедимся, что тело — валидный OpenAI-ответ с непустым content.
+        $content = $this->extractContent($result['body']);
+        if ($content === null) {
+            return ['ok' => false, 'error' => 'HTTP ' . $result['status'] . ', но ответ без текста: ' . $this->truncate($result['body'], 300)];
+        }
+
+        return ['ok' => true, 'error' => null, 'reply' => $content];
     }
 
     /**

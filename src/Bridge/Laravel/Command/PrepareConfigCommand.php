@@ -130,15 +130,26 @@ class PrepareConfigCommand extends Command
             // AI: --no-ai отключает; --ai/--deep включают; иначе авто (если LLM сконфигурирован).
             if ($this->option('no-ai')) {
                 $this->generator->setAiEnabled(false);
+                $aiActive = false;
             } elseif ($this->option('ai') || $deep) {
                 $this->generator->setAiEnabled(true);
+                $aiActive = true;
             } else {
-                $this->generator->setAiEnabled($this->generator->isLlmAvailable());
+                $aiActive = $this->generator->isLlmAvailable();
+                $this->generator->setAiEnabled($aiActive);
             }
 
             $this->line("Режим: {$modeArg}");
             $this->line("Порог строк: {$threshold}");
             $this->line("Путь: {$this->configPath}");
+            $this->line('');
+            if ($aiActive) {
+                $this->line('LLM-детекция ПД включена: анализ идёт по таблицам, каждая — запрос к LLM.');
+                $this->line('На больших схемах это может занять минуты. Прогресс — ниже (строки [N/Всего]).');
+            } else {
+                $this->line('Детекция ПД — regex-эвристики. Прогресс — ниже (строки [N/Всего]).');
+            }
+            $this->line('');
 
             $this->generator->setMode($parsed['mode'], $parsed['scope']);
             $stats = $this->generator->generate($this->configPath, $threshold);
@@ -202,7 +213,8 @@ class PrepareConfigCommand extends Command
 
         $model = (string) $this->ask('Модель', AiConfig::DEFAULT_MODEL);
 
-        $tokenInput = $this->secret('Token (Enter — без токена)');
+        // Ввод видимый (не secret), чтобы было видно вставляемый токен.
+        $tokenInput = $this->ask('Token (Enter — без токена; ввод виден)');
         $token = ($tokenInput === null || $tokenInput === '') ? null : $tokenInput;
 
         $config = AiConfig::fromArray([

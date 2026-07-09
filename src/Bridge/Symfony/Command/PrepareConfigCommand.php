@@ -8,8 +8,10 @@ use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
+use Timbrs\DatabaseDumps\Bridge\Symfony\ConsoleLogger;
 use Timbrs\DatabaseDumps\Config\AiConfig;
 use Timbrs\DatabaseDumps\Contract\HttpTransportInterface;
+use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\Ai\AiClientFactory;
 use Timbrs\DatabaseDumps\Service\Ai\AiConfigStore;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigGenerator;
@@ -35,13 +37,17 @@ class PrepareConfigCommand extends Command
     /** @var string */
     private $projectDir;
 
+    /** @var LoggerInterface */
+    private $logger;
+
     public function __construct(
         ConfigGenerator $generator,
         ModeParser $modeParser,
         string $configPath,
         AiConfigStore $aiConfigStore,
         HttpTransportInterface $transport,
-        string $projectDir
+        string $projectDir,
+        LoggerInterface $logger
     ) {
         $this->generator = $generator;
         $this->modeParser = $modeParser;
@@ -49,6 +55,7 @@ class PrepareConfigCommand extends Command
         $this->aiConfigStore = $aiConfigStore;
         $this->transport = $transport;
         $this->projectDir = rtrim($projectDir, '/\\');
+        $this->logger = $logger;
         parent::__construct();
     }
 
@@ -72,6 +79,11 @@ class PrepareConfigCommand extends Command
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $io = new SymfonyStyle($input, $output);
+        // Роутим пошаговый прогресс ConfigGenerator в консоль — иначе длинная
+        // инспекция таблиц / LLM-анализ выглядят как «зависание».
+        if ($this->logger instanceof ConsoleLogger) {
+            $this->logger->setIo($io);
+        }
         $io->title('Генерация dump_config.yaml');
 
         $modeArg = $input->getArgument('mode');
@@ -135,13 +147,26 @@ class PrepareConfigCommand extends Command
             // AI: --no-ai отключает; --ai/--deep включают; иначе авто (если LLM сконфигурирован).
             if ($input->getOption('no-ai')) {
                 $this->generator->setAiEnabled(false);
+                $aiActive = false;
             } elseif ($input->getOption('ai') || $deep) {
                 $this->generator->setAiEnabled(true);
+                $aiActive = true;
             } else {
-                $this->generator->setAiEnabled($this->generator->isLlmAvailable());
+                $aiActive = $this->generator->isLlmAvailable();
+                $this->generator->setAiEnabled($aiActive);
             }
 
             $this->generator->setMode($parsed['mode'], $parsed['scope']);
+
+            $io->section('Анализ структуры БД');
+            if ($aiActive) {
+                $io->text('LLM-детекция ПД включена: анализ идёт по таблицам, каждая — запрос к LLM.');
+                $io->text('На больших схемах это может занять минуты. Прогресс — ниже (строки [N/Всего]).');
+            } else {
+                $io->text('Детекция ПД — regex-эвристики. Прогресс — ниже (строки [N/Всего]).');
+            }
+            $io->newLine();
+
             $stats = $this->generator->generate($outputPath, $threshold);
 
             $io->success(sprintf(
@@ -207,7 +232,8 @@ class PrepareConfigCommand extends Command
 
         $model = (string) $io->ask('Модель', AiConfig::DEFAULT_MODEL);
 
-        $tokenInput = $io->askHidden('Token (Enter — без токена)');
+        // Ввод видимый (не askHidden), чтобы было видно вставляемый токен.
+        $tokenInput = $io->ask('Token (Enter — без токена; ввод виден)');
         $token = ($tokenInput === null || $tokenInput === '') ? null : $tokenInput;
 
         $config = AiConfig::fromArray([
