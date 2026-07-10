@@ -6,6 +6,8 @@ use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
+use Timbrs\DatabaseDumps\Bridge\Symfony\ConsoleLogger;
+use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
@@ -28,18 +30,23 @@ class ApplyAnalysisCommand extends Command
     /** @var DbdumpConfigStore */
     private $configStore;
 
+    /** @var LoggerInterface */
+    private $logger;
+
     public function __construct(
         AnalysisIngestor $ingestor,
         ConfigEnricher $enricher,
         string $projectDir,
         string $configPath,
-        DbdumpConfigStore $configStore
+        DbdumpConfigStore $configStore,
+        LoggerInterface $logger
     ) {
         $this->ingestor = $ingestor;
         $this->enricher = $enricher;
         $this->projectDir = rtrim($projectDir, '/\\');
         $this->configPath = $configPath;
         $this->configStore = $configStore;
+        $this->logger = $logger;
         parent::__construct();
     }
 
@@ -53,6 +60,9 @@ class ApplyAnalysisCommand extends Command
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $io = new SymfonyStyle($input, $output);
+        if ($this->logger instanceof ConsoleLogger) {
+            $this->logger->setIo($io);
+        }
         $io->title('Применение результатов анализа кода');
 
         $outDir = $this->projectDir . '/' . $this->configStore->getDataDir($this->projectDir)

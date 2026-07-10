@@ -7,6 +7,8 @@ use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
+use Timbrs\DatabaseDumps\Bridge\Symfony\ConsoleLogger;
+use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
@@ -36,6 +38,9 @@ class PrepareAnalysisCommand extends Command
     /** @var DbdumpConfigStore */
     private $configStore;
 
+    /** @var LoggerInterface */
+    private $logger;
+
     public function __construct(
         AnalysisPackageBuilder $builder,
         OpencodeRunner $runner,
@@ -43,7 +48,8 @@ class PrepareAnalysisCommand extends Command
         ConfigEnricher $enricher,
         string $projectDir,
         string $configPath,
-        DbdumpConfigStore $configStore
+        DbdumpConfigStore $configStore,
+        LoggerInterface $logger
     ) {
         $this->builder = $builder;
         $this->runner = $runner;
@@ -52,6 +58,7 @@ class PrepareAnalysisCommand extends Command
         $this->projectDir = rtrim($projectDir, '/\\');
         $this->configPath = $configPath;
         $this->configStore = $configStore;
+        $this->logger = $logger;
         parent::__construct();
     }
 
@@ -67,6 +74,11 @@ class PrepareAnalysisCommand extends Command
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $io = new SymfonyStyle($input, $output);
+        // Роутим пошаговый прогресс в консоль — сбор инвентаря по всем таблицам
+        // (подсчёт строк + профилирование колонок) иначе выглядит как «зависание».
+        if ($this->logger instanceof ConsoleLogger) {
+            $this->logger->setIo($io);
+        }
         $io->title('Подготовка пакета анализа (OPENCODE)');
 
         $connection = $input->getOption('connection');

@@ -192,14 +192,25 @@ class AnalysisPackageBuilder
         $graph = $this->dependencyResolver->getDependencyGraph($connectionName);
         $tables = $this->inspector->listTables($connectionName);
 
+        $total = count($tables);
+        $this->logger->info(sprintf(
+            'Сбор инвентаря БД: %d таблиц (подсчёт строк + профилирование колонок — на больших БД это долго)',
+            $total
+        ));
+        $current = 0;
+
         $schemas = [];
         foreach ($tables as $tableInfo) {
+            $current++;
             $schema = $tableInfo['table_schema'];
             $table = $tableInfo['table_name'];
 
             if ($this->filter->shouldIgnore($table)) {
+                $this->logger->info("[{$current}/{$total}] {$schema}.{$table} ... SKIP (служебная)");
                 continue;
             }
+
+            $this->logger->info("[{$current}/{$total}] {$schema}.{$table} ... инвентаризация");
 
             $rowCount = $this->inspector->countRows($schema, $table, $connectionName);
             $profiles = $this->statisticsInspector->profileTable($schema, $table, $connectionName);
