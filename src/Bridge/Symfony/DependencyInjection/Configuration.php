@@ -13,7 +13,7 @@ use Symfony\Component\Config\Definition\ConfigurationInterface;
  *   batch_size: 1000
  *   sample_size: 200
  *   max_cascade_depth: 10
- *   config_path: '%kernel.project_dir%/config/dump_config.yaml'
+ *   config_path: '%kernel.project_dir%/database/dump_config.yaml' (default)
  */
 class Configuration implements ConfigurationInterface
 {

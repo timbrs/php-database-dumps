@@ -31,8 +31,11 @@ class DatabaseDumpsExtension extends Extension
         $container->setParameter('database_dumps.sample_size', $processed['sample_size']);
         $container->setParameter('database_dumps.max_cascade_depth', $processed['max_cascade_depth']);
 
+        // Дефолт: dump_config.yaml лежит в database/ (пер-схемные файлы — в
+        // database/dump-settings/), рядом с дампами/анализом. В config/ остаётся
+        // только database-dumps.php. Переопределяется ключом config_path.
         $configPath = $processed['config_path']
-            ?: $container->getParameter('kernel.project_dir') . '/config/dump_config.yaml';
+            ?: $container->getParameter('kernel.project_dir') . '/database/dump_config.yaml';
         $container->setParameter('database_dumps.config_path', $configPath);
 
         $loader = new YamlFileLoader($container, new FileLocator(__DIR__ . '/../Resources/config'));

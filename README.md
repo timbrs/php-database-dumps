@@ -185,7 +185,7 @@ php bin/console app:dbdump:configure-llm         # Symfony
 Timbrs\DatabaseDumps\Bridge\Symfony\DatabaseDumpsBundle::class => ['dev' => true, 'test' => true],
 ```
 
-2. Создайте файл `config/dump_config.yaml`:
+2. Создайте файл `database/dump_config.yaml` (путь по умолчанию; переопределяется ключом `config_path`):
 
 ```yaml
 full_export:
@@ -388,31 +388,32 @@ faker:
 
 ### Разделение конфига по схемам (includes)
 
-При большом количестве таблиц конфигурация может стать громоздкой. Команда `prepare-config` по умолчанию разбивает конфиг на отдельные файлы по схемам:
+При большом количестве таблиц конфигурация может стать громоздкой. Команда `prepare-config` по умолчанию разбивает конфиг на отдельные файлы по схемам. Главный `dump_config.yaml` лежит в `database/`, а пер-схемные файлы — в подкаталоге `database/dump-settings/`:
 
 ```
-config/
-├── dump_config.yaml          # главный файл с includes
-├── public.yaml               # конфигурация схемы public
-├── system.yaml               # конфигурация схемы system
-└── analytics/                # именованное подключение
-    └── analytics.yaml
+database/
+├── dump_config.yaml               # главный файл с includes
+└── dump-settings/
+    ├── public.yaml                # конфигурация схемы public
+    ├── system.yaml                # конфигурация схемы system
+    └── analytics/                 # именованное подключение
+        └── analytics.yaml
 ```
 
-**Главный файл (`dump_config.yaml`):**
+**Главный файл (`database/dump_config.yaml`):**
 
 ```yaml
 includes:
-  public: public.yaml
-  system: system.yaml
+  public: dump-settings/public.yaml
+  system: dump-settings/system.yaml
 
 connections:
   analytics:
     includes:
-      analytics: analytics/analytics.yaml
+      analytics: dump-settings/analytics/analytics.yaml
 ```
 
-**Файл схемы (`public.yaml`):**
+**Файл схемы (`database/dump-settings/public.yaml`):**
 
 ```yaml
 full_export:
@@ -656,8 +657,12 @@ parameters:
 ```
 your-symfony-project/
 ├── config/
-│   └── dump_config.yaml          # настройки экспорта
-├── database/
+│   └── database-dumps.php        # настройки пакета (data_dir + LLM)
+├── database/                     # = data_dir (по умолчанию)
+│   ├── dump_config.yaml          # главный конфиг с includes
+│   ├── dump-settings/            # пер-схемные файлы конфига
+│   │   ├── public.yaml
+│   │   └── system.yaml
 │   ├── before_exec/              # скрипты до импорта
 │   │   └── 01_prepare.sql
 │   ├── dumps/                    # SQL-дампы
@@ -1125,7 +1130,7 @@ composer require --dev timbrs/database-dumps
 Timbrs\DatabaseDumps\Bridge\Symfony\DatabaseDumpsBundle::class => ['dev' => true, 'test' => true],
 ```
 
-2. Create `config/dump_config.yaml`:
+2. Create `database/dump_config.yaml` (default path; override via `config_path`):
 
 ```yaml
 full_export:
@@ -1295,31 +1300,32 @@ Replacement is deterministic — the seed is based on the hash of the FIO value 
 
 ### Config Splitting by Schema (includes)
 
-When dealing with many tables, the configuration can become unwieldy. The `prepare-config` command splits config into per-schema files by default:
+When dealing with many tables, the configuration can become unwieldy. The `prepare-config` command splits config into per-schema files by default. The main `dump_config.yaml` lives in `database/`, and per-schema files go into the `database/dump-settings/` subdirectory:
 
 ```
-config/
-├── dump_config.yaml          # main file with includes
-├── public.yaml               # public schema config
-├── system.yaml               # system schema config
-└── analytics/                # named connection
-    └── analytics.yaml
+database/
+├── dump_config.yaml               # main file with includes
+└── dump-settings/
+    ├── public.yaml                # public schema config
+    ├── system.yaml                # system schema config
+    └── analytics/                 # named connection
+        └── analytics.yaml
 ```
 
-**Main file (`dump_config.yaml`):**
+**Main file (`database/dump_config.yaml`):**
 
 ```yaml
 includes:
-  public: public.yaml
-  system: system.yaml
+  public: dump-settings/public.yaml
+  system: dump-settings/system.yaml
 
 connections:
   analytics:
     includes:
-      analytics: analytics/analytics.yaml
+      analytics: dump-settings/analytics/analytics.yaml
 ```
 
-**Schema file (`public.yaml`):**
+**Schema file (`database/dump-settings/public.yaml`):**
 
 ```yaml
 full_export:
@@ -1467,8 +1473,12 @@ parameters:
 ```
 your-symfony-project/
 ├── config/
-│   └── dump_config.yaml          # export settings
-├── database/
+│   └── database-dumps.php        # package settings (data_dir + LLM)
+├── database/                     # = data_dir (default)
+│   ├── dump_config.yaml          # main config with includes
+│   ├── dump-settings/            # per-schema config files
+│   │   ├── public.yaml
+│   │   └── system.yaml
 │   ├── before_exec/              # pre-import scripts
 │   │   └── 01_prepare.sql
 │   ├── dumps/                    # SQL dumps

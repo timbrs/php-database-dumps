@@ -9,6 +9,13 @@ use Symfony\Component\Yaml\Yaml;
 
 class ConfigSplitter
 {
+    /**
+     * Подкаталог рядом с dump_config.yaml, куда складываются пер-схемные файлы.
+     * Итог: {configDir}/dump-settings/{schema}.yaml, includes → dump-settings/{schema}.yaml.
+     * Для подключений: {configDir}/dump-settings/{connName}/{schema}.yaml.
+     */
+    public const SETTINGS_SUBDIR = 'dump-settings';
+
     /** @var FileSystemInterface */
     private $fileSystem;
 
@@ -53,6 +60,7 @@ class ConfigSplitter
         }
 
         $includes = [];
+        $settingsDir = $configDir . '/' . self::SETTINGS_SUBDIR;
 
         foreach ($schemas as $schema) {
             $schemaConfig = $this->extractSchemaConfig($config, $schema);
@@ -61,13 +69,17 @@ class ConfigSplitter
                 continue;
             }
 
-            $schemaFileName = $schema . '.yaml';
-            $schemaFilePath = $configDir . '/' . $schemaFileName;
+            $relativePath = self::SETTINGS_SUBDIR . '/' . $schema . '.yaml';
+            $schemaFilePath = $configDir . '/' . $relativePath;
+
+            if (!$this->fileSystem->exists($settingsDir)) {
+                $this->fileSystem->createDirectory($settingsDir);
+            }
 
             $this->fileSystem->write($schemaFilePath, Yaml::dump($schemaConfig, 4, 2));
-            $this->logger->info("Создан файл конфигурации схемы: {$schemaFileName}");
+            $this->logger->info("Создан файл конфигурации схемы: {$relativePath}");
 
-            $includes[$schema] = $schemaFileName;
+            $includes[$schema] = $relativePath;
         }
 
         // Build main config with includes
@@ -87,7 +99,8 @@ class ConfigSplitter
 
                 $connSchemas = $this->collectSchemas($connData);
                 $connIncludes = [];
-                $connDir = $configDir . '/' . $connName;
+                $connRelDir = self::SETTINGS_SUBDIR . '/' . $connName;
+                $connDir = $configDir . '/' . $connRelDir;
 
                 foreach ($connSchemas as $schema) {
                     $schemaConfig = $this->extractSchemaConfig($connData, $schema);
@@ -95,17 +108,17 @@ class ConfigSplitter
                         continue;
                     }
 
-                    $schemaFileName = $schema . '.yaml';
-                    $schemaFilePath = $connDir . '/' . $schemaFileName;
+                    $relativePath = $connRelDir . '/' . $schema . '.yaml';
+                    $schemaFilePath = $configDir . '/' . $relativePath;
 
                     if (!$this->fileSystem->exists($connDir)) {
                         $this->fileSystem->createDirectory($connDir);
                     }
 
                     $this->fileSystem->write($schemaFilePath, Yaml::dump($schemaConfig, 4, 2));
-                    $this->logger->info("Создан файл конфигурации: {$connName}/{$schemaFileName}");
+                    $this->logger->info("Создан файл конфигурации: {$relativePath}");
 
-                    $connIncludes[$schema] = $connName . '/' . $schemaFileName;
+                    $connIncludes[$schema] = $relativePath;
                 }
 
                 if (!empty($connIncludes)) {
