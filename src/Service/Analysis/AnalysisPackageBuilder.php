@@ -130,7 +130,8 @@ class AnalysisPackageBuilder
         foreach ($schemas as $schemaName => $schemaData) {
             $schemaName = (string) $schemaName;
             // Защита от path traversal: имя схемы из БД используется как часть имени файла.
-            if (!preg_match('/^[A-Za-z_][A-Za-z0-9_$]*$/', $schemaName)) {
+            // Unicode-буквы разрешены (кириллица), но разделители/точки — нет.
+            if (!preg_match('/^[\p{L}_][\p{L}\p{N}_$]*$/u', $schemaName)) {
                 $this->logger->warning("Пропущен пер-схемный инвентарь: небезопасное имя схемы '{$schemaName}'");
                 continue;
             }

@@ -29,7 +29,7 @@ class ConfigEnricher
      * Имена из внешнего JSON (вывод OPENCODE) — НЕДОВЕРЕННЫЕ, валидируем перед
      * использованием как ключей конфига (которые могут стать путями файлов в ConfigSplitter).
      */
-    private const IDENTIFIER_REGEX = '/^[A-Za-z_][A-Za-z0-9_$]*$/';
+    private const IDENTIFIER_REGEX = '/^[\p{L}_][\p{L}\p{N}_$]*$/u';
 
     /** @var FileSystemInterface */
     private $fileSystem;

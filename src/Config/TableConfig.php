@@ -34,9 +34,10 @@ class TableConfig
 
     /**
      * Разрешённые символы в schema/table/column-идентификаторах.
-     * Покрывает Unicode-буквы, цифры, подчёркивание, доллар (Oracle) и точку для qualified имён.
+     * Покрывает Unicode-буквы (кириллица и пр.), цифры, подчёркивание и доллар (Oracle).
+     * Разделители, кавычки, точки и пробелы запрещены (защита от SQL-инъекции/path traversal).
      */
-    private const IDENTIFIER_REGEX = '/^[A-Za-z_][A-Za-z0-9_$]*$/';
+    private const IDENTIFIER_REGEX = '/^[\p{L}_][\p{L}\p{N}_$]*$/u';
 
     /** @var string */
     private $schema;

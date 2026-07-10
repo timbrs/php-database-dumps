@@ -117,4 +117,56 @@ class FakerConfigTest extends TestCase
         $this->assertTrue($config->isEmpty());
         $this->assertSame([], $config->toArray());
     }
+
+    /**
+     * В русских БД колонки называются кириллицей (напр. «ФИО») — идентификатор
+     * должен приниматься, а не рушить сборку DumpConfig.
+     */
+    public function testAcceptsCyrillicColumnIdentifier(): void
+    {
+        $config = new FakerConfig([
+            'pdl' => [
+                'sb_dsaap_dict_pyt_tp_umsb' => ['ФИО' => 'fio'],
+            ],
+        ]);
+
+        $this->assertSame(['ФИО' => 'fio'], $config->getTableFaker('pdl', 'sb_dsaap_dict_pyt_tp_umsb'));
+    }
+
+    public function testAcceptsCyrillicSchemaAndTable(): void
+    {
+        $config = new FakerConfig([
+            'справочник' => [
+                'клиенты' => ['фамилия' => 'lastname'],
+            ],
+        ]);
+
+        $this->assertSame(['фамилия' => 'lastname'], $config->getTableFaker('справочник', 'клиенты'));
+    }
+
+    /**
+     * @dataProvider dangerousIdentifierProvider
+     */
+    public function testRejectsDangerousColumnIdentifier(string $column): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new FakerConfig([
+            'public' => [
+                'users' => [$column => 'fio'],
+            ],
+        ]);
+    }
+
+    /** @return array<string, array{0: string}> */
+    public static function dangerousIdentifierProvider(): array
+    {
+        return [
+            'double quote' => ['na"me'],
+            'space' => ['full name'],
+            'dot' => ['a.b'],
+            'semicolon' => ['name;drop'],
+            'slash' => ['a/b'],
+            'dash' => ['full-name'],
+        ];
+    }
 }

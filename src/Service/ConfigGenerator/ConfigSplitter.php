@@ -172,9 +172,11 @@ class ConfigSplitter
      */
     private function validateName(string $context, string $name): void
     {
-        if ($name === '' || !preg_match('/^[A-Za-z_][A-Za-z0-9_$]*$/', $name)) {
+        // Unicode-буквы/цифры разрешены (кириллица в именах схем), но разделители,
+        // точки и '..' — нет: имя становится сегментом пути к файлу конфига схемы.
+        if ($name === '' || !preg_match('/^[\p{L}_][\p{L}\p{N}_$]*$/u', $name)) {
             throw new \InvalidArgumentException(
-                sprintf('ConfigSplitter: invalid %s name "%s" (must match [A-Za-z_][A-Za-z0-9_$]*)', $context, $name)
+                sprintf('ConfigSplitter: invalid %s name "%s" (must match [\\p{L}_][\\p{L}\\p{N}_$]*)', $context, $name)
             );
         }
     }

@@ -95,7 +95,10 @@ class FakerConfig
 
     private function validateIdentifier(string $context, string $value): void
     {
-        if ($value === '' || !preg_match('/^[A-Za-z_][A-Za-z0-9_$]*$/', $value)) {
+        // Разрешаем Unicode-буквы (кириллица и пр.) — в русских БД колонки/таблицы
+        // называются кириллицей (напр. «ФИО»). Разделители, кавычки, точки и пробелы
+        // по-прежнему запрещены (защита от SQL-инъекции и path traversal).
+        if ($value === '' || !preg_match('/^[\p{L}_][\p{L}\p{N}_$]*$/u', $value)) {
             throw new \InvalidArgumentException(
                 sprintf("FakerConfig: invalid %s identifier '%s'", $context, $value)
             );

@@ -17,7 +17,7 @@ use Timbrs\DatabaseDumps\Contract\LoggerInterface;
  */
 class AnalysisIngestor
 {
-    private const IDENTIFIER_REGEX = '/^[A-Za-z_][A-Za-z0-9_$]*$/';
+    private const IDENTIFIER_REGEX = '/^[\p{L}_][\p{L}\p{N}_$]*$/u';
 
     /** @var FileSystemInterface */
     private $fileSystem;
