@@ -71,6 +71,8 @@ class PrepareAnalysisCommand extends Command
         $this->setupLogger();
         $this->info('Подготовка пакета анализа (OPENCODE)');
 
+        $this->printRoadmap((bool) $this->option('run'));
+
         $connection = $this->option('connection');
 
         try {
@@ -90,6 +92,25 @@ class PrepareAnalysisCommand extends Command
     }
 
     /**
+     * Короткая карта предстоящих фаз — чтобы было ясно, что ещё впереди.
+     */
+    private function printRoadmap(bool $run): void
+    {
+        if ($run) {
+            $this->line('Этапы (--run, всё одной командой):');
+            $this->line('  1. Инвентаризация БД — сбор метаданных (типы/FK/профили, без данных)');
+            $this->line('  2. OPENCODE по каждой схеме — анализ кода проекта (нужен opencode в PATH)');
+            $this->line('  3. Применение результата — cascade_from / sample.criteria → dump_config.yaml');
+        } else {
+            $this->line('Этапы:');
+            $this->line('  1. Инвентаризация БД — сбор метаданных (типы/FK/профили, без данных)');
+            $this->line('  2. Запуск OPENCODE — вручную по инструкции ниже (или повторите с --run)');
+            $this->line('  3. Применение результата — dbdump:apply-analysis → dump_config.yaml');
+        }
+        $this->line('');
+    }
+
+    /**
      * @param array<string, string> $schemaFiles
      */
     private function runPipeline(array $schemaFiles): int
@@ -102,6 +123,7 @@ class PrepareAnalysisCommand extends Command
 
         $dataDir = $this->configStore->getDataDir($this->projectDir);
         $outRel = $dataDir . '/' . AnalysisPackageBuilder::OUT_DIR;
+        $this->info('Этап 2/3 — OPENCODE по схемам');
         $this->line("Запуск OPENCODE автономно (--dangerously-skip-permissions). Агент пишет только в {$outRel}/.");
         foreach ($schemaFiles as $schema => $absPath) {
             $relFile = $dataDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.' . $schema . '.json';
@@ -113,6 +135,7 @@ class PrepareAnalysisCommand extends Command
             }
         }
 
+        $this->info('Этап 3/3 — применение результата к dump_config.yaml');
         $outDir = $this->projectDir . '/' . $outRel;
         $ingested = $this->ingestor->ingest($outDir);
         $stats = $this->enricher->enrich($this->configPath, $ingested);
