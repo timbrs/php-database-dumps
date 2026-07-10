@@ -52,7 +52,7 @@ class ConfigSplitterTest extends TestCase
         $this->assertArrayHasKey('/tmp/dump_config.yaml', $writtenFiles);
         $mainParsed = Yaml::parse($writtenFiles['/tmp/dump_config.yaml']);
         $this->assertArrayHasKey('includes', $mainParsed);
-        $this->assertEquals('dump-settings/public.yaml', $mainParsed['includes']['public']);
+        $this->assertEquals('./dump-settings/public.yaml', $mainParsed['includes']['public']);
 
         // Schema file should have flat structure, stored under dump-settings/
         $this->assertArrayHasKey('/tmp/dump-settings/public.yaml', $writtenFiles);
@@ -82,8 +82,8 @@ class ConfigSplitterTest extends TestCase
         $this->assertArrayHasKey('/tmp/dump-settings/billing.yaml', $writtenFiles);
 
         $mainParsed = Yaml::parse($writtenFiles['/tmp/dump_config.yaml']);
-        $this->assertEquals('dump-settings/public.yaml', $mainParsed['includes']['public']);
-        $this->assertEquals('dump-settings/billing.yaml', $mainParsed['includes']['billing']);
+        $this->assertEquals('./dump-settings/public.yaml', $mainParsed['includes']['public']);
+        $this->assertEquals('./dump-settings/billing.yaml', $mainParsed['includes']['billing']);
     }
 
     public function testSplitWithFaker(): void

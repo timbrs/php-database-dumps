@@ -404,14 +404,16 @@ database/
 
 ```yaml
 includes:
-  public: dump-settings/public.yaml
-  system: dump-settings/system.yaml
+  public: ./dump-settings/public.yaml
+  system: ./dump-settings/system.yaml
 
 connections:
   analytics:
     includes:
-      analytics: dump-settings/analytics/analytics.yaml
+      analytics: ./dump-settings/analytics/analytics.yaml
 ```
+
+> 💡 Пути к include пишутся с префиксом `./` — так PhpStorm/IDE распознают их как ссылки на файлы: `Ctrl+B` / `Cmd+B` (или Ctrl+клик) на пути прыгает прямо в нужный `*.yaml`. На резолв путей загрузчиком префикс не влияет (работают оба варианта — с `./` и без).
 
 **Файл схемы (`database/dump-settings/public.yaml`):**
 
@@ -1316,14 +1318,16 @@ database/
 
 ```yaml
 includes:
-  public: dump-settings/public.yaml
-  system: dump-settings/system.yaml
+  public: ./dump-settings/public.yaml
+  system: ./dump-settings/system.yaml
 
 connections:
   analytics:
     includes:
-      analytics: dump-settings/analytics/analytics.yaml
+      analytics: ./dump-settings/analytics/analytics.yaml
 ```
+
+> 💡 Include paths are written with a `./` prefix so PhpStorm/IDEs treat them as file references: `Ctrl+B` / `Cmd+B` (or Ctrl+click) on a path jumps straight to the target `*.yaml`. The prefix does not affect path resolution (both `./`-prefixed and plain relative paths load fine).
 
 **Schema file (`database/dump-settings/public.yaml`):**
 

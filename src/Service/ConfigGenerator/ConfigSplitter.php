@@ -79,7 +79,9 @@ class ConfigSplitter
             $this->fileSystem->write($schemaFilePath, Yaml::dump($schemaConfig, 4, 2));
             $this->logger->info("Создан файл конфигурации схемы: {$relativePath}");
 
-            $includes[$schema] = $relativePath;
+            // Префикс ./ — чтобы PhpStorm/IDE распознавали значение как ссылку на файл
+            // (Ctrl+B / Cmd+B прыгает в файл). На резолв путей в загрузчике не влияет.
+            $includes[$schema] = './' . $relativePath;
         }
 
         // Build main config with includes
@@ -118,7 +120,7 @@ class ConfigSplitter
                     $this->fileSystem->write($schemaFilePath, Yaml::dump($schemaConfig, 4, 2));
                     $this->logger->info("Создан файл конфигурации: {$relativePath}");
 
-                    $connIncludes[$schema] = $relativePath;
+                    $connIncludes[$schema] = './' . $relativePath;
                 }
 
                 if (!empty($connIncludes)) {
