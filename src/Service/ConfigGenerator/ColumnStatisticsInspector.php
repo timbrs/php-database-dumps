@@ -26,6 +26,15 @@ class ColumnStatisticsInspector
 
     public const DEFAULT_SAMPLE_SIZE = 200;
 
+    /**
+     * Порог «большой таблицы»: выше него ORDER BY RANDOM()/RAND() отсортировал бы всю таблицу
+     * ради N строк (полный скан) — переключаемся на дешёвую нативную выборку по блокам.
+     */
+    public const LARGE_TABLE_ROWS = 50000;
+
+    /** Во сколько раз берём с запасом при нативной выборке (LIMIT потом обрежет до sampleSize). */
+    private const SAMPLE_OVERSHOOT = 3;
+
     /** @var ConnectionRegistryInterface */
     private $registry;
 
@@ -44,16 +53,18 @@ class ColumnStatisticsInspector
     /**
      * Профилировать все колонки таблицы.
      *
+     * @param int|null $rowCount известное число строк (из countRows) — включает дешёвую
+     *                           нативную выборку на больших таблицах; null → всегда ORDER BY RANDOM
      * @return array<int, ColumnProfile>
      */
-    public function profileTable(string $schema, string $table, ?string $connectionName = null): array
+    public function profileTable(string $schema, string $table, ?string $connectionName = null, ?int $rowCount = null): array
     {
         $columnsMeta = $this->fetchColumns($schema, $table, $connectionName);
         if (empty($columnsMeta)) {
             return [];
         }
 
-        $rows = $this->fetchSampleRows($schema, $table, $connectionName);
+        $rows = $this->fetchSampleRows($schema, $table, $connectionName, $rowCount);
         $sampleCount = count($rows);
 
         $profiles = [];
@@ -192,19 +203,89 @@ class ColumnStatisticsInspector
     }
 
     /**
+     * Выбрать ~sampleSize строк для профилирования.
+     *
+     * На больших таблицах (rowCount > LARGE_TABLE_ROWS) НЕ используем ORDER BY RANDOM() —
+     * он отсортировал бы всю таблицу ради N строк (полный скан, главная причина медленной
+     * инвентаризации). Вместо этого — дешёвая нативная выборка по блокам (PG TABLESAMPLE,
+     * Oracle SAMPLE); MySQL нативного построчного сэмпла по проценту не имеет → берём «голову»
+     * таблицы (мгновенно). Пустой нативный сэмпл (TABLESAMPLE может не попасть ни в один блок)
+     * → fallback на «голову». На небольших/неизвестного размера таблицах — прежняя полноценная
+     * случайная выборка (там ORDER BY RANDOM дёшев).
+     *
+     * @param int|null $rowCount известное число строк (null → всегда ORDER BY RANDOM)
      * @return array<int, array<string, mixed>>
      */
-    private function fetchSampleRows(string $schema, string $table, ?string $connectionName): array
+    private function fetchSampleRows(string $schema, string $table, ?string $connectionName, ?int $rowCount = null): array
     {
         $connection = $this->registry->getConnection($connectionName);
         $platform = $this->registry->getPlatform($connectionName);
+        $platformName = PlatformFactory::canonicalize($connection->getPlatformName());
 
         $fullTable = $platform->getFullTableName($schema, $table);
-        $randomFunc = $platform->getRandomFunctionSql();
         $limitSql = $platform->getLimitSql($this->sampleSize);
 
-        $sql = "SELECT * FROM {$fullTable} ORDER BY {$randomFunc} {$limitSql}";
+        if ($rowCount !== null && $rowCount > self::LARGE_TABLE_ROWS) {
+            $sampleSql = $this->buildNativeSampleSql($platformName, $fullTable, $this->samplePercent($rowCount), $limitSql);
+            if ($sampleSql !== null) {
+                $rows = $connection->fetchAllAssociative($sampleSql);
+                if (!empty($rows)) {
+                    return $rows;
+                }
+            }
+            // MySQL (нет TABLESAMPLE) или пустой сэмпл → «голова» таблицы: мгновенно, без сортировки.
+            return $connection->fetchAllAssociative("SELECT * FROM {$fullTable} {$limitSql}");
+        }
 
-        return $connection->fetchAllAssociative($sql);
+        // Небольшая/неизвестного размера таблица — полноценная случайная выборка (дёшева на малых).
+        $randomFunc = $platform->getRandomFunctionSql();
+
+        return $connection->fetchAllAssociative("SELECT * FROM {$fullTable} ORDER BY {$randomFunc} {$limitSql}");
+    }
+
+    /**
+     * SQL нативной блочной выборки по проценту (PG/Oracle). null — платформа без такого
+     * механизма (MySQL): вызывающий возьмёт «голову» таблицы.
+     *
+     * @return string|null
+     */
+    private function buildNativeSampleSql(string $platformName, string $fullTable, float $percent, string $limitSql)
+    {
+        $p = $this->formatPercent($percent);
+        if ($platformName === PlatformFactory::POSTGRESQL) {
+            // SYSTEM — блочная выборка (быстрая); LIMIT останавливает добор строк.
+            return "SELECT * FROM {$fullTable} TABLESAMPLE SYSTEM ({$p}) {$limitSql}";
+        }
+        if ($platformName === PlatformFactory::ORACLE) {
+            // SAMPLE(p) — блочная выборка Oracle; FETCH FIRST ограничивает результат.
+            return "SELECT * FROM {$fullTable} SAMPLE ({$p}) {$limitSql}";
+        }
+        return null;
+    }
+
+    /**
+     * Процент нативной выборки: ~SAMPLE_OVERSHOOT×sampleSize строк из rowCount, зажатый в
+     * (0.01 .. 99.9) — 100 недопустим для Oracle SAMPLE, а ниже 0.01 незачем.
+     */
+    private function samplePercent(int $rowCount): float
+    {
+        $target = self::SAMPLE_OVERSHOOT * $this->sampleSize;
+        $percent = 100.0 * $target / max(1, $rowCount);
+        if ($percent < 0.01) {
+            $percent = 0.01;
+        }
+        if ($percent > 99.9) {
+            $percent = 99.9;
+        }
+        return $percent;
+    }
+
+    /**
+     * Печать процента без научной нотации и хвостовых нулей (безопасно для SQL-литерала).
+     */
+    private function formatPercent(float $percent): string
+    {
+        $s = rtrim(rtrim(sprintf('%.6f', $percent), '0'), '.');
+        return $s === '' ? '0' : $s;
     }
 }

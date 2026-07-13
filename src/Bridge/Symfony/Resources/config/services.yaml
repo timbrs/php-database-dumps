@@ -130,7 +130,9 @@ services:
         arguments:
             $projectDir: '%kernel.project_dir%'
     Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor: ~
-    Timbrs\DatabaseDumps\Service\Analysis\OpencodeRunner: ~
+    Timbrs\DatabaseDumps\Service\Analysis\OpencodeRunner:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
     Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher:
         arguments:
             $projectDir: '%kernel.project_dir%'

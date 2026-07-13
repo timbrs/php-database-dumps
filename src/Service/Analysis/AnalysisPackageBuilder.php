@@ -224,7 +224,8 @@ class AnalysisPackageBuilder
             $this->logger->info("[{$current}/{$total}] {$schema}.{$table} ... инвентаризация");
 
             $rowCount = $this->inspector->countRows($schema, $table, $connectionName);
-            $profiles = $this->statisticsInspector->profileTable($schema, $table, $connectionName);
+            // rowCount → профайлер выбирает дешёвую нативную выборку на больших таблицах.
+            $profiles = $this->statisticsInspector->profileTable($schema, $table, $connectionName, $rowCount);
 
             if (!isset($schemas[$schema])) {
                 $schemas[$schema] = ['tables' => []];
@@ -238,6 +239,8 @@ class AnalysisPackageBuilder
             ];
         }
 
+        $this->logInventorySummary($schemas);
+
         return [
             'generated_at' => gmdate('Y-m-d\TH:i:s\Z'),
             'database_platform' => $platform,
@@ -245,6 +248,53 @@ class AnalysisPackageBuilder
             'note' => 'Значения данных (PII) не включены — только типы, кардинальность и категориальность.',
             'schemas' => $schemas,
         ];
+    }
+
+    /**
+     * Итог сбора инвентаря: что именно проанализировано и какие «выводы» для следующих
+     * этапов. Категориальные колонки (мало разных значений) — кандидаты на именованные
+     * сегменты выборки/enum; внешние ключи — основа каскадов. Значения данных (PII) не
+     * читались — только метаданные и кардинальность. Печатается в конце фазы, перед
+     * сканом кода хоста (grep).
+     *
+     * @param array<string, mixed> $schemas
+     */
+    private function logInventorySummary(array $schemas): void
+    {
+        $tables = 0;
+        $columns = 0;
+        $categorical = 0;
+        $foreignKeys = 0;
+        foreach ($schemas as $schemaData) {
+            if (!isset($schemaData['tables']) || !is_array($schemaData['tables'])) {
+                continue;
+            }
+            foreach ($schemaData['tables'] as $tableData) {
+                $tables++;
+                if (isset($tableData['columns']) && is_array($tableData['columns'])) {
+                    $columns += count($tableData['columns']);
+                }
+                if (isset($tableData['profiles']) && is_array($tableData['profiles'])) {
+                    foreach ($tableData['profiles'] as $prof) {
+                        if (!empty($prof['categorical'])) {
+                            $categorical++;
+                        }
+                    }
+                }
+                if (isset($tableData['foreign_keys']) && is_array($tableData['foreign_keys'])) {
+                    $foreignKeys += count($tableData['foreign_keys']);
+                }
+            }
+        }
+
+        $this->logger->info(sprintf(
+            'Инвентарь собран: %d таблиц, %d колонок; из них %d категориальных (кандидаты на сегменты выборки) '
+            . 'и %d внешних ключей (каскады). Значения данных (PII) не читались.',
+            $tables,
+            $columns,
+            $categorical,
+            $foreignKeys
+        ));
     }
 
     /**

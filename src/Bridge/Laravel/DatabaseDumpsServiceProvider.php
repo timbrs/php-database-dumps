@@ -351,7 +351,11 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
             );
         });
         $this->app->singleton(OpencodeRunner::class, function ($app) {
-            return new OpencodeRunner($app->make(LoggerInterface::class));
+            return new OpencodeRunner(
+                $app->make(LoggerInterface::class),
+                $app->make(DbdumpConfigStore::class),
+                (string) $app['config']->get('database-dumps.project_dir')
+            );
         });
 
         $this->app->singleton(ConfigureLlmCommand::class, function ($app) {

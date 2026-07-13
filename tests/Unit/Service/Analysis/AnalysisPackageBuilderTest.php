@@ -251,7 +251,11 @@ class AnalysisPackageBuilderTest extends TestCase
         $this->builder($logger)->build();
 
         $joined = implode("\n", $messages);
-        // Статус старта фазы + итоговая сводка.
+        // Итог инвентаризации: сколько проанализировано + выводы (категориальные/FK).
+        $this->assertStringContainsString('Инвентарь собран:', $joined);
+        $this->assertStringContainsString('2 таблиц', $joined);
+        $this->assertStringContainsString('категориальных', $joined);
+        // Статус старта скана кода + итоговая сводка подсказок.
         $this->assertStringContainsString('Скан кода хоста', $joined);
         $this->assertStringContainsString('Подсказки по коду:', $joined);
 

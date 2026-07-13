@@ -6,6 +6,7 @@ permission:
   "*": deny
   read: allow
   edit: allow
+  write: allow
   glob: allow
   grep: allow
   list: allow

@@ -3,16 +3,25 @@
 namespace Timbrs\DatabaseDumps\Service\Analysis;
 
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
+use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 
 /**
  * Запуск внешнего агента OPENCODE (dbdump-mapper) из команды prepare-analysis --run.
  *
  * По умолчанию пакет НЕ вызывает opencode (пользователь делает это вручную по RUN.md).
  * Флаг --run — opt-in: модуль сам прогоняет `opencode run` по чанку на схему, чтобы
- * свести ветку анализа кода к одной команде. Запуск идёт с
- * --dangerously-skip-permissions (иначе opencode прервётся на интерактивном prompt'е
- * в неинтерактивном окружении); агент при этом ограничен инструкциями писать только
- * в database/analysis/out/.
+ * свести ветку анализа кода к одной команде.
+ *
+ * Синтаксис `opencode run` (по факту `opencode run --help`): `run [message..] --agent <name>`.
+ * Разрешения (permissions) задаются НЕ флагом CLI, а в frontmatter агента (`permission:` в
+ * dbdump-mapper.md: read/edit/write/grep/glob/list = allow) — поэтому флага авто-аппрува в
+ * команде нет (у sst/opencode нет ни --auto, ни --dangerously-skip-permissions).
+ *
+ * Имя бинаря настраивается (у пользователя это может быть `opencode-cli`, симлинк/обёртка
+ * над sst/opencode). Входной файл инвентаря НЕ передаётся флагом -f (он у opencode
+ * вариадический — «file(s) to attach» [array] — и съедает следующий за ним текст промпта,
+ * отсюда ошибка «File not found: <промпт>»); путь вписывается прямо в сообщение, а читает
+ * файл сам агент своим read-tool.
  *
  * Exec-вызовы вынесены в protected-методы для подмены в юнит-тестах (без реального
  * запуска внешнего процесса).
@@ -21,12 +30,24 @@ class OpencodeRunner
 {
     public const AGENT_NAME = 'dbdump-mapper';
 
+    /** Имя бинаря по умолчанию (переопределяется через конфиг/configure-llm). */
+    public const DEFAULT_BIN = DbdumpConfigStore::DEFAULT_OPENCODE_BIN;
+
     /** @var LoggerInterface */
     private $logger;
 
-    public function __construct(LoggerInterface $logger)
+    /** @var string имя/путь бинаря opencode (напр. 'opencode' или 'opencode-cli') */
+    private $opencodeBin;
+
+    /**
+     * Имя бинаря берётся из единого хранилища настроек (config/database-dumps.php через
+     * DbdumpConfigStore) — то же, что пишет configure-llm; env DBDUMP_OPENCODE_BIN перекрывает.
+     */
+    public function __construct(LoggerInterface $logger, DbdumpConfigStore $store, string $projectDir)
     {
         $this->logger = $logger;
+        $bin = trim($store->getOpencodeBin(rtrim($projectDir, '/\\')));
+        $this->opencodeBin = $bin !== '' ? $bin : self::DEFAULT_BIN;
     }
 
     /**
@@ -61,8 +82,9 @@ class OpencodeRunner
     public function manualCommandHint(string $inventoryFile): string
     {
         return sprintf(
-            'opencode run --agent %s -f %s "Построй карту связей и использования колонок по инструкции; '
-            . 'результат запиши в database/analysis/out/"',
+            '%s run --agent %s "Прочитай файл %s, построй карту связей и использования '
+            . 'колонок по инструкции агента и запиши результат в database/analysis/out/"',
+            $this->opencodeBin,
             self::AGENT_NAME,
             $inventoryFile
         );
@@ -70,14 +92,17 @@ class OpencodeRunner
 
     /**
      * Собрать строку команды (escape аргументов). Protected — для проверки в тестах.
+     *
+     * Путь к файлу инвентаря вписывается в текст сообщения (не через -f — тот вариадический
+     * и съел бы промпт); файл читает сам агент. Разрешения — в frontmatter агента, не флагом.
      */
     protected function buildCommand(string $bin, string $inventoryFile, string $prompt): string
     {
+        $message = sprintf('Прочитай файл %s. %s', $inventoryFile, $prompt);
+
         return escapeshellarg($bin)
             . ' run --agent ' . escapeshellarg(self::AGENT_NAME)
-            . ' --dangerously-skip-permissions'
-            . ' -f ' . escapeshellarg($inventoryFile)
-            . ' ' . escapeshellarg($prompt);
+            . ' ' . escapeshellarg($message);
     }
 
     /**
@@ -87,7 +112,10 @@ class OpencodeRunner
      */
     protected function locate()
     {
-        $finder = $this->isWindows() ? 'where opencode' : 'command -v opencode 2>/dev/null';
+        $bin = $this->opencodeBin;
+        $finder = $this->isWindows()
+            ? 'where ' . escapeshellarg($bin)
+            : 'command -v ' . escapeshellarg($bin) . ' 2>/dev/null';
         $output = [];
         $code = 0;
         @exec($finder, $output, $code);

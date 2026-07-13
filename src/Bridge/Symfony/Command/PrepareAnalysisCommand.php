@@ -87,6 +87,9 @@ class PrepareAnalysisCommand extends Command
         $connection = $input->getOption('connection');
 
         try {
+            if ($run) {
+                $io->section('Этап 1/3 — инвентаризация БД + скан кода хоста (grep)');
+            }
             $result = $this->builder->build($connection !== null ? (string) $connection : null);
             $io->success(sprintf('Подготовлено файлов: %d (таблиц: %d)', count($result['paths']), $result['tables']));
 
@@ -107,21 +110,23 @@ class PrepareAnalysisCommand extends Command
      */
     private function printRoadmap(SymfonyStyle $io, bool $run): void
     {
-        if ($run) {
-            $io->text('Этапы (--run, всё одной командой):');
-            $io->listing([
-                'Инвентаризация БД — сбор метаданных (типы/FK/профили, без данных)',
-                'OPENCODE по каждой схеме — анализ кода проекта (нужен opencode в PATH)',
-                'Применение результата — cascade_from / sample.criteria → dump_config.yaml',
-            ]);
-        } else {
-            $io->text('Этапы:');
-            $io->listing([
-                'Инвентаризация БД — сбор метаданных (типы/FK/профили, без данных)',
-                'Запуск OPENCODE — вручную по инструкции ниже (или повторите с --run)',
-                'Применение результата — app:dbdump:apply-analysis → dump_config.yaml',
-            ]);
-        }
+        $step2 = $run
+            ? ' 2. OPENCODE по каждой схеме — анализ кода агентом (нужен opencode в PATH)'
+            : ' 2. Запуск OPENCODE — вручную по инструкции ниже (или повторите с --run)';
+        $step3 = $run
+            ? ' 3. Применение результата — cascade_from / sample.criteria → dump_config.yaml'
+            : ' 3. Применение результата — app:dbdump:apply-analysis → dump_config.yaml';
+
+        $io->text($run ? 'Этапы (--run, всё одной командой):' : 'Этапы:');
+        $io->text([
+            ' 1. Подготовка пакета (один проход по БД и коду):',
+            '    1a. Инвентаризация БД — по каждой таблице: COUNT(*) + случайная выборка ~200 строк →',
+            '        профили колонок (доля NULL, кардинальность, категориальность). Значения данных НЕ сохраняются.',
+            '    1b. Скан кода хоста (grep) — сразу после инвентаря, один проход по коду: где используются',
+            '        таблицы (entity/model/repository/sql), связи и сегменты выборки.',
+            $step2,
+            $step3,
+        ]);
     }
 
     /**

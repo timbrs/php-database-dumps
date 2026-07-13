@@ -28,6 +28,10 @@ class DbdumpConfigStore
     public const DEFAULT_DATA_DIR = 'database';
     public const ENV_DATA_DIR = 'DBDUMP_DATA_DIR';
 
+    /** Имя бинаря opencode (напр. 'opencode-cli'): дефолт, env и ключ файла opencode.bin. */
+    public const DEFAULT_OPENCODE_BIN = 'opencode';
+    public const ENV_OPENCODE_BIN = 'DBDUMP_OPENCODE_BIN';
+
     /** @var FileSystemInterface */
     private $fileSystem;
 
@@ -70,9 +74,12 @@ class DbdumpConfigStore
      * Сохранить несекретные настройки (data_dir + llm без token) в config/database-dumps.php.
      * Токен НИКОГДА не пишется в файл — он живёт в .env.local (см. EnvFileWriter).
      *
-     * Неизвестные ключи (напр. Laravel config_path/project_dir) сохраняются.
+     * Неизвестные ключи (напр. Laravel config_path/project_dir, opencode) сохраняются.
+     *
+     * @param string|null $opencodeBin если задан — переопределяет секцию opencode.bin;
+     *                                 null — сохраняется существующая (если была)
      */
-    public function save(string $projectDir, AiConfig $config, ?string $dataDir = null): void
+    public function save(string $projectDir, AiConfig $config, ?string $dataDir = null, ?string $opencodeBin = null): void
     {
         $path = $this->path($projectDir);
         $dir = dirname($path);
@@ -107,9 +114,35 @@ class DbdumpConfigStore
             }
             $out[$k] = $v;
         }
+        // Новое значение opencode.bin переопределяет существующее; null — сохраняем прежнее (через foreach выше).
+        if ($opencodeBin !== null && $opencodeBin !== '') {
+            $out['opencode'] = ['bin' => $opencodeBin];
+        }
         $out['llm'] = $llm;
 
         $this->fileSystem->writeAtomic($path, $this->render($out));
+    }
+
+    /**
+     * Имя/путь бинаря opencode: env DBDUMP_OPENCODE_BIN → файл opencode.bin → 'opencode'.
+     */
+    public function getOpencodeBin(string $projectDir): string
+    {
+        $env = $this->readEnv(self::ENV_OPENCODE_BIN);
+        if ($env !== null) {
+            return $env;
+        }
+
+        $data = $this->load($projectDir);
+        if ($data !== null
+            && isset($data['opencode']['bin'])
+            && is_string($data['opencode']['bin'])
+            && $data['opencode']['bin'] !== ''
+        ) {
+            return $data['opencode']['bin'];
+        }
+
+        return self::DEFAULT_OPENCODE_BIN;
     }
 
     /**

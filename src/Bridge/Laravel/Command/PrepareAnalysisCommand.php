@@ -71,15 +71,19 @@ class PrepareAnalysisCommand extends Command
         $this->setupLogger();
         $this->info('Подготовка пакета анализа (OPENCODE)');
 
-        $this->printRoadmap((bool) $this->option('run'));
+        $run = (bool) $this->option('run');
+        $this->printRoadmap($run);
 
         $connection = $this->option('connection');
 
         try {
+            if ($run) {
+                $this->info('Этап 1/3 — инвентаризация БД + скан кода хоста (grep)');
+            }
             $result = $this->builder->build($connection !== null && $connection !== '' ? (string) $connection : null);
             $this->info(sprintf('Подготовлено файлов: %d (таблиц: %d)', count($result['paths']), $result['tables']));
 
-            if ($this->option('run')) {
+            if ($run) {
                 return $this->runPipeline($result['schema_files']);
             }
 
@@ -96,14 +100,16 @@ class PrepareAnalysisCommand extends Command
      */
     private function printRoadmap(bool $run): void
     {
+        $this->line($run ? 'Этапы (--run, всё одной командой):' : 'Этапы:');
+        $this->line('  1. Подготовка пакета (один проход по БД и коду):');
+        $this->line('     1a. Инвентаризация БД — по каждой таблице: COUNT(*) + случайная выборка ~200 строк →');
+        $this->line('         профили колонок (доля NULL, кардинальность, категориальность). Значения данных НЕ сохраняются.');
+        $this->line('     1b. Скан кода хоста (grep) — сразу после инвентаря, один проход по коду: где используются');
+        $this->line('         таблицы (entity/model/repository/sql), связи и сегменты выборки.');
         if ($run) {
-            $this->line('Этапы (--run, всё одной командой):');
-            $this->line('  1. Инвентаризация БД — сбор метаданных (типы/FK/профили, без данных)');
-            $this->line('  2. OPENCODE по каждой схеме — анализ кода проекта (нужен opencode в PATH)');
+            $this->line('  2. OPENCODE по каждой схеме — анализ кода агентом (нужен opencode в PATH)');
             $this->line('  3. Применение результата — cascade_from / sample.criteria → dump_config.yaml');
         } else {
-            $this->line('Этапы:');
-            $this->line('  1. Инвентаризация БД — сбор метаданных (типы/FK/профили, без данных)');
             $this->line('  2. Запуск OPENCODE — вручную по инструкции ниже (или повторите с --run)');
             $this->line('  3. Применение результата — dbdump:apply-analysis → dump_config.yaml');
         }

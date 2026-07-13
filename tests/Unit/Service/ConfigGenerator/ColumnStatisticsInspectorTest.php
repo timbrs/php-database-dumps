@@ -323,4 +323,137 @@ class ColumnStatisticsInspectorTest extends TestCase
         // Пустая выборка: деления на ноль нет, null_fraction == 0.0
         $this->assertEqualsWithDelta(0.0, $c->getNullFraction(), 0.001);
     }
+
+    public function testLargeTablePostgresUsesTablesample(): void
+    {
+        // rowCount > LARGE_TABLE_ROWS → дешёвая блочная выборка вместо полного ORDER BY RANDOM().
+        $columnsMeta = [['column_name' => 'status', 'data_type' => 'varchar', 'is_nullable' => 'NO']];
+        $rows = [['status' => 'a'], ['status' => 'a'], ['status' => 'b']];
+        $captured = [];
+        $this->connection->method('fetchAllAssociative')->willReturnCallback(
+            function ($sql) use (&$captured, $columnsMeta, $rows) {
+                if (strpos($sql, 'information_schema.columns') !== false) {
+                    return $columnsMeta;
+                }
+                $captured[] = $sql;
+                return $rows;
+            }
+        );
+
+        $inspector = new ColumnStatisticsInspector($this->registry);
+        $inspector->profileTable('public', 'big', null, 5000000);
+
+        $this->assertCount(1, $captured);
+        $this->assertStringContainsString('TABLESAMPLE SYSTEM', $captured[0]);
+        $this->assertStringNotContainsString('ORDER BY', $captured[0]);
+    }
+
+    public function testLargeTableFallsBackToHeadWhenSampleEmpty(): void
+    {
+        // Блочный TABLESAMPLE может не попасть ни в один блок → пусто → fallback на «голову».
+        $columnsMeta = [['column_name' => 'status', 'data_type' => 'varchar', 'is_nullable' => 'NO']];
+        $sampleCalls = [];
+        $this->connection->method('fetchAllAssociative')->willReturnCallback(
+            function ($sql) use (&$sampleCalls, $columnsMeta) {
+                if (strpos($sql, 'information_schema.columns') !== false) {
+                    return $columnsMeta;
+                }
+                $sampleCalls[] = $sql;
+                if (strpos($sql, 'TABLESAMPLE') !== false) {
+                    return [];
+                }
+                return [['status' => 'a'], ['status' => 'a'], ['status' => 'b']];
+            }
+        );
+
+        $inspector = new ColumnStatisticsInspector($this->registry);
+        $profiles = $inspector->profileTable('public', 'big', null, 5000000);
+
+        $status = $this->profileBy($profiles, 'status');
+        $this->assertNotNull($status);
+        $this->assertSame(2, $status->getDistinctCount()); // взято из fallback-выборки
+        $this->assertCount(2, $sampleCalls);
+        $this->assertStringContainsString('TABLESAMPLE', $sampleCalls[0]);
+        $this->assertStringNotContainsString('TABLESAMPLE', $sampleCalls[1]);
+        $this->assertStringNotContainsString('ORDER BY', $sampleCalls[1]);
+    }
+
+    public function testSmallTableStillUsesRandomOrder(): void
+    {
+        // rowCount <= LARGE_TABLE_ROWS → прежняя полноценная случайная выборка (регресс).
+        $columnsMeta = [['column_name' => 'status', 'data_type' => 'varchar', 'is_nullable' => 'NO']];
+        $captured = [];
+        $this->connection->method('fetchAllAssociative')->willReturnCallback(
+            function ($sql) use (&$captured, $columnsMeta) {
+                if (strpos($sql, 'information_schema.columns') !== false) {
+                    return $columnsMeta;
+                }
+                $captured[] = $sql;
+                return [['status' => 'a']];
+            }
+        );
+
+        $inspector = new ColumnStatisticsInspector($this->registry);
+        $inspector->profileTable('public', 'small', null, 100);
+
+        $this->assertCount(1, $captured);
+        $this->assertStringContainsString('ORDER BY', $captured[0]);
+        $this->assertStringContainsString('RANDOM()', $captured[0]);
+        $this->assertStringNotContainsString('TABLESAMPLE', $captured[0]);
+    }
+
+    public function testLargeTableOracleUsesSampleClause(): void
+    {
+        $connection = $this->createMock(DatabaseConnectionInterface::class);
+        $connection->method('getPlatformName')->willReturn('oracle');
+        $captured = [];
+        $connection->method('fetchAllAssociative')->willReturnCallback(
+            function ($sql) use (&$captured) {
+                if (strpos($sql, 'all_tab_columns') !== false) {
+                    return [['COLUMN_NAME' => 'status', 'DATA_TYPE' => 'varchar2', 'NULLABLE' => 'Y']];
+                }
+                $captured[] = $sql;
+                return [['STATUS' => 'a'], ['STATUS' => 'b']];
+            }
+        );
+        $registry = $this->createMock(ConnectionRegistryInterface::class);
+        $registry->method('getConnection')->willReturn($connection);
+        $registry->method('getPlatform')->willReturn(new \Timbrs\DatabaseDumps\Platform\OraclePlatform());
+
+        $inspector = new ColumnStatisticsInspector($registry);
+        $inspector->profileTable('HR', 'BIG', null, 5000000);
+
+        $this->assertCount(1, $captured);
+        $this->assertStringContainsString('SAMPLE (', $captured[0]);
+        $this->assertStringContainsString('FETCH FIRST', $captured[0]);
+        $this->assertStringNotContainsString('ORDER BY', $captured[0]);
+    }
+
+    public function testLargeTableMysqlUsesHeadNotOrderByRand(): void
+    {
+        // MySQL нативного TABLESAMPLE не имеет → «голова» таблицы (ORDER BY RAND() был бы катастрофой).
+        $connection = $this->createMock(DatabaseConnectionInterface::class);
+        $connection->method('getPlatformName')->willReturn('mysql');
+        $captured = [];
+        $connection->method('fetchAllAssociative')->willReturnCallback(
+            function ($sql) use (&$captured) {
+                if (strpos($sql, 'information_schema.columns') !== false) {
+                    return [['column_name' => 'status', 'data_type' => 'varchar', 'is_nullable' => 'NO']];
+                }
+                $captured[] = $sql;
+                return [['status' => 'a'], ['status' => 'b']];
+            }
+        );
+        $registry = $this->createMock(ConnectionRegistryInterface::class);
+        $registry->method('getConnection')->willReturn($connection);
+        $registry->method('getPlatform')->willReturn(new \Timbrs\DatabaseDumps\Platform\MySqlPlatform());
+
+        $inspector = new ColumnStatisticsInspector($registry);
+        $inspector->profileTable('shop', 'big', null, 5000000);
+
+        $this->assertCount(1, $captured);
+        $this->assertStringNotContainsString('ORDER BY', $captured[0]);
+        $this->assertStringNotContainsString('RAND()', $captured[0]);
+        $this->assertStringContainsString('LIMIT', $captured[0]);
+    }
 }

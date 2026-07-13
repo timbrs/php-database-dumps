@@ -37,25 +37,34 @@ opencode agent list      # в списке должен быть dbdump-mapper
 
 ## Запуск
 
+Путь к инвентарю указывается ПРЯМО В ТЕКСТЕ сообщения — файл читает сам агент. НЕ используй флаг
+`-f`: у `opencode run` он вариадический («File(s)») и съедает следующий за ним текст промпта, из-за
+чего opencode пытается открыть промпт как файл (`Error: File not found: <текст промпта>`).
+
 ```bash
 cd <host-project>
 opencode run --agent dbdump-mapper \
-  -f database/analysis/schema_inventory.json \
-  "Построй карту связей и использования колонок по инструкции; результат запиши в database/analysis/out/"
+  "Прочитай файл database/analysis/schema_inventory.json, построй карту связей и использования колонок по инструкции агента и запиши результат в database/analysis/out/"
 ```
 
 Многосхемный/большой проект (контекст 128k) — дроби по чанку на схему, используя ПЕР-СХЕМНЫЙ инвентарь
 (каждый прогон пишет частичный `out/<schema>.json`):
 
 ```bash
-opencode run --agent dbdump-mapper -f database/analysis/schema_inventory.public.json \
-  "Обработай схему public по инструкции; результат — database/analysis/out/public.json"
+opencode run --agent dbdump-mapper \
+  "Прочитай файл database/analysis/schema_inventory.public.json, обработай схему public по инструкции; результат — database/analysis/out/public.json"
 ```
+
+Если бинарь называется иначе (напр. `opencode-cli`) — подставь своё имя (в командах `--run` оно
+берётся из настройки `opencode_bin` / `DBDUMP_OPENCODE_BIN`).
+
+Разрешения (permissions) агент берёт из своего frontmatter (`permission:` в `dbdump-mapper.md`:
+read/edit/write/grep/glob/list = allow) — отдельного CLI-флага авто-аппрува у opencode нет
+(ни `--auto`, ни `--dangerously-skip-permissions`). Сверься с `opencode run --help` своей сборки.
 
 Полезные флаги:
 
-- `--format json` или `--print-logs` — смотреть прогресс/поток событий.
-- `--dangerously-skip-permissions` — авто-аппрув прав (агент уже ограничен read-only + запись в out/).
+- `--format json` — машинный вывод/поток событий для парсинга.
 - `--model <provider>/<model>` — явно указать модель (по умолчанию наследуется из настроек opencode).
 
 ## Чтение вывода
