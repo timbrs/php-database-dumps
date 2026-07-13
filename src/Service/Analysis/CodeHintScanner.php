@@ -133,6 +133,12 @@ class CodeHintScanner
     /** @var array<string, array<int, string>> нормализованное имя → ключи schema.table */
     private $normToKeys;
 
+    /** @var array<string, array<string, string>> нормализованное голое имя → (нормализ. схема → полный ключ) */
+    private $schemaKeyByBare;
+
+    /** @var array<string, array<int, string>> ключ → полный набор коллизирующих ключей (для ambiguous_with) */
+    private $ambiguousInfo;
+
     /** @var array<string, array<int, string>> tableColumns[schema.table] = имена колонок */
     private $tableColumns;
 
@@ -206,12 +212,15 @@ class CodeHintScanner
         $this->pendingCriteria = [];
         $this->migrationFiles = [];
         $this->normToKeys = [];
+        $this->schemaKeyByBare = [];
+        $this->ambiguousInfo = [];
         $this->tableColumns = $tableColumns;
         $this->dbForeignKeys = $dbForeignKeys;
     }
 
     /**
-     * Построить $this->normToKeys (нормализованное имя → ключи schema.table).
+     * Построить $this->normToKeys (нормализованное имя → ключи schema.table) и индекс
+     * коллизий $this->schemaKeyByBare (голое имя → схема → полный ключ) для развода дублей.
      *
      * @param array<int, string> $tableKeys
      * @return array<int, string> уникальные «голые» имена таблиц (для alternation-regex)
@@ -230,8 +239,66 @@ class CodeHintScanner
                 $bareNames[] = $bare;
             }
             $this->normToKeys[$norm][] = $key;
+            // Индекс коллизий: схема (нормализованная) → полный ключ. Коллизия, если ключей > 1.
+            $this->schemaKeyByBare[$norm][$this->lower($this->schemaOf($key))] = $key;
         }
         return $bareNames;
+    }
+
+    /**
+     * Разрешить голое упоминание $normBare в строке кода до ключей schema.table.
+     *
+     * Неколлизирующее имя → единственный ключ (поведение как раньше). Коллизия (одно голое
+     * имя в разных схемах): ищем в строке квалификатор схемы (точечная ссылка `schema.table`
+     * или Doctrine-атрибут `schema: 'X'`) среди кандидатных схем. Совпало ≥1 — разводим точно;
+     * ни одной — приписываем всем кандидатам с пометкой ambiguous (политика «обеим»).
+     *
+     * @return array{keys: array<int, string>, ambiguous: bool}
+     */
+    private function keysForMention(string $normBare, string $line): array
+    {
+        $keys = isset($this->normToKeys[$normBare]) ? $this->normToKeys[$normBare] : [];
+        if (count($keys) <= 1) {
+            return ['keys' => $keys, 'ambiguous' => false];
+        }
+        $matched = [];
+        foreach ($this->schemaKeyByBare[$normBare] as $schemaNorm => $key) {
+            if ($schemaNorm === '') {
+                continue; // ключ без схемы квалифицировать в строке нечем
+            }
+            if ($this->lineQualifiesSchema($line, $schemaNorm, $normBare)) {
+                $matched[] = $key;
+            }
+        }
+        if (!empty($matched)) {
+            return ['keys' => array_values(array_unique($matched)), 'ambiguous' => false];
+        }
+        return ['keys' => $keys, 'ambiguous' => true];
+    }
+
+    /**
+     * Квалифицирует ли строка кода голое имя таблицы конкретной схемой? Две формы:
+     *  1) точечная ссылка `schema.table` (кавычки/бэктики опциональны, граница перед схемой) —
+     *     напр. SQL `FROM clients.phones`, Postgres `"user"."phones"`;
+     *  2) Doctrine-атрибут `schema: 'X'` / `schema = "X"` со схемой-кандидатом — напр.
+     *     `#[ORM\Table(name: 'phones', schema: 'user')]`.
+     *
+     * $schema/$bare уже нормализованы (нижний регистр); сопоставление — case-insensitive.
+     */
+    private function lineQualifiesSchema(string $line, string $schema, string $bare): bool
+    {
+        $s = preg_quote($schema, '/');
+        $b = preg_quote($bare, '/');
+        $q = '["\'`]?'; // опциональная кавычка/апостроф/бэктик вокруг идентификатора
+        // 1) schema.table
+        if (preg_match('/(?<![\p{L}\p{N}_])' . $q . $s . $q . '\s*\.\s*' . $q . $b . $q . '(?![\p{L}\p{N}_])/iu', $line) === 1) {
+            return true;
+        }
+        // 2) Doctrine schema: 'X'
+        if (preg_match('/\bschema\s*[:=]\s*' . $q . $s . $q . '(?![\p{L}\p{N}_])/iu', $line) === 1) {
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -312,7 +379,13 @@ class CodeHintScanner
                 if ($category === null) {
                     continue;
                 }
-                $this->addHint($this->normToKeys[$norm], $category, $this->makeHint($lines, $idx, $rel));
+                $resolved = $this->keysForMention($norm, $line);
+                $this->addHint($resolved['keys'], $category, $this->makeHint($lines, $idx, $rel));
+                if ($resolved['ambiguous']) {
+                    foreach ($resolved['keys'] as $ambKey) {
+                        $this->ambiguousInfo[$ambKey] = $this->normToKeys[$norm];
+                    }
+                }
                 $hadHit = true;
             }
         }
@@ -456,8 +529,16 @@ class CodeHintScanner
             return $this->classMap[$cand['target_class']]['keys'];
         }
         if (!empty($cand['target_table'])) {
-            $norm = $this->lower($this->bareName((string) $cand['target_table']));
+            $raw = (string) $cand['target_table'];
+            $norm = $this->lower($this->bareName($raw));
             if (isset($this->normToKeys[$norm])) {
+                // Точечный литерал schema.table → развести точно; голый коллизирующий → все кандидаты.
+                if (strpos($raw, '.') !== false) {
+                    $schemaNorm = $this->lower($this->schemaOf($raw));
+                    if (isset($this->schemaKeyByBare[$norm][$schemaNorm])) {
+                        return [$this->schemaKeyByBare[$norm][$schemaNorm]];
+                    }
+                }
                 return $this->normToKeys[$norm];
             }
         }
@@ -681,6 +762,12 @@ class CodeHintScanner
                 $entry['columns'] = array_slice($this->columns[$key], 0, self::MAX_COLUMNS, true);
             }
 
+            // Коллизия голого имени: часть счётчиков могла прийти от чужой схемы (политика «обеим»).
+            if (isset($this->ambiguousInfo[$key])) {
+                $entry['ambiguous'] = true;
+                $entry['ambiguous_with'] = array_values($this->ambiguousInfo[$key]);
+            }
+
             $map[$key] = $entry;
         }
         return $map;
@@ -742,7 +829,9 @@ class CodeHintScanner
         if (preg_match('/ORM\\\\Table\s*\(\s*name\s*[:=]\s*[\'"]([^\'"]+)[\'"]/', $content, $tm)) {
             $norm = $this->lower($tm[1]);
             if (isset($normToKeys[$norm])) {
-                $keys = $normToKeys[$norm];
+                // Схема из того же атрибута (порядок schema:/name: любой — отдельный match): при
+                // коллизии голого имени сужаем ключи класса до конкретной схемы (разводит и usage).
+                $keys = $this->narrowKeysBySchema($content, $norm);
                 if ($class !== null) {
                     $pending[] = ['class' => $class, 'kind' => 'entity', 'keys' => $keys, 'conventional' => false];
                     // Репозиторий по конвенции Symfony: {Entity}Repository (регистрируем, только если такой класс есть).
@@ -758,11 +847,42 @@ class CodeHintScanner
 
         // Eloquent.
         if ($class !== null && preg_match('/\$table\s*=\s*[\'"]([^\'"]+)[\'"]/', $content, $em)) {
-            $norm = $this->lower($em[1]);
+            $raw = $em[1];
+            $norm = $this->lower($this->bareName($raw));
             if (isset($normToKeys[$norm])) {
-                $pending[] = ['class' => $class, 'kind' => 'model', 'keys' => $normToKeys[$norm], 'conventional' => false];
+                $keys = $normToKeys[$norm];
+                // Точечный $table (clients.phones) при коллизии → сузить до конкретного ключа.
+                if (strpos($raw, '.') !== false) {
+                    $schemaNorm = $this->lower($this->schemaOf($raw));
+                    if (isset($this->schemaKeyByBare[$norm][$schemaNorm])) {
+                        $keys = [$this->schemaKeyByBare[$norm][$schemaNorm]];
+                    }
+                }
+                $pending[] = ['class' => $class, 'kind' => 'model', 'keys' => $keys, 'conventional' => false];
             }
         }
+    }
+
+    /**
+     * Сузить кандидатные ключи Doctrine-класса до конкретной схемы, если у атрибута ORM\Table
+     * задан `schema: 'X'`. Нет коллизии, нет схемы или schema.name не в индексе → все кандидаты
+     * по голому имени (прежнее поведение). schema: ищется отдельным match (порядок с name: любой).
+     *
+     * @return array<int, string>
+     */
+    private function narrowKeysBySchema(string $content, string $normBare): array
+    {
+        $all = $this->normToKeys[$normBare];
+        if (count($all) <= 1) {
+            return $all;
+        }
+        if (preg_match('/ORM\\\\Table\s*\([^)]*\bschema\s*[:=]\s*[\'"]([^\'"]+)[\'"]/', $content, $sm)) {
+            $schemaNorm = $this->lower($sm[1]);
+            if (isset($this->schemaKeyByBare[$normBare][$schemaNorm])) {
+                return [$this->schemaKeyByBare[$normBare][$schemaNorm]];
+            }
+        }
+        return $all;
     }
 
     /**

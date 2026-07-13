@@ -35,6 +35,13 @@ trait TextHelperTrait
         return $pos === false ? $key : substr($key, $pos + 1);
     }
 
+    /** Схема ключа: часть ДО последней точки (schema.table → schema); '' при отсутствии точки. */
+    protected function schemaOf(string $key): string
+    {
+        $pos = strrpos($key, '.');
+        return $pos === false ? '' : substr($key, 0, $pos);
+    }
+
     /** Короткое имя класса: часть после последнего разделителя пространства имён. */
     protected function shortClass(string $fqcn): string
     {

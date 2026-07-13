@@ -29,6 +29,7 @@ use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisReportWriter;
+use Timbrs\DatabaseDumps\Service\Analysis\CodeHintScanner;
 use Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher;
 use Timbrs\DatabaseDumps\Service\Analysis\OpencodeRunner;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ColumnStatisticsInspector;
@@ -313,6 +314,13 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
         });
 
         // Анализ кода через OPENCODE
+        // Grep-сканер использований таблиц в коде хоста (projectDir + logger, как OpencodeRunner).
+        $this->app->singleton(CodeHintScanner::class, function ($app) {
+            return new CodeHintScanner(
+                $app['config']->get('database-dumps.project_dir'),
+                $app->make(LoggerInterface::class)
+            );
+        });
         $this->app->singleton(AnalysisPackageBuilder::class, function ($app) {
             return new AnalysisPackageBuilder(
                 $app->make(FileSystemInterface::class),
@@ -323,6 +331,7 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(ColumnStatisticsInspector::class),
                 $app->make(LoggerInterface::class),
                 $app['config']->get('database-dumps.project_dir'),
+                $app->make(CodeHintScanner::class),
                 $app->make(DbdumpConfigStore::class)
             );
         });

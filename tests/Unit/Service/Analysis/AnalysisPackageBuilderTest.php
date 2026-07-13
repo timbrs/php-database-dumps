@@ -8,6 +8,7 @@ use Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
+use Timbrs\DatabaseDumps\Service\Analysis\CodeHintScanner;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ColumnProfile;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ColumnStatisticsInspector;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ServiceTableFilter;
@@ -19,7 +20,7 @@ class AnalysisPackageBuilderTest extends TestCase
     /** @var array<string, string> */
     private $written = [];
 
-    private function builder(): AnalysisPackageBuilder
+    private function builder(LoggerInterface $logger = null): AnalysisPackageBuilder
     {
         $connection = $this->createMock(DatabaseConnectionInterface::class);
         $connection->method('getPlatformName')->willReturn('postgresql');
@@ -73,9 +74,53 @@ class AnalysisPackageBuilderTest extends TestCase
             $filter,
             $resolver,
             $stats,
-            $this->createMock(LoggerInterface::class),
-            '/proj'
+            $logger ?? $this->createMock(LoggerInterface::class),
+            '/proj',
+            $this->stubScanner()
         );
+    }
+
+    /**
+     * Сканер кода с подменёнными enumerateFiles()/readFile() над in-memory картой (как
+     * CodeHintScannerTest). Дефолтные файлы упоминают `clients` (entity + usage), чтобы scan()
+     * дал хинты по таблице public.clients инвентаря.
+     *
+     * @param array<string, string>|null $files абсолютный путь => содержимое
+     */
+    private function stubScanner(array $files = null): CodeHintScanner
+    {
+        if ($files === null) {
+            $files = [
+                '/proj/src/Entity/Client.php' => "<?php\nnamespace App\\Entity;\nuse Doctrine\\ORM\\Mapping as ORM;\n"
+                    . "#[ORM\\Table(name: 'clients')]\nclass Client\n{\n}\n",
+                '/proj/src/Service/ClientService.php' => "<?php\nnamespace App\\Service;\nuse App\\Entity\\Client;\n"
+                    . "class ClientService\n{\n    public function make(Client \$c) {}\n}\n",
+            ];
+        }
+
+        return new class('/proj', $this->createMock(LoggerInterface::class), $files) extends CodeHintScanner {
+            /** @var array<string, string> */
+            private $files;
+
+            /**
+             * @param array<string, string> $files
+             */
+            public function __construct(string $dir, LoggerInterface $logger, array $files)
+            {
+                parent::__construct($dir, $logger);
+                $this->files = $files;
+            }
+
+            protected function enumerateFiles(string $dataDir): array
+            {
+                return array_keys($this->files);
+            }
+
+            protected function readFile(string $path)
+            {
+                return isset($this->files[$path]) ? $this->files[$path] : false;
+            }
+        };
     }
 
     public function testInventoryExcludesPiiValues(): void
@@ -168,5 +213,56 @@ class AnalysisPackageBuilderTest extends TestCase
 
         // PII по-прежнему не утекает в пер-схемный инвентарь.
         $this->assertStringNotContainsString('СЕКРЕТНОЕ_ПД_ЗНАЧЕНИЕ', $this->written[$perSchema]);
+    }
+
+    public function testBuildInjectsCodeHintsIntoInventoryFiles(): void
+    {
+        $this->written = [];
+        $this->builder()->build();
+
+        // Монолитный инвентарь несёт code_hints по таблице clients (entity + entity usage).
+        $invPath = '/proj/database/analysis/schema_inventory.json';
+        $this->assertArrayHasKey($invPath, $this->written);
+        $inv = json_decode($this->written[$invPath], true);
+        $hints = $inv['schemas']['public']['tables']['clients']['code_hints'];
+        $this->assertSame(1, $hints['counts']['entity']);
+        $this->assertArrayHasKey('entity usage', $hints['counts']);
+
+        // Пер-схемный файл наследует code_hints.
+        $perSchema = '/proj/database/analysis/schema_inventory.public.json';
+        $ps = json_decode($this->written[$perSchema], true);
+        $this->assertArrayHasKey('code_hints', $ps['schemas']['public']['tables']['clients']);
+
+        // Сниппеты — это код хоста, а НЕ значения данных БД: PII не утекает в файл с подсказками.
+        $this->assertStringNotContainsString('СЕКРЕТНОЕ_ПД_ЗНАЧЕНИЕ', $this->written[$invPath]);
+        $this->assertStringNotContainsString('top_values', $this->written[$invPath]);
+    }
+
+    public function testBuildLogsCodeHintScanStatusAndSummary(): void
+    {
+        $messages = [];
+        $logger = $this->createMock(LoggerInterface::class);
+        // Собирающая замыкание-callback (без arrow fn — PHP 7.2 CI).
+        $logger->method('info')->willReturnCallback(function ($message) use (&$messages) {
+            $messages[] = (string) $message;
+        });
+
+        $this->written = [];
+        $this->builder($logger)->build();
+
+        $joined = implode("\n", $messages);
+        // Статус старта фазы + итоговая сводка.
+        $this->assertStringContainsString('Скан кода хоста', $joined);
+        $this->assertStringContainsString('Подсказки по коду:', $joined);
+
+        // Пер-табличная строка: ключ таблицы + категория.
+        $perTable = null;
+        foreach ($messages as $m) {
+            if (strpos($m, 'public.clients') !== false && strpos($m, 'entity') !== false) {
+                $perTable = $m;
+                break;
+            }
+        }
+        $this->assertNotNull($perTable, 'Ожидалась пер-табличная строка подсказок с public.clients и категорией');
     }
 }

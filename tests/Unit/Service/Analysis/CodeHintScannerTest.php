@@ -339,6 +339,55 @@ class CodeHintScannerTest extends TestCase
         $this->assertCount(CodeHintScanner::MAX_CRITERIA, $map['public.orders']['criteria']);
     }
 
+    public function testSchemaCollisionRoutesQualifiedAndFlagsBareAmbiguous(): void
+    {
+        // Одно «голое» имя `phones` в двух схемах (clients, user).
+        $files = [
+            // Doctrine-энтити со schema:'user' → entity ТОЛЬКО на user.phones.
+            '/proj/src/Entity/Phone.php' => "<?php\nnamespace App\\Entity;\nuse Doctrine\\ORM\\Mapping as ORM;\n"
+                . "#[ORM\\Table(name: 'phones', schema: 'user')]\nclass Phone\n{\n}\n",
+            // SQL с квалификатором схемы → хит ТОЛЬКО на clients.phones.
+            '/proj/legacy/report.sql' => "SELECT id\nFROM clients.phones c\n",
+            // Голое упоминание без схемы → обе таблицы, ambiguous.
+            '/proj/app/Legacy/Bare.php' => "<?php\n\$q = DB::table('phones')->get();\n",
+        ];
+
+        $map = $this->scanner($files)->scan(['clients.phones', 'user.phones'], 'database');
+
+        $this->assertArrayHasKey('clients.phones', $map);
+        $this->assertArrayHasKey('user.phones', $map);
+
+        $clients = $map['clients.phones'];
+        $user = $map['user.phones'];
+
+        // Doctrine entity разведён точно по схеме: только user.phones.
+        $this->assertSame(1, $user['counts']['entity']);
+        $this->assertArrayNotHasKey('entity', $clients['counts']);
+
+        // FROM clients.phones ушёл только на clients.phones; user.phones sql — лишь голое упоминание.
+        // clients.phones sql = FROM(1) + голое(1) = 2; user.phones sql = голое(1).
+        $this->assertSame(2, $clients['counts']['sql']);
+        $this->assertSame(1, $user['counts']['sql']);
+
+        // Голое DB::table('phones') неразрешимо → у обеих ambiguous + полный набор ключей.
+        $this->assertTrue($clients['ambiguous']);
+        $this->assertTrue($user['ambiguous']);
+        $this->assertSame(['clients.phones', 'user.phones'], $clients['ambiguous_with']);
+        $this->assertSame(['clients.phones', 'user.phones'], $user['ambiguous_with']);
+    }
+
+    public function testNonCollidingNameHasNoAmbiguousFlag(): void
+    {
+        // Контроль регресса: уникальное имя таблицы → голое упоминание не помечается ambiguous.
+        $files = ['/proj/legacy/x.sql' => "FROM clients\n"];
+
+        $map = $this->scanner($files)->scan(['public.clients'], 'database');
+
+        $this->assertArrayHasKey('public.clients', $map);
+        $this->assertArrayNotHasKey('ambiguous', $map['public.clients']);
+        $this->assertArrayNotHasKey('ambiguous_with', $map['public.clients']);
+    }
+
     public function testEnumerateFiltersExtensionsExcludedDirsAndDataDir(): void
     {
         $root = sys_get_temp_dir() . '/dbdump_scan_' . uniqid();

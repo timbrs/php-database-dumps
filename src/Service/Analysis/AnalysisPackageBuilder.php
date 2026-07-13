@@ -57,6 +57,9 @@ class AnalysisPackageBuilder
     /** @var string */
     private $projectDir;
 
+    /** @var CodeHintScanner */
+    private $codeHintScanner;
+
     /** @var DbdumpConfigStore|null */
     private $configStore;
 
@@ -69,6 +72,7 @@ class AnalysisPackageBuilder
         ColumnStatisticsInspector $statisticsInspector,
         LoggerInterface $logger,
         string $projectDir,
+        CodeHintScanner $codeHintScanner,
         DbdumpConfigStore $configStore = null
     ) {
         $this->fileSystem = $fileSystem;
@@ -79,6 +83,7 @@ class AnalysisPackageBuilder
         $this->statisticsInspector = $statisticsInspector;
         $this->logger = $logger;
         $this->projectDir = rtrim($projectDir, '/\\');
+        $this->codeHintScanner = $codeHintScanner;
         $this->configStore = $configStore;
     }
 
@@ -112,6 +117,11 @@ class AnalysisPackageBuilder
 
         $inventory = $this->buildInventory($connectionName);
         $tableCount = $this->countTables($inventory);
+
+        // Скан кода хоста: стартовые точки для агента OPENCODE (grep использований таблиц).
+        // Мутирует $inventory (ключ code_hints по таблицам) ДО json_encode — попадает и в
+        // монолитный, и в пер-схемные инвентари. Новых обращений к БД нет — вход из инвентаря.
+        $this->injectCodeHints($inventory, $dataDir);
 
         $paths = [];
 
@@ -313,6 +323,146 @@ class AnalysisPackageBuilder
             ];
         }
         return $fks;
+    }
+
+    /**
+     * Порядок категорий в итоговой сводке подсказок по коду — паритет с
+     * CodeHintScanner::summarize() ($SUMMARY_ORDER).
+     *
+     * @var array<int, string>
+     */
+    private const CODE_HINT_SUMMARY_ORDER = [
+        'model', 'model usage', 'entity', 'entity usage', 'repository', 'repository usage', 'sql',
+    ];
+
+    /**
+     * Прогнать CodeHintScanner по собранному инвентарю и вложить его результат в каждую
+     * таблицу ключом `code_hints` (стартовые точки для агента OPENCODE: file/line упоминаний +
+     * предварительные relationships/criteria/columns). Данные для запуска берутся из инвентаря
+     * 1:1 — новых обращений к БД нет. Значения данных БД в подсказки не попадают (только код хоста).
+     *
+     * @param array<string, mixed> $inventory  мутируется по ссылке (ключ code_hints по таблицам)
+     * @param string               $dataDir    относительный data_dir (исключается из обхода сканером)
+     */
+    private function injectCodeHints(array &$inventory, string $dataDir): void
+    {
+        $schemas = isset($inventory['schemas']) && is_array($inventory['schemas']) ? $inventory['schemas'] : [];
+        if (empty($schemas)) {
+            return;
+        }
+
+        // Входы сканера собираем из инвентаря (совпадают 1:1 по форме).
+        $tableKeys = [];
+        $tableColumns = [];
+        $dbForeignKeys = [];
+        $keyMap = []; // schema.table → [schema, table] (обратный маппинг без explode по точке)
+        foreach ($schemas as $schemaName => $schemaData) {
+            if (!isset($schemaData['tables']) || !is_array($schemaData['tables'])) {
+                continue;
+            }
+            foreach ($schemaData['tables'] as $tableName => $tableData) {
+                $key = $schemaName . '.' . $tableName;
+                $tableKeys[] = $key;
+                $keyMap[$key] = [(string) $schemaName, (string) $tableName];
+                $tableColumns[$key] = isset($tableData['columns']) && is_array($tableData['columns'])
+                    ? array_column($tableData['columns'], 'name')
+                    : [];
+                $dbForeignKeys[$key] = isset($tableData['foreign_keys']) && is_array($tableData['foreign_keys'])
+                    ? $tableData['foreign_keys']
+                    : [];
+            }
+        }
+
+        if (empty($tableKeys)) {
+            return;
+        }
+
+        // Заголовок фазы: возможно долгий двухпроходный grep по всему коду хоста.
+        $this->logger->info('Скан кода хоста по таблицам (grep использований)…');
+
+        $hints = $this->codeHintScanner->scan($tableKeys, $dataDir, $tableColumns, $dbForeignKeys);
+
+        // Аккумулятор итога по категориям + вывод счётчиков по таблицам с хитами.
+        $catTotals = [];
+        $tablesWithHints = 0;
+        $ambiguousTables = 0;
+        foreach ($hints as $key => $entry) {
+            if (!isset($keyMap[$key])) {
+                continue;
+            }
+            [$schemaName, $tableName] = $keyMap[$key];
+            $inventory['schemas'][$schemaName]['tables'][$tableName]['code_hints'] = $entry;
+            $tablesWithHints++;
+
+            $summary = isset($entry['summary']) ? (string) $entry['summary'] : '';
+            $suffix = !empty($entry['truncated']) ? ' <comment>(усечено)</comment>' : '';
+            if (!empty($entry['ambiguous'])) {
+                $ambiguousTables++;
+                $schemas = $this->ambiguousSchemas(isset($entry['ambiguous_with']) ? $entry['ambiguous_with'] : []);
+                $suffix .= sprintf(' <comment>(неоднозначно: %s)</comment>', $schemas);
+            }
+            $this->logger->info(sprintf('  <info>%s</info>: %s%s', $key, $summary, $suffix));
+
+            if (isset($entry['counts']) && is_array($entry['counts'])) {
+                foreach ($entry['counts'] as $cat => $n) {
+                    $catTotals[(string) $cat] = (isset($catTotals[(string) $cat]) ? $catTotals[(string) $cat] : 0) + (int) $n;
+                }
+            }
+        }
+
+        if ($tablesWithHints > 0) {
+            $tail = $ambiguousTables > 0 ? sprintf('; неоднозначных: %d', $ambiguousTables) : '';
+            $this->logger->info(sprintf(
+                'Подсказки по коду: %d таблиц с упоминаниями (%s)%s',
+                $tablesWithHints,
+                $this->summarizeCodeHintTotals($catTotals),
+                $tail
+            ));
+        } else {
+            $this->logger->info('Подсказки по коду: упоминаний таблиц в коде хоста не найдено');
+        }
+    }
+
+    /**
+     * Список схем коллизии для консоли: схема каждого ключа ambiguous_with (часть ДО последней
+     * точки), уникально и по порядку. Напр. ['clients.phones','user.phones'] → 'clients, user'.
+     *
+     * @param array<int, string> $ambiguousWith
+     */
+    private function ambiguousSchemas(array $ambiguousWith): string
+    {
+        $schemas = [];
+        foreach ($ambiguousWith as $k) {
+            $k = (string) $k;
+            $pos = strrpos($k, '.');
+            $schema = $pos === false ? $k : substr($k, 0, $pos);
+            if ($schema !== '' && !in_array($schema, $schemas, true)) {
+                $schemas[] = $schema;
+            }
+        }
+        return implode(', ', $schemas);
+    }
+
+    /**
+     * Свести итоговые счётчики в строку «X model, Y entity, …» в порядке summarize().
+     *
+     * @param array<string, int> $catTotals
+     */
+    private function summarizeCodeHintTotals(array $catTotals): string
+    {
+        $parts = [];
+        foreach (self::CODE_HINT_SUMMARY_ORDER as $cat) {
+            if (!empty($catTotals[$cat])) {
+                $parts[] = $catTotals[$cat] . ' ' . $cat;
+            }
+        }
+        // Неизвестные категории (не в фиксированном порядке) — в конец, чтобы ничего не потерять.
+        foreach ($catTotals as $cat => $n) {
+            if (!empty($n) && !in_array($cat, self::CODE_HINT_SUMMARY_ORDER, true)) {
+                $parts[] = $n . ' ' . $cat;
+            }
+        }
+        return implode(', ', $parts);
     }
 
     /**

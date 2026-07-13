@@ -121,6 +121,11 @@ services:
     Timbrs\DatabaseDumps\Service\Analysis\AnalysisReportWriter: ~
 
     # Анализ кода через OPENCODE
+    # Grep-сканер использований таблиц в коде хоста (стартовые точки для OPENCODE).
+    # Скаляр $projectDir не автовайрится — задаём явно; logger автовайрится.
+    Timbrs\DatabaseDumps\Service\Analysis\CodeHintScanner:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
     Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder:
         arguments:
             $projectDir: '%kernel.project_dir%'
