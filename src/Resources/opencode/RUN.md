@@ -43,7 +43,7 @@ opencode agent list      # в списке должен быть dbdump-mapper
 
 ```bash
 cd <host-project>
-opencode run --agent dbdump-mapper \
+opencode run --agent dbdump-mapper -m <provider/model> \
   "Прочитай файл database/analysis/schema_inventory.json, построй карту связей и использования колонок по инструкции агента и запиши результат в database/analysis/out/"
 ```
 
@@ -51,12 +51,20 @@ opencode run --agent dbdump-mapper \
 (каждый прогон пишет частичный `out/<schema>.json`):
 
 ```bash
-opencode run --agent dbdump-mapper \
+opencode run --agent dbdump-mapper -m <provider/model> \
   "Прочитай файл database/analysis/schema_inventory.public.json, обработай схему public по инструкции; результат — database/analysis/out/public.json"
 ```
 
 Если бинарь называется иначе (напр. `opencode-cli`) — подставь своё имя (в командах `--run` оно
 берётся из настройки `opencode_bin` / `DBDUMP_OPENCODE_BIN`).
+
+**Модель `-m` в headless обязательна.** Без явного `-m` `opencode run` не определяет провайдера/модель
+из состояния сессии и падает `Model not found`. Команды `--run` берут модель ЦЕЛИКОМ из поля `"model"`
+твоего `opencode.json` (проектный → глобальный `~/.config/opencode/opencode.json`); можно перекрыть
+через `DBDUMP_OPENCODE_MODEL`. Модель — это строка `provider/modelID` (первый сегмент — провайдер,
+остальное — modelID, который сам может содержать `/`), поэтому подавай её ЦЕЛИКОМ и не урезай.
+Точную строку для `-m` печатает `opencode models` (одна строка = один `provider/modelID`) — что она
+показывает, то и подавай.
 
 Разрешения (permissions) агент берёт из своего frontmatter (`permission:` в `dbdump-mapper.md`:
 read/edit/write/grep/glob/list = allow) — отдельного CLI-флага авто-аппрува у opencode нет

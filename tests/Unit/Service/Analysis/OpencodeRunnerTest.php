@@ -9,6 +9,26 @@ use Timbrs\DatabaseDumps\Service\Analysis\OpencodeRunner;
 
 class OpencodeRunnerTest extends TestCase
 {
+    /** @var string|false */
+    private $savedModelEnv;
+
+    protected function setUp(): void
+    {
+        // Детерминизм: ручной override модели не должен просачиваться из окружения CI.
+        $this->savedModelEnv = getenv(OpencodeRunner::ENV_MODEL);
+        putenv(OpencodeRunner::ENV_MODEL);
+        unset($_SERVER[OpencodeRunner::ENV_MODEL], $_ENV[OpencodeRunner::ENV_MODEL]);
+    }
+
+    protected function tearDown(): void
+    {
+        if ($this->savedModelEnv === false) {
+            putenv(OpencodeRunner::ENV_MODEL);
+        } else {
+            putenv(OpencodeRunner::ENV_MODEL . '=' . $this->savedModelEnv);
+        }
+    }
+
     /**
      * Мок хранилища настроек, отдающий заданное имя бинаря opencode.
      */
@@ -23,6 +43,29 @@ class OpencodeRunnerTest extends TestCase
     private function runner(string $bin = 'opencode'): OpencodeRunner
     {
         return new OpencodeRunner($this->createMock(LoggerInterface::class), $this->storeReturning($bin), '/proj');
+    }
+
+    /**
+     * Runner с подменённым чтением opencode.json (readConfigFile → заданный JSON/false).
+     */
+    private function runnerWithConfig(string $bin, ?string $configJson): OpencodeRunner
+    {
+        return new class ($this->createMock(LoggerInterface::class), $this->storeReturning($bin), $configJson) extends OpencodeRunner {
+            /** @var string|null */
+            private $cfg;
+
+            public function __construct(LoggerInterface $logger, DbdumpConfigStore $store, ?string $cfg)
+            {
+                // Присваиваем ДО parent::__construct — конструктор родителя читает конфиг при резолве модели.
+                $this->cfg = $cfg;
+                parent::__construct($logger, $store, '/proj');
+            }
+
+            protected function readConfigFile(string $path)
+            {
+                return $this->cfg === null ? false : $this->cfg;
+            }
+        };
     }
 
     public function testManualCommandHintShapesOpencodeRun(): void
@@ -50,6 +93,32 @@ class OpencodeRunnerTest extends TestCase
         $hint = $this->runner('   ')->manualCommandHint('x.json');
 
         $this->assertStringStartsWith('opencode run', $hint);
+    }
+
+    public function testModelFromOpencodeConfigAddedWholeToCommand(): void
+    {
+        // Модель берётся ЦЕЛИКОМ (с провайдером и внутренним "/"), не урезается.
+        $cfg = '{"model": "uralsib/openai/gpt-oss-120b", "provider": {}}';
+        $hint = $this->runnerWithConfig('opencode-cli', $cfg)->manualCommandHint('x.json');
+
+        $this->assertStringContainsString('-m uralsib/openai/gpt-oss-120b', $hint);
+    }
+
+    public function testNoModelFlagWhenConfigAbsent(): void
+    {
+        $hint = $this->runnerWithConfig('opencode', null)->manualCommandHint('x.json');
+
+        $this->assertStringNotContainsString('-m ', $hint);
+    }
+
+    public function testEnvOverridesOpencodeConfigModel(): void
+    {
+        putenv(OpencodeRunner::ENV_MODEL . '=uralsib/Qwen/Qwen3-Coder-Next-FP8');
+        // Даже при наличии конфига env-override имеет приоритет.
+        $cfg = '{"model": "uralsib/openai/gpt-oss-120b"}';
+        $hint = $this->runnerWithConfig('opencode', $cfg)->manualCommandHint('x.json');
+
+        $this->assertStringContainsString('-m uralsib/Qwen/Qwen3-Coder-Next-FP8', $hint);
     }
 
     public function testIsAvailableReflectsLocate(): void

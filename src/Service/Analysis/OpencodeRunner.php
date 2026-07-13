@@ -23,6 +23,11 @@ use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
  * отсюда ошибка «File not found: <промпт>»); путь вписывается прямо в сообщение, а читает
  * файл сам агент своим read-tool.
  *
+ * Модель передаётся флагом -m ЦЕЛИКОМ из поля "model" в opencode.json (напр.
+ * "uralsib/openai/gpt-oss-120b"): без явного -m headless-запуск не определяет провайдера/модель
+ * и падает «Model not found». Первый сегмент строки — провайдер, остальное — modelID (может
+ * содержать "/"), поэтому урезать её нельзя. env DBDUMP_OPENCODE_MODEL — ручной override.
+ *
  * Exec-вызовы вынесены в protected-методы для подмены в юнит-тестах (без реального
  * запуска внешнего процесса).
  */
@@ -33,21 +38,35 @@ class OpencodeRunner
     /** Имя бинаря по умолчанию (переопределяется через конфиг/configure-llm). */
     public const DEFAULT_BIN = DbdumpConfigStore::DEFAULT_OPENCODE_BIN;
 
+    /** Ручной override модели для -m (если пользователь хочет обойти чтение opencode.json). */
+    public const ENV_MODEL = 'DBDUMP_OPENCODE_MODEL';
+
     /** @var LoggerInterface */
     private $logger;
 
     /** @var string имя/путь бинаря opencode (напр. 'opencode' или 'opencode-cli') */
     private $opencodeBin;
 
+    /** @var string модель для -m (provider/modelID из opencode.json); '' — флаг не добавляется */
+    private $opencodeModel;
+
     /**
      * Имя бинаря берётся из единого хранилища настроек (config/database-dumps.php через
      * DbdumpConfigStore) — то же, что пишет configure-llm; env DBDUMP_OPENCODE_BIN перекрывает.
+     *
+     * Модель для -m берётся ЦЕЛИКОМ из поля "model" в opencode.json (проектный → глобальный) —
+     * там пользователь уже задал провайдера и модель (напр. "uralsib/openai/gpt-oss-120b"; первый
+     * сегмент = провайдер, остальное = modelID, который сам может содержать "/"). Явный -m нужен,
+     * т.к. headless `opencode run` не всегда определяет дефолт-модель из состояния сессии
+     * (→ ошибка «Model not found»). env DBDUMP_OPENCODE_MODEL — ручной override.
      */
     public function __construct(LoggerInterface $logger, DbdumpConfigStore $store, string $projectDir)
     {
         $this->logger = $logger;
-        $bin = trim($store->getOpencodeBin(rtrim($projectDir, '/\\')));
+        $dir = rtrim($projectDir, '/\\');
+        $bin = trim($store->getOpencodeBin($dir));
         $this->opencodeBin = $bin !== '' ? $bin : self::DEFAULT_BIN;
+        $this->opencodeModel = $this->resolveModel($dir);
     }
 
     /**
@@ -81,11 +100,14 @@ class OpencodeRunner
      */
     public function manualCommandHint(string $inventoryFile): string
     {
+        $model = $this->opencodeModel !== '' ? ' -m ' . $this->opencodeModel : '';
+
         return sprintf(
-            '%s run --agent %s "Прочитай файл %s, построй карту связей и использования '
+            '%s run --agent %s%s "Прочитай файл %s, построй карту связей и использования '
             . 'колонок по инструкции агента и запиши результат в database/analysis/out/"',
             $this->opencodeBin,
             self::AGENT_NAME,
+            $model,
             $inventoryFile
         );
     }
@@ -95,14 +117,98 @@ class OpencodeRunner
      *
      * Путь к файлу инвентаря вписывается в текст сообщения (не через -f — тот вариадический
      * и съел бы промпт); файл читает сам агент. Разрешения — в frontmatter агента, не флагом.
+     * Модель задаётся -m целиком из opencode.json (иначе headless не определит провайдера/модель).
      */
     protected function buildCommand(string $bin, string $inventoryFile, string $prompt): string
     {
         $message = sprintf('Прочитай файл %s. %s', $inventoryFile, $prompt);
 
-        return escapeshellarg($bin)
-            . ' run --agent ' . escapeshellarg(self::AGENT_NAME)
-            . ' ' . escapeshellarg($message);
+        $cmd = escapeshellarg($bin) . ' run --agent ' . escapeshellarg(self::AGENT_NAME);
+        if ($this->opencodeModel !== '') {
+            $cmd .= ' -m ' . escapeshellarg($this->opencodeModel);
+        }
+        $cmd .= ' ' . escapeshellarg($message);
+
+        return $cmd;
+    }
+
+    /**
+     * Модель для -m: env-override → поле "model" из opencode.json (проектный → глобальный) → ''.
+     */
+    private function resolveModel(string $projectDir): string
+    {
+        $env = getenv(self::ENV_MODEL);
+        if (is_string($env) && trim($env) !== '') {
+            return trim($env);
+        }
+        foreach ($this->opencodeConfigPaths($projectDir) as $path) {
+            $model = $this->modelFromConfig($path);
+            if ($model !== '') {
+                return $model;
+            }
+        }
+        return '';
+    }
+
+    /**
+     * Пути поиска opencode.json: проектные (переопределяют) → глобальный XDG.
+     *
+     * @return array<int, string>
+     */
+    private function opencodeConfigPaths(string $projectDir): array
+    {
+        $paths = [
+            $projectDir . '/opencode.json',
+            $projectDir . '/opencode.jsonc',
+            $projectDir . '/.opencode/opencode.json',
+        ];
+        $home = $this->homeDir();
+        if ($home !== '') {
+            $xdg = getenv('XDG_CONFIG_HOME');
+            $base = (is_string($xdg) && $xdg !== '') ? rtrim($xdg, '/\\') : $home . '/.config';
+            $paths[] = $base . '/opencode/opencode.json';
+        }
+        return $paths;
+    }
+
+    /**
+     * Домашний каталог пользователя (HOME → USERPROFILE). '' — не определён.
+     */
+    private function homeDir(): string
+    {
+        foreach (['HOME', 'USERPROFILE'] as $var) {
+            $value = getenv($var);
+            if (is_string($value) && $value !== '') {
+                return rtrim($value, '/\\');
+            }
+        }
+        return '';
+    }
+
+    /**
+     * Прочитать поле "model" из opencode.json по пути. '' — файла нет / нет поля / не JSON.
+     */
+    private function modelFromConfig(string $path): string
+    {
+        $raw = $this->readConfigFile($path);
+        if (!is_string($raw) || $raw === '') {
+            return '';
+        }
+        $data = json_decode($raw, true);
+        if (is_array($data) && isset($data['model']) && is_string($data['model']) && trim($data['model']) !== '') {
+            return trim($data['model']);
+        }
+        return '';
+    }
+
+    /**
+     * Прочитать файл конфигурации. Protected — для подмены в юнит-тестах.
+     *
+     * @return string|false
+     */
+    protected function readConfigFile(string $path)
+    {
+        return is_file($path) ? @file_get_contents($path) : false;
     }
 
     /**
