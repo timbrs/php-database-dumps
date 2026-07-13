@@ -208,6 +208,9 @@ class OpencodeRunnerTest extends TestCase
         $this->assertStringNotContainsString('-f ', $cmd);
         $this->assertStringNotContainsString('--auto', $cmd);
         $this->assertStringContainsString('Обработай схему public', $cmd);
+        // Директива записи: слабые модели иначе отвечают текстом и не создают файл.
+        $this->assertStringContainsString('write', $cmd);
+        $this->assertStringContainsString('ОБЯЗАТЕЛЬНО', $cmd);
         // Имя бинаря взято из хранилища настроек (opencode-cli).
         $this->assertStringContainsString('opencode-cli', $cmd);
         $this->assertSame('/proj', $runner->captured[0]['cwd']);

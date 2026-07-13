@@ -41,6 +41,15 @@ class OpencodeRunner
     /** Ручной override модели для -m (если пользователь хочет обойти чтение opencode.json). */
     public const ENV_MODEL = 'DBDUMP_OPENCODE_MODEL';
 
+    /**
+     * Директива записи результата. Слабые модели (напр. gpt-oss-120b) склонны «отвечать текстом»
+     * вместо вызова инструмента write и завершают сессию, ничего не записав (в логах — exiting
+     * Loop без tool=write). Жёстко требуем создать файл через write и не завершаться без него.
+     */
+    private const WRITE_DIRECTIVE = 'ОБЯЗАТЕЛЬНО создай выходной файл инструментом write как '
+        . 'валидный JSON по контракту database/analysis/output_schema.json. Не отвечай текстом '
+        . 'в чат и не завершай работу, пока файл не записан на диск.';
+
     /** @var LoggerInterface */
     private $logger;
 
@@ -101,15 +110,14 @@ class OpencodeRunner
     public function manualCommandHint(string $inventoryFile): string
     {
         $model = $this->opencodeModel !== '' ? ' -m ' . $this->opencodeModel : '';
-
-        return sprintf(
-            '%s run --agent %s%s "Прочитай файл %s, построй карту связей и использования '
-            . 'колонок по инструкции агента и запиши результат в database/analysis/out/"',
-            $this->opencodeBin,
-            self::AGENT_NAME,
-            $model,
-            $inventoryFile
+        $message = sprintf(
+            'Прочитай файл %s, построй карту связей и использования колонок по инструкции агента '
+            . 'и запиши результат в database/analysis/out/. %s',
+            $inventoryFile,
+            self::WRITE_DIRECTIVE
         );
+
+        return sprintf('%s run --agent %s%s "%s"', $this->opencodeBin, self::AGENT_NAME, $model, $message);
     }
 
     /**
@@ -118,10 +126,12 @@ class OpencodeRunner
      * Путь к файлу инвентаря вписывается в текст сообщения (не через -f — тот вариадический
      * и съел бы промпт); файл читает сам агент. Разрешения — в frontmatter агента, не флагом.
      * Модель задаётся -m целиком из opencode.json (иначе headless не определит провайдера/модель).
+     * WRITE_DIRECTIVE жёстко требует записать файл (слабые модели иначе отвечают текстом и выходят).
      */
     protected function buildCommand(string $bin, string $inventoryFile, string $prompt): string
     {
-        $message = sprintf('Прочитай файл %s. %s', $inventoryFile, $prompt);
+        // rtrim хвостовых пробелов/точки у задачи → ровно одна точка перед директивой.
+        $message = sprintf('Прочитай файл %s. %s. %s', $inventoryFile, rtrim($prompt, " ."), self::WRITE_DIRECTIVE);
 
         $cmd = escapeshellarg($bin) . ' run --agent ' . escapeshellarg(self::AGENT_NAME);
         if ($this->opencodeModel !== '') {
