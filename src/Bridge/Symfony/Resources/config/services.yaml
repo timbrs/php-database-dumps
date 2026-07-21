@@ -158,26 +158,45 @@ services:
         arguments:
             $projectDir: '%kernel.project_dir%'
 
-    # Commands
+    # Commands — ЛЕНИВАЯ регистрация: имя команды указано в теге, поэтому Symfony знает его
+    # БЕЗ создания объекта команды (и без инстанцирования графа зависимостей, включая DumpConfig).
+    # Тогда `list` показывает все команды, а инстанцирование (и падение на битом конфиге) —
+    # только при запуске КОНКРЕТНОЙ команды, с реальной ошибкой, а не «command is not defined».
+    # Резолвер ресурса регистрирует сами сервисы (autowire); теги задаём явно ниже.
     Timbrs\DatabaseDumps\Bridge\Symfony\Command\:
         resource: '../../Command/*'
-        tags: ['console.command']
+
+    Timbrs\DatabaseDumps\Bridge\Symfony\Command\DumpExportCommand:
+        tags:
+            - { name: 'console.command', command: 'app:dbdump:export' }
+
+    Timbrs\DatabaseDumps\Bridge\Symfony\Command\DbInitCommand:
+        tags:
+            - { name: 'console.command', command: 'app:dbdump:import' }
 
     Timbrs\DatabaseDumps\Bridge\Symfony\Command\PrepareConfigCommand:
         arguments:
             $configPath: '%database_dumps.config_path%'
             $projectDir: '%kernel.project_dir%'
+        tags:
+            - { name: 'console.command', command: 'app:dbdump:prepare-config' }
 
     Timbrs\DatabaseDumps\Bridge\Symfony\Command\ConfigureLlmCommand:
         arguments:
             $projectDir: '%kernel.project_dir%'
+        tags:
+            - { name: 'console.command', command: 'app:dbdump:configure-llm' }
 
     Timbrs\DatabaseDumps\Bridge\Symfony\Command\PrepareAnalysisCommand:
         arguments:
             $projectDir: '%kernel.project_dir%'
             $configPath: '%database_dumps.config_path%'
+        tags:
+            - { name: 'console.command', command: 'app:dbdump:prepare-analysis' }
 
     Timbrs\DatabaseDumps\Bridge\Symfony\Command\ApplyAnalysisCommand:
         arguments:
             $projectDir: '%kernel.project_dir%'
             $configPath: '%database_dumps.config_path%'
+        tags:
+            - { name: 'console.command', command: 'app:dbdump:apply-analysis' }

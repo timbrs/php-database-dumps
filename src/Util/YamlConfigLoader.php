@@ -6,6 +6,7 @@ use Symfony\Component\Yaml\Yaml;
 use Timbrs\DatabaseDumps\Config\DumpConfig;
 use Timbrs\DatabaseDumps\Config\FakerConfig;
 use Timbrs\DatabaseDumps\Contract\ConfigLoaderInterface;
+use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Exception\ConfigNotFoundException;
 
 /**
@@ -16,9 +17,21 @@ use Timbrs\DatabaseDumps\Exception\ConfigNotFoundException;
  *   Все включаемые файлы должны быть в поддереве директории основного конфига.
  * - Yaml::parse вызывается без флага PARSE_OBJECT — встроенная защита от
  *   гаджет-десериализации.
+ *
+ * Устойчивость: ОТСУТСТВУЮЩИЙ include-файл не валит загрузку целиком (иначе одна пропавшая
+ * пер-схемная настройка бракует весь конфиг → в Symfony это роняет регистрацию всех
+ * DB-команд). Такой include пропускается с warning; сама схема просто не попадёт в дамп.
  */
 class YamlConfigLoader implements ConfigLoaderInterface
 {
+    /** @var LoggerInterface|null */
+    private $logger;
+
+    public function __construct(LoggerInterface $logger = null)
+    {
+        $this->logger = $logger;
+    }
+
     public function load(string $path): DumpConfig
     {
         if (!file_exists($path)) {
@@ -99,7 +112,10 @@ class YamlConfigLoader implements ConfigLoaderInterface
             $includePath = $this->resolveSafeIncludePath($configDir, $relativePath);
 
             if (!file_exists($includePath)) {
-                throw ConfigNotFoundException::fileNotFound($includePath);
+                // Пропавший include не должен ронять весь конфиг (и все команды в Symfony) —
+                // пропускаем схему с предупреждением. Основной конфиг отсутствует → см. load() (throw).
+                $this->warnMissingInclude((string) $schema, $includePath);
+                continue;
             }
             $schemaData = Yaml::parseFile($includePath);
             if (!is_array($schemaData)) {
@@ -118,6 +134,27 @@ class YamlConfigLoader implements ConfigLoaderInterface
         }
         unset($data[DumpConfig::KEY_INCLUDES]);
         return $data;
+    }
+
+    /**
+     * Сообщить о пропущенном include-файле: через логгер (если есть), иначе E_USER_WARNING —
+     * чтобы предупреждение было видно и в консоли, и в логах, даже когда логгер не прокинут.
+     *
+     * @param string $schema имя схемы из ключа includes
+     */
+    private function warnMissingInclude(string $schema, string $includePath): void
+    {
+        $message = sprintf(
+            "Пропущен отсутствующий include-файл конфигурации для схемы '%s': %s — схема не войдёт "
+            . 'в дамп. Уберите запись из includes основного конфига или восстановите файл.',
+            $schema,
+            $includePath
+        );
+        if ($this->logger !== null) {
+            $this->logger->warning($message);
+        } else {
+            trigger_error($message, E_USER_WARNING);
+        }
     }
 
     /**
