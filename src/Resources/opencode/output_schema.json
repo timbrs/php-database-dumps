@@ -45,7 +45,7 @@
         "properties": {
           "table": {"type": "string", "description": "schema.table"},
           "name": {"type": "string", "description": "идентификатор сегмента [A-Za-z_][A-Za-z0-9_$]*"},
-          "sql_where": {"type": "string", "description": "валидный WHERE-фрагмент, без ';' и SQL-комментариев"},
+          "sql_where": {"type": "string", "description": "ОДНОТАБЛИЧНЫЙ WHERE-фрагмент: без алиасов таблицы (t1./t2./u.) и JOIN'ов, без bind-параметров (:name/?), только реальные имена колонок из инвентаря (обычно snake_case) и литеральные значения (NOW()/CURRENT_TIMESTAMP для «сейчас»). Другие таблицы — только через EXISTS (SELECT 1 FROM other WHERE ...). Без ';' и SQL-комментариев. Сегменты с алиасом/параметром отбрасываются при применении."},
           "limit": {"type": "integer", "minimum": 1, "description": "квота строк на корзину (необязательно)"},
           "source": {"type": "string", "const": "code"},
           "confidence": {"type": "integer", "minimum": 0, "maximum": 100}

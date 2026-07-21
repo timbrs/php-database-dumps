@@ -92,10 +92,11 @@ class DbdumpConfigStore
 
         $existingLlm = (isset($existing['llm']) && is_array($existing['llm'])) ? $existing['llm'] : [];
         $llm = array_merge($existingLlm, [
-            'enabled' => $config->isEnabled(),
-            'url'     => $config->getUrl(),
-            'model'   => $config->getModel(),
-            'timeout' => $config->getTimeout(),
+            'enabled'    => $config->isEnabled(),
+            'url'        => $config->getUrl(),
+            'model'      => $config->getModel(),
+            'timeout'    => $config->getTimeout(),
+            'verify_ssl' => $config->getVerifySsl(),
         ]);
         unset($llm['token']); // секрет в файл не пишем
 
@@ -195,7 +196,8 @@ class DbdumpConfigStore
                     $fileConfig->getModel(),
                     $token,
                     $fileConfig->getTimeout(),
-                    $fileConfig->isEnabled()
+                    $fileConfig->isEnabled(),
+                    $fileConfig->getVerifySsl()
                 );
             }
             return $fileConfig;

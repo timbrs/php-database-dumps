@@ -8,6 +8,7 @@ use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
+use Timbrs\DatabaseDumps\Service\Analysis\AnalysisRepairLoop;
 use Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher;
 use Timbrs\DatabaseDumps\Service\Analysis\OpencodeRunner;
 
@@ -16,7 +17,8 @@ class PrepareAnalysisCommand extends Command
     /** @var string */
     protected $signature = 'dbdump:prepare-analysis'
         . ' {--c|connection= : Имя подключения (по умолчанию — дефолтное)}'
-        . ' {--run : Сразу запустить OPENCODE по чанку на схему и применить результат — одной командой}';
+        . ' {--run : Сразу запустить OPENCODE по чанку на схему и применить результат — одной командой}'
+        . ' {--repair-attempts=2 : Корректирующих перепрогонов OPENCODE на схему при невалидных criteria (0 — выключить)}';
 
     /** @var string */
     protected $description = 'Подготовить пакет для анализа кода хоста агентом OPENCODE';
@@ -32,6 +34,9 @@ class PrepareAnalysisCommand extends Command
 
     /** @var ConfigEnricher */
     private $enricher;
+
+    /** @var AnalysisRepairLoop */
+    private $repairLoop;
 
     /** @var LoggerInterface */
     private $logger;
@@ -50,6 +55,7 @@ class PrepareAnalysisCommand extends Command
         OpencodeRunner $runner,
         AnalysisIngestor $ingestor,
         ConfigEnricher $enricher,
+        AnalysisRepairLoop $repairLoop,
         LoggerInterface $logger,
         string $projectDir,
         string $configPath,
@@ -60,6 +66,7 @@ class PrepareAnalysisCommand extends Command
         $this->runner = $runner;
         $this->ingestor = $ingestor;
         $this->enricher = $enricher;
+        $this->repairLoop = $repairLoop;
         $this->logger = $logger;
         $this->projectDir = rtrim($projectDir, '/\\');
         $this->configPath = $configPath;
@@ -130,7 +137,7 @@ class PrepareAnalysisCommand extends Command
         $dataDir = $this->configStore->getDataDir($this->projectDir);
         $outRel = $dataDir . '/' . AnalysisPackageBuilder::OUT_DIR;
         $this->info('Этап 2/3 — OPENCODE по схемам');
-        $this->line("Запуск OPENCODE автономно (--dangerously-skip-permissions). Агент пишет только в {$outRel}/.");
+        $this->line("Запуск OPENCODE автономно. Права — из frontmatter агента (read/edit/write/glob/grep/list + узкий allowlist bash). Агент пишет только в {$outRel}/.");
         foreach ($schemaFiles as $schema => $absPath) {
             $relFile = $dataDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.' . $schema . '.json';
             $prompt = "Обработай схему {$schema} по инструкции; результат запиши в {$outRel}/{$schema}.json";
@@ -139,6 +146,12 @@ class PrepareAnalysisCommand extends Command
             if ($code !== 0) {
                 $this->warn("OPENCODE завершился с кодом {$code} для схемы {$schema}");
             }
+        }
+
+        $attempts = (int) $this->option('repair-attempts');
+        if ($attempts > 0) {
+            $this->info("Проверка и авто-исправление criteria (до {$attempts} перепрогонов на схему)");
+            $this->repairLoop->run($dataDir, $schemaFiles, $attempts);
         }
 
         $this->info('Этап 3/3 — применение результата к dump_config.yaml');

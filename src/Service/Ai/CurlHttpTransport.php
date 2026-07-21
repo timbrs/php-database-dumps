@@ -14,7 +14,7 @@ class CurlHttpTransport implements HttpTransportInterface
     /**
      * {@inheritdoc}
      */
-    public function post(string $url, array $headers, string $body, int $timeout): array
+    public function post(string $url, array $headers, string $body, int $timeout, bool $verifySsl = true): array
     {
         if (!function_exists('curl_init')) {
             throw new \RuntimeException('Расширение ext-curl недоступно — LLM-запросы невозможны.');
@@ -31,9 +31,11 @@ class CurlHttpTransport implements HttpTransportInterface
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, min($timeout, 30));
-        // Безопасность: проверяем TLS-сертификат (по умолчанию curl и так это делает).
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
+        // Безопасность: по умолчанию проверяем TLS-сертификат. Проверку можно отключить
+        // ($verifySsl=false) осознанным opt-in'ом — для внутренних эндпоинтов с корпоративным
+        // CA, которого нет в доверенном хранилище PHP-curl (см. AiConfig::getVerifySsl).
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $verifySsl);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $verifySsl ? 2 : 0);
 
         $response = curl_exec($ch);
         $errno = curl_errno($ch);

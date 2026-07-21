@@ -16,6 +16,7 @@ class AiConfigTest extends TestCase
         AiConfig::ENV_TOKEN,
         AiConfig::ENV_TIMEOUT,
         AiConfig::ENV_ENABLED,
+        AiConfig::ENV_VERIFY_SSL,
     ];
 
     protected function setUp(): void
@@ -208,5 +209,39 @@ class AiConfigTest extends TestCase
     {
         $config = AiConfig::fromArray(['url' => '', 'enabled' => false]);
         $this->assertFalse($config->isEnabled());
+    }
+
+    public function testVerifySslDefaultsTrue(): void
+    {
+        $this->assertTrue(AiConfig::fromEnv()->getVerifySsl());
+        $this->assertTrue(AiConfig::fromArray(['url' => 'https://gpt.example.com/v1'])->getVerifySsl());
+        $this->assertTrue((new AiConfig('https://gpt.example.com/v1'))->getVerifySsl());
+    }
+
+    public function testVerifySslFromEnvFalseVariants(): void
+    {
+        foreach (['0', 'false', 'no', 'off'] as $falsy) {
+            putenv(AiConfig::ENV_VERIFY_SSL . '=' . $falsy);
+            $this->assertFalse(AiConfig::fromEnv()->getVerifySsl(), "значение '{$falsy}' должно отключать проверку TLS");
+        }
+        foreach (['1', 'true', 'YES', 'On'] as $truthy) {
+            putenv(AiConfig::ENV_VERIFY_SSL . '=' . $truthy);
+            $this->assertTrue(AiConfig::fromEnv()->getVerifySsl(), "значение '{$truthy}' должно включать проверку TLS");
+        }
+    }
+
+    public function testVerifySslFromArrayAndRoundTrip(): void
+    {
+        $off = AiConfig::fromArray(['url' => 'https://gpt.example.com/v1', 'verify_ssl' => false]);
+        $this->assertFalse($off->getVerifySsl());
+        $this->assertFalse($off->toArray()['verify_ssl']);
+
+        // Строковое 'false' (как из .env/файла) тоже отключает.
+        $offStr = AiConfig::fromArray(['url' => 'https://gpt.example.com/v1', 'verify_ssl' => 'false']);
+        $this->assertFalse($offStr->getVerifySsl());
+
+        $on = AiConfig::fromArray(['url' => 'https://gpt.example.com/v1', 'verify_ssl' => true]);
+        $this->assertTrue($on->getVerifySsl());
+        $this->assertTrue($on->toArray()['verify_ssl']);
     }
 }

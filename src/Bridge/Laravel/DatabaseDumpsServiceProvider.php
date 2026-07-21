@@ -27,6 +27,7 @@ use Timbrs\DatabaseDumps\Service\Ai\AiClientFactory;
 use Timbrs\DatabaseDumps\Service\Ai\CurlHttpTransport;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
+use Timbrs\DatabaseDumps\Service\Analysis\AnalysisRepairLoop;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisReportWriter;
 use Timbrs\DatabaseDumps\Service\Analysis\CodeHintScanner;
@@ -357,6 +358,14 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 (string) $app['config']->get('database-dumps.project_dir')
             );
         });
+        $this->app->singleton(AnalysisRepairLoop::class, function ($app) {
+            return new AnalysisRepairLoop(
+                $app->make(OpencodeRunner::class),
+                $app->make(FileSystemInterface::class),
+                $app->make(LoggerInterface::class),
+                (string) $app['config']->get('database-dumps.project_dir')
+            );
+        });
 
         $this->app->singleton(ConfigureLlmCommand::class, function ($app) {
             return new ConfigureLlmCommand(
@@ -373,6 +382,7 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(OpencodeRunner::class),
                 $app->make(AnalysisIngestor::class),
                 $app->make(ConfigEnricher::class),
+                $app->make(AnalysisRepairLoop::class),
                 $app->make(LoggerInterface::class),
                 $app['config']->get('database-dumps.project_dir'),
                 $app['config']->get('database-dumps.config_path'),

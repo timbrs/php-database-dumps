@@ -91,12 +91,18 @@ class ConfigureLlmCommand extends Command
         $newToken = ($tokenInput === null || $tokenInput === '') ? null : (string) $tokenInput;
         $token = $newToken !== null ? $newToken : $current->getToken();
 
+        $verifySsl = $io->confirm(
+            'Проверять TLS-сертификат сервера LLM? (отключайте только для внутренних эндпоинтов с корпоративным CA)',
+            $current->getVerifySsl()
+        );
+
         $config = AiConfig::fromArray([
             'url' => $url,
             'model' => $model,
             'token' => $token,
             'timeout' => $current->getTimeout(),
             'enabled' => true,
+            'verify_ssl' => $verifySsl,
         ]);
 
         if ($io->confirm('Проверить соединение с LLM сейчас?', true)) {
@@ -112,6 +118,12 @@ class ConfigureLlmCommand extends Command
             } else {
                 $io->writeln('<comment>ОШИБКА:</comment> не удалось соединиться с LLM.');
                 $io->writeln('Причина: ' . ($result['error'] ?? 'неизвестная ошибка'));
+                if ($verifySsl && self::looksLikeSslError((string) ($result['error'] ?? ''))) {
+                    $io->writeln('<comment>Похоже на проблему с TLS-сертификатом.</comment> Если это внутренний '
+                        . 'эндпоинт с корпоративным CA — перезапустите и ответьте «нет» на вопрос про проверку '
+                        . 'TLS-сертификата (или задайте DBDUMP_LLM_VERIFY_SSL=false), либо пропишите корпоративный '
+                        . 'CA в php.ini (curl.cainfo).');
+                }
                 $io->newLine();
                 if (!$io->confirm('Сохранить настройки всё равно?', true)) {
                     $io->writeln('Отменено, ничего не сохранено.');
@@ -158,6 +170,17 @@ class ConfigureLlmCommand extends Command
             return mb_substr($s, 0, 200) . '…';
         }
         return strlen($s) > 200 ? substr($s, 0, 200) . '…' : $s;
+    }
+
+    /**
+     * Похоже ли сообщение об ошибке на проблему проверки TLS-сертификата
+     * (curl 60 / SSL certificate problem) — чтобы подсказать про verify_ssl/CA.
+     */
+    private static function looksLikeSslError(string $error): bool
+    {
+        return stripos($error, 'SSL certificate') !== false
+            || stripos($error, 'unable to get local issuer') !== false
+            || stripos($error, '(60)') !== false;
     }
 
     private static function isValidUrl(string $url): bool

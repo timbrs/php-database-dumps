@@ -133,6 +133,9 @@ services:
     Timbrs\DatabaseDumps\Service\Analysis\OpencodeRunner:
         arguments:
             $projectDir: '%kernel.project_dir%'
+    Timbrs\DatabaseDumps\Service\Analysis\AnalysisRepairLoop:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
     Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher:
         arguments:
             $projectDir: '%kernel.project_dir%'

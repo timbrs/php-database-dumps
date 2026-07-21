@@ -17,9 +17,11 @@ interface HttpTransportInterface
      * @param array<int, string> $headers Заголовки в формате "Name: value" (как CURLOPT_HTTPHEADER)
      * @param string $body Тело запроса (обычно JSON)
      * @param int $timeout Таймаут в секундах
+     * @param bool $verifySsl Проверять TLS-сертификат сервера (default true). false — осознанный
+     *                        opt-in для внутренних эндпоинтов с корпоративным CA (понижает безопасность).
      * @return array{status: int, body: string}
      *
      * @throws \RuntimeException при ошибке транспортного уровня (нет соединения, таймаут и т.п.)
      */
-    public function post(string $url, array $headers, string $body, int $timeout): array;
+    public function post(string $url, array $headers, string $body, int $timeout, bool $verifySsl = true): array;
 }

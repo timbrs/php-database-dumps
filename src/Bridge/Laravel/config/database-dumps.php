@@ -36,6 +36,10 @@ return [
         'timeout' => (int) env('DBDUMP_LLM_TIMEOUT', 120),
         // null = auto (включено, если задан url)
         'enabled' => env('DBDUMP_LLM_ENABLED'),
+        // Проверять TLS-сертификат сервера LLM. Отключайте (false) ТОЛЬКО для внутренних
+        // эндпоинтов с корпоративным CA, которого нет в доверенном хранилище PHP-curl
+        // (ошибка «SSL certificate problem: unable to get local issuer certificate»).
+        'verify_ssl' => env('DBDUMP_LLM_VERIFY_SSL', true),
     ],
 
     /*

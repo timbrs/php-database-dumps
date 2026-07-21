@@ -23,6 +23,7 @@ class DbdumpConfigStoreTest extends TestCase
         AiConfig::ENV_TOKEN,
         AiConfig::ENV_TIMEOUT,
         AiConfig::ENV_ENABLED,
+        AiConfig::ENV_VERIFY_SSL,
         DbdumpConfigStore::ENV_DATA_DIR,
         DbdumpConfigStore::ENV_OPENCODE_BIN,
     ];
@@ -162,6 +163,39 @@ class DbdumpConfigStoreTest extends TestCase
         $config = $store->resolve($this->projectDir);
         $this->assertSame('https://file.example.com/v1', $config->getUrl());
         $this->assertSame('env-secret', $config->getToken());
+    }
+
+    public function testSavePersistsVerifySslAndResolveReadsItBack(): void
+    {
+        $store = $this->store();
+        $store->save($this->projectDir, AiConfig::fromArray([
+            'url' => 'https://file.example.com/v1',
+            'enabled' => true,
+            'verify_ssl' => false,
+        ]));
+
+        $loaded = $store->load($this->projectDir);
+        $this->assertIsArray($loaded);
+        $this->assertFalse($loaded['llm']['verify_ssl']);
+
+        $this->assertFalse($store->resolve($this->projectDir)->getVerifySsl());
+    }
+
+    public function testResolvePreservesVerifySslWhenMergingEnvToken(): void
+    {
+        $store = $this->store();
+        $store->save($this->projectDir, AiConfig::fromArray([
+            'url' => 'https://file.example.com/v1',
+            'enabled' => true,
+            'verify_ssl' => false,
+        ]));
+
+        // Токен из env накладывается поверх file-URL — флаг verify_ssl не должен теряться.
+        putenv(AiConfig::ENV_TOKEN . '=env-secret');
+
+        $config = $store->resolve($this->projectDir);
+        $this->assertSame('env-secret', $config->getToken());
+        $this->assertFalse($config->getVerifySsl());
     }
 
     public function testResolveDisabledInProduction(): void

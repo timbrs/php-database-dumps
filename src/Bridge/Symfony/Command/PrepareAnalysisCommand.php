@@ -12,6 +12,7 @@ use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
+use Timbrs\DatabaseDumps\Service\Analysis\AnalysisRepairLoop;
 use Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher;
 use Timbrs\DatabaseDumps\Service\Analysis\OpencodeRunner;
 
@@ -28,6 +29,9 @@ class PrepareAnalysisCommand extends Command
 
     /** @var ConfigEnricher */
     private $enricher;
+
+    /** @var AnalysisRepairLoop */
+    private $repairLoop;
 
     /** @var string */
     private $projectDir;
@@ -46,6 +50,7 @@ class PrepareAnalysisCommand extends Command
         OpencodeRunner $runner,
         AnalysisIngestor $ingestor,
         ConfigEnricher $enricher,
+        AnalysisRepairLoop $repairLoop,
         string $projectDir,
         string $configPath,
         DbdumpConfigStore $configStore,
@@ -55,6 +60,7 @@ class PrepareAnalysisCommand extends Command
         $this->runner = $runner;
         $this->ingestor = $ingestor;
         $this->enricher = $enricher;
+        $this->repairLoop = $repairLoop;
         $this->projectDir = rtrim($projectDir, '/\\');
         $this->configPath = $configPath;
         $this->configStore = $configStore;
@@ -68,7 +74,8 @@ class PrepareAnalysisCommand extends Command
             ->setName('app:dbdump:prepare-analysis')
             ->setDescription('Подготовить пакет для анализа кода хоста агентом OPENCODE')
             ->addOption('connection', 'c', InputOption::VALUE_REQUIRED, 'Имя подключения (по умолчанию — дефолтное)')
-            ->addOption('run', null, InputOption::VALUE_NONE, 'Сразу запустить OPENCODE (по чанку на схему) и применить результат — всё одной командой');
+            ->addOption('run', null, InputOption::VALUE_NONE, 'Сразу запустить OPENCODE (по чанку на схему) и применить результат — всё одной командой')
+            ->addOption('repair-attempts', null, InputOption::VALUE_REQUIRED, 'Корректирующих перепрогонов OPENCODE на схему при невалидных criteria (0 — выключить)', (string) AnalysisRepairLoop::DEFAULT_MAX_ATTEMPTS);
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -94,7 +101,7 @@ class PrepareAnalysisCommand extends Command
             $io->success(sprintf('Подготовлено файлов: %d (таблиц: %d)', count($result['paths']), $result['tables']));
 
             if ($input->getOption('run')) {
-                return $this->runPipeline($io, $result['schema_files']);
+                return $this->runPipeline($io, $result['schema_files'], (int) $input->getOption('repair-attempts'));
             }
 
             $this->printManualInstructions($io, $result['schema_files']);
@@ -132,7 +139,7 @@ class PrepareAnalysisCommand extends Command
     /**
      * @param array<string, string> $schemaFiles
      */
-    private function runPipeline(SymfonyStyle $io, array $schemaFiles): int
+    private function runPipeline(SymfonyStyle $io, array $schemaFiles, int $repairAttempts): int
     {
         if (!$this->runner->isAvailable()) {
             $io->warning('opencode не найден в PATH — автозапуск невозможен. Запустите вручную:');
@@ -143,7 +150,7 @@ class PrepareAnalysisCommand extends Command
         $dataDir = $this->configStore->getDataDir($this->projectDir);
         $outRel = $dataDir . '/' . AnalysisPackageBuilder::OUT_DIR;
         $io->section('Этап 2/3 — OPENCODE по схемам');
-        $io->note("Запуск OPENCODE автономно (--dangerously-skip-permissions). Агент пишет только в {$outRel}/.");
+        $io->note("Запуск OPENCODE автономно. Права — из frontmatter агента (read/edit/write/glob/grep/list + узкий allowlist bash). Агент пишет только в {$outRel}/.");
         foreach ($schemaFiles as $schema => $absPath) {
             $relFile = $dataDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.' . $schema . '.json';
             $prompt = "Обработай схему {$schema} по инструкции; результат запиши в {$outRel}/{$schema}.json";
@@ -152,6 +159,12 @@ class PrepareAnalysisCommand extends Command
             if ($code !== 0) {
                 $io->warning("OPENCODE завершился с кодом {$code} для схемы {$schema}");
             }
+        }
+
+        if ($repairAttempts > 0) {
+            $io->section('Проверка и авто-исправление criteria');
+            $io->note("Валидация out/*.json (алиасы/параметры/колонки) и до {$repairAttempts} корректирующих перепрогонов на схему.");
+            $this->repairLoop->run($dataDir, $schemaFiles, $repairAttempts);
         }
 
         $io->section('Этап 3/3 — применение результата к dump_config.yaml');

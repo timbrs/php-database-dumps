@@ -160,6 +160,17 @@ class AnalysisIngestor
                 continue;
             }
 
+            if (!$this->isDumpableWhere($where)) {
+                $this->logger->warning(sprintf(
+                    'Пропущен criterion «%s» (%s.%s): WHERE содержит алиас таблицы (t1./t2.) или bind-параметр '
+                    . '(:name) — дампер выполняет однотабличный SELECT без JOIN и без параметров, такой фрагмент упал бы.',
+                    $name,
+                    $table['schema'],
+                    $table['table']
+                ));
+                continue;
+            }
+
             $result['sample_criteria'][] = [
                 'schema' => $table['schema'],
                 'table' => $table['table'],
@@ -170,6 +181,17 @@ class AnalysisIngestor
                 'confidence' => $this->normalizeConfidence($crit['confidence'] ?? null),
             ];
         }
+    }
+
+    /**
+     * Пригоден ли WHERE-фрагмент для однотабличной фазы sample (нет алиасов таблицы и
+     * bind-параметров). Финальная синтаксическая сетка на ингесте: даже если цикл исправления
+     * не догнал мусор от слабой модели, он не попадёт в dump_config.yaml. Проверка колонок
+     * здесь не делается (нет инвентаря) — она в цикле исправления через тот же CriteriaValidator.
+     */
+    private function isDumpableWhere(string $where): bool
+    {
+        return (new CriteriaValidator())->isDumpable($where);
     }
 
     /**

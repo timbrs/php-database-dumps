@@ -113,6 +113,40 @@ class AnalysisIngestorTest extends TestCase
         $this->assertSame('ok', $result['sample_criteria'][0]['name']);
     }
 
+    public function testSkipsCriteriaWithTableAliasOrBindParam(): void
+    {
+        // Слабая модель копирует WHERE прямо из ORM/DQL: алиасы t1./t2./t3. и bind-параметры :name.
+        // Дампер делает однотабличный SELECT без JOIN и без параметров — такие критерии отбрасываются.
+        $json = json_encode([
+            'criteria' => [
+                ['table' => 'users.users', 'name' => 'active', 'sql_where' => 't1.activeFlg = :activeFlg AND :now BETWEEN t1.dateFrom AND t1.dateTo'],
+                ['table' => 'users.users', 'name' => 'alias_only', 'sql_where' => 't2.workStatus = 1'],
+                ['table' => 'users.users', 'name' => 'param_only', 'sql_where' => "login = :login"],
+                ['table' => 'users.users', 'name' => 'clean', 'sql_where' => "active_flg = 1 AND NOW() BETWEEN date_from AND date_to"],
+            ],
+        ]);
+
+        $result = $this->ingestorWith(['/out/users.json' => (string) $json])->ingest('/out');
+
+        // Остаётся только валидный однотабличный критерий.
+        $this->assertCount(1, $result['sample_criteria']);
+        $this->assertSame('clean', $result['sample_criteria'][0]['name']);
+    }
+
+    public function testKeepsCriteriaWithCastAndTimeLiteral(): void
+    {
+        // Postgres-каст ::text и время '12:30:00' НЕ должны ложно приниматься за bind-параметр.
+        $json = json_encode([
+            'criteria' => [
+                ['table' => 'public.events', 'name' => 'cast', 'sql_where' => "status::text = 'active'"],
+                ['table' => 'public.events', 'name' => 'time_literal', 'sql_where' => "created_at::time > '12:30:00'"],
+            ],
+        ]);
+
+        $result = $this->ingestorWith(['/out/public.json' => (string) $json])->ingest('/out');
+        $this->assertCount(2, $result['sample_criteria']);
+    }
+
     public function testSkipsInvalidJsonFile(): void
     {
         $result = $this->ingestorWith(['/out/broken.json' => 'not json {'])->ingest('/out');

@@ -335,4 +335,36 @@ class OpenAiClientTest extends TestCase
         $result = $client->ping();
         $this->assertFalse($result['ok']);
     }
+
+    public function testChatPassesVerifySslFlagToTransport(): void
+    {
+        $transport = $this->createMock(HttpTransportInterface::class);
+        $transport
+            ->expects($this->once())
+            ->method('post')
+            ->with(
+                $this->anything(),
+                $this->anything(),
+                $this->anything(),
+                $this->anything(),
+                false // verify_ssl отключён в конфиге → прокидывается 5-м аргументом в транспорт
+            )
+            ->willReturn(['status' => 200, 'body' => $this->chatResponseBody('ok')]);
+
+        $insecure = new AiConfig('https://gpt.example.com/v1', 'm', 'tok', 120, true, false);
+        $this->client($transport, $insecure)->chat([['role' => 'user', 'content' => 'hi']]);
+    }
+
+    public function testPingPassesVerifySslFlagToTransport(): void
+    {
+        $transport = $this->createMock(HttpTransportInterface::class);
+        $transport
+            ->expects($this->once())
+            ->method('post')
+            ->with($this->anything(), $this->anything(), $this->anything(), $this->anything(), false)
+            ->willReturn(['status' => 200, 'body' => $this->chatResponseBody('pong')]);
+
+        $insecure = new AiConfig('https://gpt.example.com/v1', 'm', 'tok', 120, true, false);
+        $this->assertTrue($this->client($transport, $insecure)->ping()['ok']);
+    }
 }

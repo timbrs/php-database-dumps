@@ -96,7 +96,7 @@ class OpenAiClient implements AiClientInterface
             ));
 
             try {
-                $result = $this->transport->post($url, $headers, $payload, $this->config->getTimeout());
+                $result = $this->transport->post($url, $headers, $payload, $this->config->getTimeout(), $this->config->getVerifySsl());
             } catch (\RuntimeException $e) {
                 $lastError = $e->getMessage();
                 $this->warn(sprintf('LLM попытка %d: %s', $attempt + 1, $lastError));
@@ -152,7 +152,7 @@ class OpenAiClient implements AiClientInterface
 
         $timeout = min($this->config->getTimeout(), 30);
         try {
-            $result = $this->transport->post($url, $headers, $payload, $timeout);
+            $result = $this->transport->post($url, $headers, $payload, $timeout, $this->config->getVerifySsl());
         } catch (\RuntimeException $e) {
             return ['ok' => false, 'error' => $e->getMessage()];
         }
