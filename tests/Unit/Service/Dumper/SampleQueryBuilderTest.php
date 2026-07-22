@@ -365,4 +365,77 @@ class SampleQueryBuilderTest extends TestCase
         $this->expectException(\InvalidArgumentException::class);
         $this->builder()->build($config);
     }
+
+    public function testPreFiltersAliasCriterionButKeepsValid(): void
+    {
+        // Битый criterion с алиасом t1. отсеивается ДО запроса; валидный отрабатывает.
+        $this->pkInspector->method('getPrimaryKeyColumns')->willReturn(['id']);
+        $this->connection->method('fetchFirstColumn')->willReturnCallback(function ($sql) {
+            $this->capturedSql[] = $sql;
+            return [1, 2];
+        });
+
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'bad', 'where' => 't1.active_flg = 1', 'limit' => 10],
+                ['name' => 'ok', 'where' => "status = 'red'", 'limit' => 10],
+            ],
+        ];
+        $config = new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+        $phase2 = $this->builder()->build($config);
+
+        // Ровно один запрос — по валидному criterion; алиасный не исполнялся.
+        $this->assertCount(1, $this->capturedSql);
+        $this->assertStringContainsString("status = 'red'", $this->capturedSql[0]);
+        $this->assertStringNotContainsString('t1.', $this->capturedSql[0]);
+        $this->assertStringContainsString("IN ('1', '2')", $phase2);
+    }
+
+    public function testFailingCriterionSkippedAtRuntime(): void
+    {
+        // Criterion проходит пре-фильтр (нет алиаса/параметра), но падает в БД (несуществующая
+        // колонка) — ловим, пропускаем, продолжаем валидным. Экспорт не падает.
+        $this->pkInspector->method('getPrimaryKeyColumns')->willReturn(['id']);
+        $this->connection->method('fetchFirstColumn')->willReturnCallback(function ($sql) {
+            $this->capturedSql[] = $sql;
+            if (strpos($sql, 'activeflg') !== false) {
+                throw new \RuntimeException('SQLSTATE[42703]: column "activeflg" does not exist');
+            }
+            return [9];
+        });
+
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'bad', 'where' => 'activeflg = 1', 'limit' => 10],
+                ['name' => 'ok', 'where' => "status = 'red'", 'limit' => 10],
+            ],
+        ];
+        $config = new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+        $phase2 = $this->builder()->build($config);
+
+        $this->assertStringContainsString("IN ('9')", $phase2);
+    }
+
+    public function testAllCriteriaInvalidFallsBackToLimit(): void
+    {
+        // Все criteria непригодны (алиас) → плоский срез по limit, а не пустая таблица.
+        $this->pkInspector->method('getPrimaryKeyColumns')->willReturn(['id']);
+        $this->connection->method('fetchFirstColumn')->willReturnCallback(function ($sql) {
+            $this->capturedSql[] = $sql;
+            return [11, 12];
+        });
+
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'bad', 'where' => 't1.active_flg = 1', 'limit' => 10],
+            ],
+        ];
+        $config = new TableConfig('public', 'clients', 100, null, null, null, null, null, $sample);
+        $phase2 = $this->builder()->build($config);
+
+        // Фолбэк-запрос: плоский срез WHERE (1 = 1) LIMIT 100.
+        $this->assertCount(1, $this->capturedSql);
+        $this->assertStringContainsString('WHERE (1 = 1) LIMIT 100', $this->capturedSql[0]);
+        $this->assertStringContainsString("IN ('11', '12')", $phase2);
+    }
 }

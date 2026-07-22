@@ -7,6 +7,7 @@ use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
 use Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface;
 use Timbrs\DatabaseDumps\Contract\DatabasePlatformInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
+use Timbrs\DatabaseDumps\Service\Analysis\CriteriaValidator;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\PrimaryKeyInspector;
 
 /**
@@ -30,6 +31,9 @@ class SampleQueryBuilder
 {
     /** Потолок на число корзин при разворачивании stratify_by. */
     public const MAX_STRATIFY_BUCKETS = 50;
+
+    /** Лимит плоского среза, когда все criteria непригодны, а limit таблицы не задан. */
+    public const FALLBACK_LIMIT = 1000;
 
     /** @var ConnectionRegistryInterface */
     private $registry;
@@ -89,18 +93,33 @@ class SampleQueryBuilder
         $selectedRows = [];
         /** @var array<string, true> $seen ключ дедупа */
         $seen = [];
+        $executed = 0;
 
         foreach ($criteria as $criterion) {
-            $rows = $this->fetchCriterionRows(
-                $connection,
-                $platform,
-                $fullTable,
-                $pkColumns,
-                $baseWhere,
-                $criterion['where'],
-                $orderBy,
-                (int) $criterion['limit']
-            );
+            // Устойчивость: битый criterion (напр. сгенерированный из ORM/DQL с алиасами t1./
+            // bind-параметрами, если он всё же просочился в конфиг) НЕ должен ронять экспорт всей
+            // таблицы. Ловим ошибку, пропускаем этот criterion, продолжаем остальными.
+            try {
+                $rows = $this->fetchCriterionRows(
+                    $connection,
+                    $platform,
+                    $fullTable,
+                    $pkColumns,
+                    $baseWhere,
+                    $criterion['where'],
+                    $orderBy,
+                    (int) $criterion['limit']
+                );
+            } catch (\Throwable $e) {
+                $this->warn(sprintf(
+                    'sample: %s — criterion пропущен (WHERE «%s»): %s',
+                    $fullTable,
+                    $criterion['where'],
+                    $this->shortError($e->getMessage())
+                ));
+                continue;
+            }
+            $executed++;
             foreach ($rows as $pkRow) {
                 $key = $this->rowKey($pkRow, $pkColumns);
                 if (isset($seen[$key])) {
@@ -109,6 +128,19 @@ class SampleQueryBuilder
                 $seen[$key] = true;
                 $selectedRows[] = $pkRow;
             }
+        }
+
+        // Все критерии упали (или отсеяны), но выборка по критериям задавалась → не выгружаем
+        // пустую таблицу: берём плоский срез по base + limit (обычная лимитированная выборка).
+        $hadCriteria = isset($sample[TableConfig::SAMPLE_KEY_CRITERIA])
+            && is_array($sample[TableConfig::SAMPLE_KEY_CRITERIA])
+            && !empty($sample[TableConfig::SAMPLE_KEY_CRITERIA]);
+        if ($executed === 0 && empty($selectedRows) && $hadCriteria) {
+            $selectedRows = $this->fetchFallbackRows($connection, $platform, $fullTable, $pkColumns, $baseWhere, $orderBy, $config->getLimit());
+            $this->warn(sprintf(
+                'sample: %s — все criteria непригодны, выгрузка плоским срезом по limit',
+                $fullTable
+            ));
         }
 
         // Общий потолок на объединённую выборку.
@@ -142,9 +174,17 @@ class SampleQueryBuilder
 
         $criteria = $sample[TableConfig::SAMPLE_KEY_CRITERIA] ?? [];
         if (is_array($criteria)) {
+            $validator = new CriteriaValidator();
             foreach ($criteria as $entry) {
+                $where = (string) $entry[TableConfig::CRITERION_KEY_WHERE];
+                // Заведомо непригодный (алиас t1./bind-параметр :name) — не тратим на него запрос к БД.
+                $problems = $validator->syntaxProblems($where);
+                if (!empty($problems)) {
+                    $this->warn(sprintf('sample: %s — criterion пропущен (%s): «%s»', $fullTable, implode('; ', $problems), $where));
+                    continue;
+                }
                 $result[] = [
-                    'where' => (string) $entry[TableConfig::CRITERION_KEY_WHERE],
+                    'where' => $where,
                     'limit' => (int) $entry[TableConfig::CRITERION_KEY_LIMIT],
                 ];
             }
@@ -330,6 +370,48 @@ class SampleQueryBuilder
                 count($selectedRows)
             ));
         }
+    }
+
+    /**
+     * Плоский срез PK по base + limit — фолбэк, когда все criteria непригодны (чтобы не
+     * выгрузить пустую таблицу). Эквивалент обычной лимитированной выборки.
+     *
+     * @param array<int, string> $pkColumns
+     * @return array<int, array<string, mixed>>
+     */
+    private function fetchFallbackRows(
+        DatabaseConnectionInterface $connection,
+        DatabasePlatformInterface $platform,
+        string $fullTable,
+        array $pkColumns,
+        ?string $baseWhere,
+        ?string $orderBy,
+        ?int $limit
+    ): array {
+        $cap = ($limit !== null && $limit > 0) ? $limit : self::FALLBACK_LIMIT;
+        return $this->fetchCriterionRows($connection, $platform, $fullTable, $pkColumns, $baseWhere, '1 = 1', $orderBy, $cap);
+    }
+
+    private function warn(string $message): void
+    {
+        if ($this->logger !== null) {
+            $this->logger->warning($message);
+        }
+    }
+
+    /**
+     * Первая строка ошибки БД, схлопнутые пробелы, обрезка — для читаемого лога/промпта.
+     */
+    private function shortError(string $message): string
+    {
+        $line = strtok($message, "\n");
+        $line = $line === false ? $message : $line;
+        $collapsed = preg_replace('/\s+/', ' ', trim($line));
+        $line = $collapsed === null ? $line : $collapsed;
+        if (function_exists('mb_strlen') && mb_strlen($line) > 200) {
+            return mb_substr($line, 0, 200) . '…';
+        }
+        return strlen($line) > 200 ? substr($line, 0, 200) . '…' : $line;
     }
 
     /**

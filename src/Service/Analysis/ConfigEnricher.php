@@ -195,20 +195,27 @@ class ConfigEnricher
                 $criteriaList = [];
             }
 
-            // Пропускаем, если критерий с таким name уже есть.
-            $duplicate = false;
-            foreach ($criteriaList as $existingCrit) {
+            // Дедуп по name. Валидный одноимённый — в приоритете (пользовательский/корректный).
+            // Но если существующий СИНТАКСИЧЕСКИ БИТЫЙ (алиас t1./bind-параметр — попал в конфиг
+            // на старой версии до барьера), заменяем его исправленным: новый прошёл ингест-барьер,
+            // значит заведомо пригоден. Так конфиг само-лечится на повторном прогоне.
+            $replaceIdx = null;
+            foreach ($criteriaList as $i => $existingCrit) {
                 if (is_array($existingCrit) && ($existingCrit['name'] ?? null) === $name) {
-                    $duplicate = true;
+                    $existingWhere = (string) ($existingCrit['where'] ?? '');
+                    if ((new CriteriaValidator())->isDumpable($existingWhere)) {
+                        continue 2; // валидный одноимённый — пропускаем новый
+                    }
+                    $replaceIdx = $i;
                     break;
                 }
-            }
-            if ($duplicate) {
-                continue;
             }
 
             $newCriterion = ['name' => $name, 'where' => $where, 'limit' => $limit];
             $candidateList = $criteriaList;
+            if ($replaceIdx !== null) {
+                array_splice($candidateList, (int) $replaceIdx, 1);
+            }
             $candidateList[] = $newCriterion;
             $candidateSample = $sample;
             $candidateSample[TableConfig::SAMPLE_KEY_CRITERIA] = $candidateList;

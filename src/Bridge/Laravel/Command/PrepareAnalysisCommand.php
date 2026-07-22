@@ -150,8 +150,10 @@ class PrepareAnalysisCommand extends Command
 
         $attempts = (int) $this->option('repair-attempts');
         if ($attempts > 0) {
-            $this->info("Проверка и авто-исправление criteria (до {$attempts} перепрогонов на схему)");
-            $this->repairLoop->run($dataDir, $schemaFiles, $attempts);
+            $connection = $this->option('connection');
+            $connectionName = ($connection !== null && $connection !== '') ? (string) $connection : null;
+            $this->info("Прогон каждого criterion в БД и до {$attempts} корректирующих перепрогонов на схему");
+            $this->repairLoop->run($dataDir, $schemaFiles, $attempts, $connectionName);
         }
 
         $this->info('Этап 3/3 — применение результата к dump_config.yaml');

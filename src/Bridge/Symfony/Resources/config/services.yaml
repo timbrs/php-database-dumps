@@ -130,6 +130,7 @@ services:
         arguments:
             $projectDir: '%kernel.project_dir%'
     Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor: ~
+    Timbrs\DatabaseDumps\Service\Analysis\CriteriaSqlTester: ~
     Timbrs\DatabaseDumps\Service\Analysis\OpencodeRunner:
         arguments:
             $projectDir: '%kernel.project_dir%'
@@ -137,6 +138,9 @@ services:
         arguments:
             $projectDir: '%kernel.project_dir%'
     Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+    Timbrs\DatabaseDumps\Service\Analysis\ConfigCriteriaRepairer:
         arguments:
             $projectDir: '%kernel.project_dir%'
 
@@ -200,3 +204,9 @@ services:
             $configPath: '%database_dumps.config_path%'
         tags:
             - { name: 'console.command', command: 'app:dbdump:apply-analysis' }
+
+    Timbrs\DatabaseDumps\Bridge\Symfony\Command\RepairConfigsCommand:
+        arguments:
+            $configPath: '%database_dumps.config_path%'
+        tags:
+            - { name: 'console.command', command: 'app:dbdump:repair-configs' }

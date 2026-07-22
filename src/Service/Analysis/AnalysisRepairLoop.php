@@ -8,15 +8,14 @@ use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 /**
  * Цикл исправления вывода агента OPENCODE после первичного прогона.
  *
- * После того как агент записал database/analysis/out/<schema>.json, валидируем sample.criteria
- * (синтаксис + сверка колонок с инвентарём). Если есть невалидные — формируем КОРРЕКТИРУЮЩИЙ
- * промпт (конкретные битые criteria + причины + реальные колонки) и ПЕРЕЗАПУСКАЕМ агента по этой
- * схеме свежим прогоном (stateless — не зависит от resume/session opencode). Повторяем до
- * $maxAttempts раз, перепроверяя результат. Что не удалось исправить — финальная сетка
- * AnalysisIngestor отбросит на применении (в dump_config.yaml мусор не попадёт).
+ * После того как агент записал database/analysis/out/<schema>.json, ПРОГОНЯЕМ каждый sample.criterion
+ * в БД так же, как это сделает дампер (SELECT 1 FROM schema.table WHERE (<where>) LIMIT 1, см.
+ * CriteriaSqlTester). Упавшие + реальную ошибку СУБД отдаём агенту КОРОТКИМ корректирующим промптом
+ * и ПЕРЕЗАПУСКАЕМ его свежим прогоном (stateless — не зависит от resume/session opencode). Повторяем
+ * до $maxAttempts раз. Что не исправлено — финальная сетка AnalysisIngestor отбросит на применении.
  *
- * Экспорт-модель дампера: SELECT <pk> FROM schema.table WHERE (base) AND (<sql_where>) — без
- * алиасов/JOIN/параметров, поэтому WHERE из ORM/DQL напрямую непригоден (см. CriteriaValidator).
+ * Реальный прогон SQL точнее статической эвристики: ловит и алиасы t1./bind-параметры, и
+ * несуществующие колонки (camelCase), и синтаксис — с настоящим текстом ошибки для агента.
  */
 class AnalysisRepairLoop
 {
@@ -32,26 +31,27 @@ class AnalysisRepairLoop
     /** @var FileSystemInterface */
     private $fileSystem;
 
+    /** @var CriteriaSqlTester */
+    private $sqlTester;
+
     /** @var LoggerInterface */
     private $logger;
 
     /** @var string */
     private $projectDir;
 
-    /** @var CriteriaValidator */
-    private $validator;
-
     public function __construct(
         OpencodeRunner $runner,
         FileSystemInterface $fileSystem,
+        CriteriaSqlTester $sqlTester,
         LoggerInterface $logger,
         string $projectDir
     ) {
         $this->runner = $runner;
         $this->fileSystem = $fileSystem;
+        $this->sqlTester = $sqlTester;
         $this->logger = $logger;
         $this->projectDir = rtrim($projectDir, '/\\');
-        $this->validator = new CriteriaValidator();
     }
 
     /**
@@ -59,8 +59,9 @@ class AnalysisRepairLoop
      *
      * @param array<string, string> $schemaFiles schema => абсолютный путь пер-схемного инвентаря
      * @param int                   $maxAttempts  максимум корректирующих перепрогонов на схему
+     * @param string|null           $connectionName подключение, в котором прогонять criteria
      */
-    public function run(string $dataDir, array $schemaFiles, int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS): void
+    public function run(string $dataDir, array $schemaFiles, int $maxAttempts = self::DEFAULT_MAX_ATTEMPTS, ?string $connectionName = null): void
     {
         if ($maxAttempts < 1) {
             return;
@@ -68,11 +69,11 @@ class AnalysisRepairLoop
 
         foreach ($schemaFiles as $schema => $inventoryAbs) {
             $schema = (string) $schema;
-            $this->repairSchema($schema, (string) $inventoryAbs, $dataDir, $maxAttempts);
+            $this->repairSchema($schema, (string) $inventoryAbs, $dataDir, $maxAttempts, $connectionName);
         }
     }
 
-    private function repairSchema(string $schema, string $inventoryAbs, string $dataDir, int $maxAttempts): void
+    private function repairSchema(string $schema, string $inventoryAbs, string $dataDir, int $maxAttempts, ?string $connectionName): void
     {
         $outAbs = $this->projectDir . '/' . $dataDir . '/' . AnalysisPackageBuilder::OUT_DIR . '/' . $schema . '.json';
         $relInventory = $dataDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.' . $schema . '.json';
@@ -85,7 +86,7 @@ class AnalysisRepairLoop
         $columns = $this->loadColumns($inventoryAbs);
 
         for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
-            $problems = $this->validateOutFile($outAbs, $columns);
+            $problems = $this->validateOutFile($outAbs, $connectionName);
             if (empty($problems)) {
                 if ($attempt > 1) {
                     $this->logger->info(sprintf('  <info>%s</info>: criteria исправлены после перепрогона', $schema));
@@ -109,7 +110,7 @@ class AnalysisRepairLoop
         }
 
         // Финальная проверка после исчерпания попыток.
-        $left = $this->validateOutFile($outAbs, $columns);
+        $left = $this->validateOutFile($outAbs, $connectionName);
         if (!empty($left)) {
             $this->logger->warning(sprintf(
                 '  %s: осталось %d невалидных criteria после %d попыток — будут отброшены при применении (%s)',
@@ -122,12 +123,12 @@ class AnalysisRepairLoop
     }
 
     /**
-     * Проверить criteria в out/<schema>.json. Возвращает список проблем по критериям.
+     * Прогнать каждый criterion из out/<schema>.json в БД (как дампер). Возвращает список упавших
+     * с реальной ошибкой СУБД.
      *
-     * @param array<string, array<int, string>> $columns  schema.table => [колонки]
-     * @return array<int, array{table: string, name: string, where: string, issues: array<int, string>}>
+     * @return array<int, array{table: string, name: string, where: string, error: string}>
      */
-    private function validateOutFile(string $outAbs, array $columns): array
+    private function validateOutFile(string $outAbs, ?string $connectionName): array
     {
         try {
             $raw = $this->fileSystem->read($outAbs);
@@ -148,13 +149,14 @@ class AnalysisRepairLoop
             $table = isset($crit['table']) && is_string($crit['table']) ? $crit['table'] : '';
             $name = isset($crit['name']) && is_string($crit['name']) ? $crit['name'] : '';
             $where = isset($crit['sql_where']) && is_string($crit['sql_where']) ? $crit['sql_where'] : '';
-            if ($where === '') {
+            if ($where === '' || strpos($table, '.') === false) {
                 continue;
             }
+            list($schema, $tableName) = explode('.', $table, 2);
 
-            $issues = $this->validator->problems($where, $columns[$table] ?? []);
-            if (!empty($issues)) {
-                $problems[] = ['table' => $table, 'name' => $name, 'where' => $where, 'issues' => $issues];
+            $error = $this->sqlTester->test($schema, $tableName, $where, $connectionName);
+            if ($error !== null) {
+                $problems[] = ['table' => $table, 'name' => $name, 'where' => $where, 'error' => $error];
             }
         }
 
@@ -162,21 +164,18 @@ class AnalysisRepairLoop
     }
 
     /**
-     * Корректирующий промпт: перечисляем битые criteria с причинами и реальными колонками,
-     * просим переписать ТОЛЬКО их (или удалить неисправимые), сохранив остальное.
+     * Короткий корректирующий промпт: эти criteria упали в БД (реальная ошибка) — исправь или удали.
      *
-     * @param array<int, array{table: string, name: string, where: string, issues: array<int, string>}> $problems
+     * @param array<int, array{table: string, name: string, where: string, error: string}> $problems
      * @param array<string, array<int, string>> $columns
      */
     private function buildCorrectivePrompt(string $schema, array $problems, array $columns): string
     {
         $lines = [];
         $lines[] = sprintf(
-            'В файле database/analysis/out/%s.json часть sql_where НЕВАЛИДНА для дампера. Он выполняет '
-            . 'ОДНОТАБЛИЧНЫЙ запрос: SELECT <pk> FROM schema.table WHERE (base) AND (<sql_where>) — без алиасов '
-            . 'таблицы, без JOIN и без bind-параметров. СНАЧАЛА открой этот файл инструментом read (он уже '
-            . 'существует — opencode запрещает перезапись без предварительного read), исправь ТОЛЬКО '
-            . 'перечисленные ниже criteria и перезапиши файл через write (остальное содержимое сохрани как есть):',
+            'Эти criteria в database/analysis/out/%s.json падают в БД (дампер выполняет SELECT ... FROM '
+            . 'таблица WHERE (sql_where) — без алиасов, JOIN и bind-параметров). Сначала read этого файла, '
+            . 'исправь ТОЛЬКО их и перезапиши write (остальное сохрани):',
             $schema
         );
 
@@ -184,22 +183,13 @@ class AnalysisRepairLoop
             $cols = isset($columns[$p['table']]) ? $columns[$p['table']] : [];
             $colHint = empty($cols)
                 ? ''
-                : ' Колонки ' . $p['table'] . ': ' . implode(', ', array_slice($cols, 0, self::MAX_PROMPT_COLUMNS))
+                : ' Колонки: ' . implode(', ', array_slice($cols, 0, self::MAX_PROMPT_COLUMNS))
                     . (count($cols) > self::MAX_PROMPT_COLUMNS ? ', …' : '') . '.';
-            $lines[] = sprintf(
-                "- %s / '%s': %s.%s Текущий (битый) WHERE: %s",
-                $p['table'],
-                $p['name'],
-                implode('; ', $p['issues']),
-                $colHint,
-                $p['where']
-            );
+            $lines[] = sprintf("- %s/'%s': %s%s", $p['table'], $p['name'], $p['error'], $colHint);
         }
 
-        $lines[] = 'Правила: без алиасов (t1./t2./u.), без bind-параметров (:name/?), только реальные имена '
-            . 'колонок из списков выше (обычно snake_case) и литеральные значения (NOW()/CURRENT_TIMESTAMP для '
-            . '«сейчас», enum-статус строкой или числом). Если сегмент нельзя выразить статическим SQL '
-            . '(нужен id/логин текущего пользователя, список id из рантайма) — УДАЛИ его из массива criteria.';
+        $lines[] = 'Используй реальные имена колонок и литералы (NOW() для «сейчас», enum строкой/числом). '
+            . 'Если нужен рантайм-параметр (id/логин текущего пользователя) — просто УДАЛИ criterion.';
 
         return implode("\n", $lines);
     }
@@ -250,7 +240,7 @@ class AnalysisRepairLoop
     /**
      * Свести имена оставшихся битых критериев в строку для лога.
      *
-     * @param array<int, array{table: string, name: string, where: string, issues: array<int, string>}> $problems
+     * @param array<int, array{table: string, name: string, where: string, error: string}> $problems
      */
     private function summarizeProblemNames(array $problems): string
     {

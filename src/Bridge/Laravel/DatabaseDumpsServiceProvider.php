@@ -5,6 +5,7 @@ namespace Timbrs\DatabaseDumps\Bridge\Laravel;
 use Illuminate\Support\ServiceProvider;
 use Timbrs\DatabaseDumps\Adapter\LaravelDatabaseAdapter;
 use Timbrs\DatabaseDumps\Bridge\Laravel\Command\ApplyAnalysisCommand;
+use Timbrs\DatabaseDumps\Bridge\Laravel\Command\RepairConfigsCommand;
 use Timbrs\DatabaseDumps\Bridge\Laravel\Command\ConfigureLlmCommand;
 use Timbrs\DatabaseDumps\Bridge\Laravel\Command\DbInitCommand;
 use Timbrs\DatabaseDumps\Bridge\Laravel\Command\DumpExportCommand;
@@ -28,9 +29,11 @@ use Timbrs\DatabaseDumps\Service\Ai\CurlHttpTransport;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisRepairLoop;
+use Timbrs\DatabaseDumps\Service\Analysis\CriteriaSqlTester;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisReportWriter;
 use Timbrs\DatabaseDumps\Service\Analysis\CodeHintScanner;
+use Timbrs\DatabaseDumps\Service\Analysis\ConfigCriteriaRepairer;
 use Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher;
 use Timbrs\DatabaseDumps\Service\Analysis\OpencodeRunner;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ColumnStatisticsInspector;
@@ -358,10 +361,14 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 (string) $app['config']->get('database-dumps.project_dir')
             );
         });
+        $this->app->singleton(CriteriaSqlTester::class, function ($app) {
+            return new CriteriaSqlTester($app->make(ConnectionRegistryInterface::class));
+        });
         $this->app->singleton(AnalysisRepairLoop::class, function ($app) {
             return new AnalysisRepairLoop(
                 $app->make(OpencodeRunner::class),
                 $app->make(FileSystemInterface::class),
+                $app->make(CriteriaSqlTester::class),
                 $app->make(LoggerInterface::class),
                 (string) $app['config']->get('database-dumps.project_dir')
             );
@@ -397,6 +404,27 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app['config']->get('database-dumps.project_dir'),
                 $app['config']->get('database-dumps.config_path'),
                 $app->make(DbdumpConfigStore::class)
+            );
+        });
+        $this->app->singleton(ConfigCriteriaRepairer::class, function ($app) {
+            return new ConfigCriteriaRepairer(
+                $app->make(FileSystemInterface::class),
+                $app->make(ConfigLoaderInterface::class),
+                $app->make(CriteriaSqlTester::class),
+                $app->make(OpencodeRunner::class),
+                $app->make(AnalysisRepairLoop::class),
+                $app->make(AnalysisIngestor::class),
+                $app->make(ConfigEnricher::class),
+                $app->make(LoggerInterface::class),
+                (string) $app['config']->get('database-dumps.project_dir'),
+                $app->make(DbdumpConfigStore::class)
+            );
+        });
+        $this->app->singleton(RepairConfigsCommand::class, function ($app) {
+            return new RepairConfigsCommand(
+                $app->make(ConfigCriteriaRepairer::class),
+                $app['config']->get('database-dumps.config_path'),
+                $app->make(LoggerInterface::class)
             );
         });
 
@@ -448,6 +476,7 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 ConfigureLlmCommand::class,
                 PrepareAnalysisCommand::class,
                 ApplyAnalysisCommand::class,
+                RepairConfigsCommand::class,
             ]);
         }
     }

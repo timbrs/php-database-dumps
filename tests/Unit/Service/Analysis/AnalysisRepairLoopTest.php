@@ -6,6 +6,7 @@ use PHPUnit\Framework\TestCase;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisRepairLoop;
+use Timbrs\DatabaseDumps\Service\Analysis\CriteriaSqlTester;
 use Timbrs\DatabaseDumps\Service\Analysis\OpencodeRunner;
 
 class AnalysisRepairLoopTest extends TestCase
@@ -71,9 +72,33 @@ class AnalysisRepairLoopTest extends TestCase
         return $fs;
     }
 
-    private function loop(FileSystemInterface $fs, OpencodeRunner $runner, ?LoggerInterface $logger = null): AnalysisRepairLoop
+    /**
+     * Мок SQL-тестера: симулирует БД — алиас t1., bind-параметр :name или несуществующая
+     * колонка activeFlg → ошибка; иначе null (criterion исполнился).
+     */
+    private function sqlTester(): CriteriaSqlTester
     {
-        return new AnalysisRepairLoop($runner, $fs, $logger ?? $this->createMock(LoggerInterface::class), self::PROJECT);
+        $tester = $this->createMock(CriteriaSqlTester::class);
+        $tester->method('test')->willReturnCallback(function ($schema, $table, $where) {
+            if (strpos((string) $where, 't1.') !== false
+                || (bool) preg_match('/(?<![:\w]):[A-Za-z_]/', (string) $where)
+                || strpos((string) $where, 'activeFlg') !== false) {
+                return 'ERROR: 42P01 bad criterion';
+            }
+            return null;
+        });
+        return $tester;
+    }
+
+    private function loop(FileSystemInterface $fs, OpencodeRunner $runner, ?LoggerInterface $logger = null, ?CriteriaSqlTester $tester = null): AnalysisRepairLoop
+    {
+        return new AnalysisRepairLoop(
+            $runner,
+            $fs,
+            $tester ?? $this->sqlTester(),
+            $logger ?? $this->createMock(LoggerInterface::class),
+            self::PROJECT
+        );
     }
 
     /**

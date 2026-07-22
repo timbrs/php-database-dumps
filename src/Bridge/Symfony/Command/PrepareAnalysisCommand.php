@@ -101,7 +101,12 @@ class PrepareAnalysisCommand extends Command
             $io->success(sprintf('Подготовлено файлов: %d (таблиц: %d)', count($result['paths']), $result['tables']));
 
             if ($input->getOption('run')) {
-                return $this->runPipeline($io, $result['schema_files'], (int) $input->getOption('repair-attempts'));
+                return $this->runPipeline(
+                    $io,
+                    $result['schema_files'],
+                    (int) $input->getOption('repair-attempts'),
+                    $connection !== null ? (string) $connection : null
+                );
             }
 
             $this->printManualInstructions($io, $result['schema_files']);
@@ -139,7 +144,7 @@ class PrepareAnalysisCommand extends Command
     /**
      * @param array<string, string> $schemaFiles
      */
-    private function runPipeline(SymfonyStyle $io, array $schemaFiles, int $repairAttempts): int
+    private function runPipeline(SymfonyStyle $io, array $schemaFiles, int $repairAttempts, ?string $connectionName): int
     {
         if (!$this->runner->isAvailable()) {
             $io->warning('opencode не найден в PATH — автозапуск невозможен. Запустите вручную:');
@@ -163,8 +168,8 @@ class PrepareAnalysisCommand extends Command
 
         if ($repairAttempts > 0) {
             $io->section('Проверка и авто-исправление criteria');
-            $io->note("Валидация out/*.json (алиасы/параметры/колонки) и до {$repairAttempts} корректирующих перепрогонов на схему.");
-            $this->repairLoop->run($dataDir, $schemaFiles, $repairAttempts);
+            $io->note("Прогон каждого criterion в БД и до {$repairAttempts} корректирующих перепрогонов агента на схему.");
+            $this->repairLoop->run($dataDir, $schemaFiles, $repairAttempts, $connectionName);
         }
 
         $io->section('Этап 3/3 — применение результата к dump_config.yaml');

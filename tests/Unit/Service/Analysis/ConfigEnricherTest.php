@@ -372,4 +372,54 @@ class ConfigEnricherTest extends TestCase
         $this->assertArrayHasKey('/proj/database/analysis/REPORT.md', $this->written);
         $this->assertArrayNotHasKey('/proj/config/analysis/REPORT.md', $this->written);
     }
+
+    public function testSelfHealsBrokenSameNameCriterion(): void
+    {
+        // Существующий criterion 'active' СИНТАКСИЧЕСКИ БИТЫЙ (алиас t1.) — попал на старой версии.
+        $config = Yaml::dump([
+            'partial_export' => [
+                'public' => [
+                    'clients' => [
+                        'limit' => 500,
+                        'sample' => ['criteria' => [
+                            ['name' => 'active', 'where' => 't1.status = 1', 'limit' => 50],
+                        ]],
+                    ],
+                ],
+            ],
+        ], 6, 2);
+
+        $this->enricher($config)->enrich(self::CONFIG_PATH, $this->ingested());
+
+        $written = Yaml::parse($this->written[self::CONFIG_PATH]);
+        $criteria = $written['partial_export']['public']['clients']['sample']['criteria'];
+        // Битый 'active' ЗАМЕНЁН исправленным (из ingest), не задвоился.
+        $this->assertCount(1, $criteria);
+        $this->assertSame('active', $criteria[0]['name']);
+        $this->assertSame("status = 'active'", $criteria[0]['where']);
+    }
+
+    public function testKeepsValidSameNameCriterion(): void
+    {
+        // Существующий 'active' ВАЛИДНЫЙ (пользовательский) — в приоритете, новый пропускаем.
+        $config = Yaml::dump([
+            'partial_export' => [
+                'public' => [
+                    'clients' => [
+                        'limit' => 500,
+                        'sample' => ['criteria' => [
+                            ['name' => 'active', 'where' => 'is_active = true', 'limit' => 50],
+                        ]],
+                    ],
+                ],
+            ],
+        ], 6, 2);
+
+        $this->enricher($config)->enrich(self::CONFIG_PATH, $this->ingested());
+
+        $written = Yaml::parse($this->written[self::CONFIG_PATH]);
+        $criteria = $written['partial_export']['public']['clients']['sample']['criteria'];
+        $this->assertCount(1, $criteria);
+        $this->assertSame('is_active = true', $criteria[0]['where']); // не заменён
+    }
 }
