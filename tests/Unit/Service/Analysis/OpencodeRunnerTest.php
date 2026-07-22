@@ -36,6 +36,7 @@ class OpencodeRunnerTest extends TestCase
     {
         $store = $this->createMock(DbdumpConfigStore::class);
         $store->method('getOpencodeBin')->willReturn($bin);
+        $store->method('getDataDir')->willReturn('database');
 
         return $store;
     }
@@ -168,51 +169,111 @@ class OpencodeRunnerTest extends TestCase
         $runner->runAgent('/proj', 'database/analysis/schema_inventory.public.json', 'do it');
     }
 
-    public function testRunAgentBuildsCommandAndExecutes(): void
+    /**
+     * Runner, перехватывающий команду и содержимое файла промпта в $captured (по ссылке).
+     * Читает файл промпта ДО того, как runAgent удалит его в finally.
+     *
+     * @param array{cmd: string, cwd: string, prompt: string|null} $captured
+     */
+    private function capturingRunner(string $bin, array &$captured): OpencodeRunner
     {
-        /** @var array<int, array{cmd: string, cwd: string}> $calls */
-        $calls = [];
-        $runner = new class ($this->createMock(LoggerInterface::class), $this->storeReturning('opencode-cli'), $calls) extends OpencodeRunner {
-            /** @var array<int, array{cmd: string, cwd: string}> */
-            public $captured;
+        return new class ($this->createMock(LoggerInterface::class), $this->storeReturning($bin), $bin, $captured) extends OpencodeRunner {
+            /** @var string */
+            private $binName;
+            /** @var array{cmd: string, cwd: string, prompt: string|null} by-ref псевдоним внешнего $captured */
+            public $cap;
 
             /**
-             * @param array<int, array{cmd: string, cwd: string}> $calls
+             * @param array{cmd: string, cwd: string, prompt: string|null} $captured
              */
-            public function __construct(LoggerInterface $logger, DbdumpConfigStore $store, array &$calls)
+            public function __construct(LoggerInterface $logger, DbdumpConfigStore $store, string $bin, array &$captured)
             {
+                $this->binName = $bin;
+                $this->cap = &$captured;
                 parent::__construct($logger, $store, '/proj');
-                $this->captured = &$calls;
             }
 
             protected function locate()
             {
-                return 'opencode-cli';
+                return $this->binName;
             }
 
             protected function execProcess(string $command, string $cwd): int
             {
-                $this->captured[] = ['cmd' => $command, 'cwd' => $cwd];
+                $this->cap['cmd'] = $command;
+                $this->cap['cwd'] = $cwd;
+                $f = $cwd . '/database/analysis/.opencode-prompt.md';
+                $this->cap['prompt'] = is_file($f) ? (string) file_get_contents($f) : null;
                 return 0;
             }
         };
+    }
 
-        $code = $runner->runAgent('/proj', 'database/analysis/schema_inventory.public.json', 'Обработай схему public');
+    private function tempProject(): string
+    {
+        $dir = sys_get_temp_dir() . '/dbdump_runner_' . bin2hex(random_bytes(6));
+        mkdir($dir . '/database/analysis', 0777, true);
+        return $dir;
+    }
+
+    private function cleanupProject(string $dir): void
+    {
+        @unlink($dir . '/database/analysis/.opencode-prompt.md');
+        @rmdir($dir . '/database/analysis');
+        @rmdir($dir . '/database');
+        @rmdir($dir);
+    }
+
+    public function testRunAgentPassesPromptViaFileReference(): void
+    {
+        $tmp = $this->tempProject();
+        $captured = ['cmd' => '', 'cwd' => '', 'prompt' => null];
+        $runner = $this->capturingRunner('opencode-cli', $captured);
+
+        $code = $runner->runAgent($tmp, 'database/analysis/schema_inventory.public.json', 'Обработай схему public');
         $this->assertSame(0, $code);
-        $this->assertCount(1, $runner->captured);
 
-        $cmd = $runner->captured[0]['cmd'];
+        // Команда КОРОТКАЯ: @-ссылка на файл промпта, без инлайн-текста и без -f.
+        $cmd = $captured['cmd'];
         $this->assertStringContainsString('run --agent', $cmd);
-        // Файл инвентаря вписан в сообщение (агент читает сам), НЕ через -f; флага прав нет.
-        $this->assertStringContainsString('schema_inventory.public.json', $cmd);
-        $this->assertStringNotContainsString('-f ', $cmd);
-        $this->assertStringNotContainsString('--auto', $cmd);
-        $this->assertStringContainsString('Обработай схему public', $cmd);
-        // Директива записи: слабые модели иначе отвечают текстом и не создают файл.
-        $this->assertStringContainsString('write', $cmd);
-        $this->assertStringContainsString('ОБЯЗАТЕЛЬНО', $cmd);
-        // Имя бинаря взято из хранилища настроек (opencode-cli).
+        $this->assertStringContainsString('@database/analysis/.opencode-prompt.md', $cmd);
         $this->assertStringContainsString('opencode-cli', $cmd);
-        $this->assertSame('/proj', $runner->captured[0]['cwd']);
+        $this->assertStringNotContainsString('-f ', $cmd);
+        // Сам промпт в командную строку не попал — он в файле.
+        $this->assertStringNotContainsString('Обработай схему public', $cmd);
+        $this->assertSame($tmp, $captured['cwd']);
+
+        // Полный текст промпта — в файле (инвентарь + задача + директива записи).
+        $this->assertNotNull($captured['prompt']);
+        $this->assertStringContainsString('schema_inventory.public.json', (string) $captured['prompt']);
+        $this->assertStringContainsString('Обработай схему public', (string) $captured['prompt']);
+        $this->assertStringContainsString('ОБЯЗАТЕЛЬНО', (string) $captured['prompt']);
+
+        // После запуска файл промпта убран.
+        $this->assertFileDoesNotExist($tmp . '/database/analysis/.opencode-prompt.md');
+
+        $this->cleanupProject($tmp);
+    }
+
+    public function testLongPromptDoesNotExceedShellArgLimit(): void
+    {
+        $tmp = $this->tempProject();
+        $captured = ['cmd' => '', 'cwd' => '', 'prompt' => null];
+        $runner = $this->capturingRunner('opencode-cli', $captured);
+
+        // Промпт > 8192 байт (как корректирующий промпт repair-цикла на «жирной» схеме):
+        // раньше падал escapeshellarg на Windows, теперь идёт через файл.
+        $long = str_repeat('очень длинный корректирующий промпт с перечнем битых criteria; ', 400);
+        $this->assertGreaterThan(8192, strlen($long));
+
+        $code = $runner->runAgent($tmp, 'database/analysis/schema_inventory.products.json', $long);
+        $this->assertSame(0, $code);
+
+        // Аргумент командной строки остаётся коротким (не упирается в лимит 8192).
+        $this->assertLessThan(8192, strlen($captured['cmd']));
+        // Длинный текст ушёл в файл.
+        $this->assertStringContainsString('длинный корректирующий', (string) $captured['prompt']);
+
+        $this->cleanupProject($tmp);
     }
 }

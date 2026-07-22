@@ -53,8 +53,18 @@ class OpencodeRunner
         . 'перезапись без предварительного read; удалять файл через bash (rm/Remove-Item) не пытайся. '
         . 'Не отвечай текстом в чат и не завершай работу, пока файл не записан на диск.';
 
+    /**
+     * Файл, в который пишется полный текст промпта, чтобы передать opencode короткой @-ссылкой.
+     * Длинный промпт (корректирующий промпт repair-цикла) не влезает в аргумент командной строки:
+     * на Windows escapeshellarg отклоняет аргумент > 8192 байт. opencode подставит содержимое файла.
+     */
+    private const PROMPT_FILE = '.opencode-prompt.md';
+
     /** @var LoggerInterface */
     private $logger;
+
+    /** @var DbdumpConfigStore хранилище настроек (для data_dir при записи файла промпта) */
+    private $store;
 
     /** @var string имя/путь бинаря opencode (напр. 'opencode' или 'opencode-cli') */
     private $opencodeBin;
@@ -75,6 +85,7 @@ class OpencodeRunner
     public function __construct(LoggerInterface $logger, DbdumpConfigStore $store, string $projectDir)
     {
         $this->logger = $logger;
+        $this->store = $store;
         $dir = rtrim($projectDir, '/\\');
         $bin = trim($store->getOpencodeBin($dir));
         $this->opencodeBin = $bin !== '' ? $bin : self::DEFAULT_BIN;
@@ -101,10 +112,21 @@ class OpencodeRunner
             throw new \RuntimeException('opencode не найден в PATH.');
         }
 
-        $command = $this->buildCommand($bin, $inventoryFile, $prompt);
+        $message = $this->composeMessage($inventoryFile, $prompt);
+        // Промпт бывает длинным (корректирующий промпт repair-цикла с перечнем битых criteria).
+        // На Windows escapeshellarg отклоняет аргумент > 8192 байт, поэтому не суём промпт в командную
+        // строку целиком: пишем в файл и передаём короткую @-ссылку — opencode подставит его содержимое.
+        list($promptArg, $promptFile) = $this->stashPrompt($projectDir, $message);
+        $command = $this->buildCommand($bin, $promptArg);
         $this->logger->info('Запуск OPENCODE: ' . $command);
 
-        return $this->execProcess($command, $projectDir);
+        try {
+            return $this->execProcess($command, $projectDir);
+        } finally {
+            if ($promptFile !== null) {
+                @unlink($promptFile);
+            }
+        }
     }
 
     /**
@@ -124,18 +146,53 @@ class OpencodeRunner
     }
 
     /**
-     * Собрать строку команды (escape аргументов). Protected — для проверки в тестах.
-     *
-     * Путь к файлу инвентаря вписывается в текст сообщения (не через -f — тот вариадический
-     * и съел бы промпт); файл читает сам агент. Разрешения — в frontmatter агента, не флагом.
-     * Модель задаётся -m целиком из opencode.json (иначе headless не определит провайдера/модель).
-     * WRITE_DIRECTIVE жёстко требует записать файл (слабые модели иначе отвечают текстом и выходят).
+     * Полный текст сообщения агенту: читать инвентарь + задача + директива записи.
+     * Путь к инвентарю вписан в текст (не через -f — тот вариадический и съел бы промпт);
+     * файл читает сам агент. WRITE_DIRECTIVE жёстко требует записать файл (слабые модели иначе
+     * отвечают текстом и выходят).
      */
-    protected function buildCommand(string $bin, string $inventoryFile, string $prompt): string
+    private function composeMessage(string $inventoryFile, string $prompt): string
     {
         // rtrim хвостовых пробелов/точки у задачи → ровно одна точка перед директивой.
-        $message = sprintf('Прочитай файл %s. %s. %s', $inventoryFile, rtrim($prompt, " ."), self::WRITE_DIRECTIVE);
+        return sprintf('Прочитай файл %s. %s. %s', $inventoryFile, rtrim($prompt, " ."), self::WRITE_DIRECTIVE);
+    }
 
+    /**
+     * Записать сообщение в файл внутри {data_dir}/analysis и вернуть короткую @-ссылку для команды.
+     * Так длинный промпт не упирается в лимит escapeshellarg (Windows: 8192 байт) — opencode
+     * подставит содержимое файла по @-ссылке (относительно cwd = projectDir). Файл удаляется после
+     * запуска (см. runAgent). Если запись не удалась — падаем на инлайн (короткие промпты пройдут).
+     *
+     * @return array{0: string, 1: string|null} [аргумент сообщения, абсолютный путь файла для очистки | null]
+     */
+    private function stashPrompt(string $projectDir, string $message): array
+    {
+        $projectDir = rtrim($projectDir, '/\\');
+        $rel = $this->store->getDataDir($projectDir) . '/' . AnalysisPackageBuilder::ANALYSIS_DIR . '/' . self::PROMPT_FILE;
+        $abs = $projectDir . '/' . $rel;
+
+        $dir = dirname($abs);
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0777, true);
+        }
+        if (@file_put_contents($abs, $message) === false) {
+            $this->logger->warning('Не удалось записать файл промпта opencode, передаю инлайн: ' . $abs);
+            return array($message, null);
+        }
+
+        $ref = 'Выполни задание из файла @' . str_replace('\\', '/', $rel) . ' — следуй ему буквально.';
+        return array($ref, $abs);
+    }
+
+    /**
+     * Собрать строку команды (escape аргументов). Protected — для проверки в тестах.
+     *
+     * $message — короткая @-ссылка на файл промпта (см. stashPrompt); в командную строку целиком
+     * длинный промпт не суём (лимит escapeshellarg). Разрешения — в frontmatter агента, не флагом.
+     * Модель задаётся -m целиком из opencode.json (иначе headless не определит провайдера/модель).
+     */
+    protected function buildCommand(string $bin, string $message): string
+    {
         $cmd = escapeshellarg($bin) . ' run --agent ' . escapeshellarg(self::AGENT_NAME);
         if ($this->opencodeModel !== '') {
             $cmd .= ' -m ' . escapeshellarg($this->opencodeModel);
