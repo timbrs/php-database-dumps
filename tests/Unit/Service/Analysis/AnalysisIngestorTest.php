@@ -113,6 +113,25 @@ class AnalysisIngestorTest extends TestCase
         $this->assertSame('ok', $result['sample_criteria'][0]['name']);
     }
 
+    public function testIngestFilesReadsOnlyGivenFiles(): void
+    {
+        // ingestFiles поглощает ТОЛЬКО переданные файлы (для инкрементального обогащения по схеме).
+        $files = [
+            '/out/a.json' => (string) json_encode([
+                'criteria' => [['table' => 'public.x', 'name' => 'ok', 'sql_where' => 'a = 1']],
+            ]),
+            '/out/b.json' => (string) json_encode([
+                'criteria' => [['table' => 'public.y', 'name' => 'other', 'sql_where' => 'b = 1']],
+            ]),
+        ];
+
+        $result = $this->ingestorWith($files)->ingestFiles(['/out/a.json']);
+
+        $this->assertCount(1, $result['sample_criteria']);
+        $this->assertSame('ok', $result['sample_criteria'][0]['name']);
+        $this->assertSame(['/out/a.json'], $result['files']);
+    }
+
     public function testSkipsCriteriaWithTableAliasOrBindParam(): void
     {
         // Слабая модель копирует WHERE прямо из ORM/DQL: алиасы t1./t2./t3. и bind-параметры :name.

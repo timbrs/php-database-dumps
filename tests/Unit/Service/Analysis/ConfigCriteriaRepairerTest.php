@@ -110,7 +110,7 @@ class ConfigCriteriaRepairerTest extends TestCase
         $repairLoop->expects($this->once())->method('run');
 
         $ingestor = $this->createMock(AnalysisIngestor::class);
-        $ingestor->method('ingest')->willReturn(['cascade_from' => [], 'sample_criteria' => [], 'relationships' => [], 'columns' => [], 'files' => []]);
+        $ingestor->method('ingestFiles')->willReturn(['cascade_from' => [], 'sample_criteria' => [], 'relationships' => [], 'columns' => [], 'files' => []]);
 
         $enricher = $this->createMock(ConfigEnricher::class);
         $enricher->expects($this->once())->method('enrich')->willReturn(['cascade_added' => 0, 'criteria_added' => 1]);
@@ -126,6 +126,34 @@ class ConfigCriteriaRepairerTest extends TestCase
         // Засеян out/<schema>.json падающим criterion.
         $this->assertArrayHasKey('/proj/database/analysis/out/users.json', $this->written);
         $this->assertStringContainsString('t1.active_flg', $this->written['/proj/database/analysis/out/users.json']);
+    }
+
+    public function testIncrementalPerSchemaEnrich(): void
+    {
+        // Две схемы с падающими criteria → enrich/ingestFiles вызываются ПО РАЗУ на схему
+        // (инкрементальная запись .yaml после каждой схемы → устойчивость к падению).
+        $config = $this->dumpConfig([
+            'users' => ['users' => ['sample' => ['criteria' => [['name' => 'a', 'where' => 't1.x = 1']]]]],
+            'orders' => ['orders' => ['sample' => ['criteria' => [['name' => 'b', 'where' => 't1.y = 1']]]]],
+        ]);
+
+        $repairLoop = $this->createMock(AnalysisRepairLoop::class);
+        $repairLoop->expects($this->exactly(2))->method('run');
+
+        $ingestor = $this->createMock(AnalysisIngestor::class);
+        $ingestor->expects($this->exactly(2))->method('ingestFiles')
+            ->willReturn(['cascade_from' => [], 'sample_criteria' => [], 'relationships' => [], 'columns' => [], 'files' => []]);
+
+        $enricher = $this->createMock(ConfigEnricher::class);
+        $enricher->expects($this->exactly(2))->method('enrich')->willReturn(['cascade_added' => 0, 'criteria_added' => 1]);
+
+        $result = $this->repairer($config, ['t1.x = 1', 't1.y = 1'], true, $repairLoop, $ingestor, $enricher)
+            ->repair(self::CONFIG, 2, null);
+
+        $this->assertSame(2, $result['failing']);
+        $this->assertSame(2, $result['criteria_added']);
+        $this->assertArrayHasKey('/proj/database/analysis/out/users.json', $this->written);
+        $this->assertArrayHasKey('/proj/database/analysis/out/orders.json', $this->written);
     }
 
     public function testDryRunReportsButDoesNotRepair(): void

@@ -13,10 +13,13 @@ use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
  * тот же цикл перепромпта opencode, что и prepare-analysis --run, но БЕЗ полного пересбора инвентаря
  * и скана кода. Полезно, когда yaml почти готовы и надо лишь починить несколько битых criteria.
  *
- * Поток: load config → CriteriaSqlTester по каждому criterion → падающие засеваем в out/<schema>.json →
- * AnalysisRepairLoop (перепромпт opencode с реальной ошибкой) → AnalysisIngestor → ConfigEnricher
- * (self-heal: исправленный criterion заменяет битый одноимённый). Экспорт и так не падает на битых
- * (SampleQueryBuilder их пропускает), это — чтобы довести criteria до рабочего вида.
+ * Поток: load config → CriteriaSqlTester по каждому criterion → падающие группируем по схемам.
+ * Дальше ПО ОДНОЙ схеме: засеять out/<schema>.json → AnalysisRepairLoop (перепромпт opencode с реальной
+ * ошибкой) → AnalysisIngestor::ingestFiles([этот файл]) → ConfigEnricher (self-heal: исправленный criterion
+ * заменяет битый одноимённый) — .yaml обновляется СРАЗУ после каждой схемы. Это делает прогон устойчивым:
+ * падение на схеме N не теряет уже исправленные схемы, а повторный запуск их пропустит (их criteria уже
+ * исполняются). Экспорт и так не падает на битых (SampleQueryBuilder их пропускает), это — чтобы довести
+ * criteria до рабочего вида.
  */
 class ConfigCriteriaRepairer
 {
@@ -142,28 +145,34 @@ class ConfigCriteriaRepairer
             return $result;
         }
 
-        // 2. Засеять out/<schema>.json падающими criteria (агентский формат) и прогнать repair-цикл.
+        // 2. По ОДНОЙ схеме: засеять → починить → поглотить ТОЛЬКО её файл → сразу записать .yaml.
+        //    Инкрементально и устойчиво к падению: обновление конфига происходит после каждой схемы,
+        //    поэтому падение на схеме N не теряет уже исправленные, а повторный запуск их пропустит
+        //    (тест на шаге 1 увидит, что их criteria уже исполняются в БД).
         if (!$this->fileSystem->exists($outDir)) {
             $this->fileSystem->createDirectory($outDir);
         }
-        $schemaFiles = [];
-        foreach ($failingBySchema as $schema => $crits) {
-            $json = json_encode(['criteria' => $crits], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-            $this->fileSystem->write($outDir . '/' . $schema . '.json', $json === false ? '{"criteria":[]}' : $json);
-            $schemaFiles[$schema] = $this->projectDir . '/' . $dataDir . '/'
-                . AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.' . $schema . '.json';
-        }
 
         $this->logger->info(sprintf('Починка %d падающих criteria в %d схемах…', $failing, count($failingBySchema)));
-        $this->repairLoop->run($dataDir, $schemaFiles, $maxAttempts, $connectionName);
+        foreach ($failingBySchema as $schema => $crits) {
+            $outFile = $outDir . '/' . $schema . '.json';
+            $json = json_encode(['criteria' => $crits], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            $this->fileSystem->write($outFile, $json === false ? '{"criteria":[]}' : $json);
 
-        // 3. Поглотить исправленные + обогатить конфиг (self-heal заменит битые одноимённые).
-        $ingested = $this->ingestor->ingest($outDir);
-        $stats = $this->enricher->enrich($configPath, $ingested);
+            $schemaFiles = [
+                $schema => $this->projectDir . '/' . $dataDir . '/'
+                    . AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.' . $schema . '.json',
+            ];
+            $this->repairLoop->run($dataDir, $schemaFiles, $maxAttempts, $connectionName);
 
-        $result['cascade_added'] = $stats['cascade_added'];
-        $result['criteria_added'] = $stats['criteria_added'];
-        $result['repaired'] = true;
+            // Поглотить ТОЛЬКО файл этой схемы и сразу записать .yaml (self-heal заменит битые одноимённые).
+            $ingested = $this->ingestor->ingestFiles([$outFile]);
+            $stats = $this->enricher->enrich($configPath, $ingested);
+            $result['cascade_added'] += $stats['cascade_added'];
+            $result['criteria_added'] += $stats['criteria_added'];
+            $result['repaired'] = true;
+            $this->logger->info(sprintf('  <info>%s</info>: конфиг обновлён (+%d criteria)', $schema, $stats['criteria_added']));
+        }
 
         return $result;
     }

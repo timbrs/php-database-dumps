@@ -38,20 +38,26 @@ class AnalysisIngestor
      */
     public function ingest(string $outDir): array
     {
-        $result = [
-            'cascade_from' => [],
-            'sample_criteria' => [],
-            'relationships' => [],
-            'columns' => [],
-            'files' => [],
-        ];
-
         if (!$this->fileSystem->isDirectory($outDir)) {
             $this->logger->warning("Каталог вывода OPENCODE не найден: {$outDir}");
-            return $result;
+            return $this->emptyResult();
         }
 
-        $files = $this->fileSystem->findFiles($outDir, '*.json');
+        return $this->ingestFiles($this->fileSystem->findFiles($outDir, '*.json'));
+    }
+
+    /**
+     * Поглотить КОНКРЕТНЫЕ out/*.json (а не весь каталог) — для инкрементального обогащения
+     * по одной схеме (repair-configs пишет .yaml после каждой схемы, чтобы падение не теряло
+     * уже исправленное).
+     *
+     * @param array<int, string> $files абсолютные пути out/*.json
+     * @return array{cascade_from: array<int, array<string, mixed>>, sample_criteria: array<int, array<string, mixed>>, relationships: array<int, array<string, mixed>>, columns: array<int, array<string, mixed>>, files: array<int, string>}
+     */
+    public function ingestFiles(array $files): array
+    {
+        $result = $this->emptyResult();
+
         foreach ($files as $file) {
             // Устойчивость: сбой чтения/декода одного файла не должен валить весь ингест.
             try {
@@ -82,6 +88,20 @@ class AnalysisIngestor
         ));
 
         return $result;
+    }
+
+    /**
+     * @return array{cascade_from: array<int, array<string, mixed>>, sample_criteria: array<int, array<string, mixed>>, relationships: array<int, array<string, mixed>>, columns: array<int, array<string, mixed>>, files: array<int, string>}
+     */
+    private function emptyResult(): array
+    {
+        return [
+            'cascade_from' => [],
+            'sample_criteria' => [],
+            'relationships' => [],
+            'columns' => [],
+            'files' => [],
+        ];
     }
 
     /**
