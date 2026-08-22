@@ -96,7 +96,7 @@ class CriteriaValidator
      * @param array<int, string> $knownColumns
      * @return array<int, string> уникальные неизвестные идентификаторы (в нижнем регистре)
      */
-    private function unknownColumns(string $where, array $knownColumns): array
+    public function unknownColumns(string $where, array $knownColumns): array
     {
         $known = [];
         foreach ($knownColumns as $col) {

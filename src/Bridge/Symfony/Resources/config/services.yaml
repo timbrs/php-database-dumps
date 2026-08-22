@@ -144,6 +144,11 @@ services:
         arguments:
             $projectDir: '%kernel.project_dir%'
 
+    # Аудит конфига без БД (validate)
+    Timbrs\DatabaseDumps\Service\Validation\ConfigAuditor: ~
+    Timbrs\DatabaseDumps\Service\Validation\AuditFixer: ~
+    Timbrs\DatabaseDumps\Service\Validation\JsonReportWriter: ~
+
     # Sample-выборка по именованным критериям
     Timbrs\DatabaseDumps\Service\Dumper\SelectedPkRegistry: ~
     Timbrs\DatabaseDumps\Service\Dumper\SampleQueryBuilder: ~
@@ -210,3 +215,10 @@ services:
             $configPath: '%database_dumps.config_path%'
         tags:
             - { name: 'console.command', command: 'app:dbdump:repair-configs' }
+
+    Timbrs\DatabaseDumps\Bridge\Symfony\Command\ValidateConfigCommand:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+            $configPath: '%database_dumps.config_path%'
+        tags:
+            - { name: 'console.command', command: 'app:dbdump:validate' }

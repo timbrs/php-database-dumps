@@ -109,7 +109,7 @@ class YamlConfigLoader implements ConfigLoaderInterface
                 );
             }
 
-            $includePath = $this->resolveSafeIncludePath($configDir, $relativePath);
+            $includePath = self::resolveSafeIncludePath($configDir, $relativePath);
 
             if (!file_exists($includePath)) {
                 // Пропавший include не должен ронять весь конфиг (и все команды в Symfony) —
@@ -158,10 +158,32 @@ class YamlConfigLoader implements ConfigLoaderInterface
     }
 
     /**
+     * Разрешить include-путь схемы относительно каталога конфига с той же защитой от
+     * traversal, что и при load(). Публичная точка входа для инструментов, которым нужен
+     * тот же резолв (аудитор конфига), но не нужна сборка DumpConfig.
+     *
+     * @throws \InvalidArgumentException при абсолютном пути / '..' / выходе за каталог
+     */
+    public static function resolveIncludePath(string $configDir, string $relativePath): string
+    {
+        return self::resolveSafeIncludePath($configDir, $relativePath);
+    }
+
+    /**
+     * Каталог конфига (realpath, если доступен) — база для резолва includes.
+     */
+    public static function configDirOf(string $configPath): string
+    {
+        $dir = dirname($configPath);
+        $real = realpath($dir);
+        return $real !== false ? $real : self::normalizePath($dir);
+    }
+
+    /**
      * Защита от path traversal: include-путь должен оставаться в configDir
      * (или его поддиректории). Абсолютные пути запрещены.
      */
-    private function resolveSafeIncludePath(string $configDir, string $relativePath): string
+    private static function resolveSafeIncludePath(string $configDir, string $relativePath): string
     {
         if ($relativePath === '') {
             throw new \InvalidArgumentException('Include path must be non-empty');
@@ -189,12 +211,12 @@ class YamlConfigLoader implements ConfigLoaderInterface
         $real = realpath($combined);
         if ($real === false) {
             // Файл может не существовать ещё — проверим на отсутствие traversal в нормализованном пути.
-            $real = $this->normalizePath($combined);
+            $real = self::normalizePath($combined);
         }
 
         $configReal = realpath($configDir);
         if ($configReal === false) {
-            $configReal = $this->normalizePath($configDir);
+            $configReal = self::normalizePath($configDir);
         }
 
         // Проверяем что итоговый путь начинается с configDir
@@ -210,12 +232,10 @@ class YamlConfigLoader implements ConfigLoaderInterface
 
     private function resolveRealDir(string $configPath): string
     {
-        $dir = dirname($configPath);
-        $real = realpath($dir);
-        return $real !== false ? $real : $this->normalizePath($dir);
+        return self::configDirOf($configPath);
     }
 
-    private function normalizePath(string $path): string
+    private static function normalizePath(string $path): string
     {
         // Простая нормализация без обращения к ФС.
         $path = str_replace('\\', '/', $path);

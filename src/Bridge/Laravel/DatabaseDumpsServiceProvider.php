@@ -6,6 +6,7 @@ use Illuminate\Support\ServiceProvider;
 use Timbrs\DatabaseDumps\Adapter\LaravelDatabaseAdapter;
 use Timbrs\DatabaseDumps\Bridge\Laravel\Command\ApplyAnalysisCommand;
 use Timbrs\DatabaseDumps\Bridge\Laravel\Command\RepairConfigsCommand;
+use Timbrs\DatabaseDumps\Bridge\Laravel\Command\ValidateConfigCommand;
 use Timbrs\DatabaseDumps\Bridge\Laravel\Command\ConfigureLlmCommand;
 use Timbrs\DatabaseDumps\Bridge\Laravel\Command\DbInitCommand;
 use Timbrs\DatabaseDumps\Bridge\Laravel\Command\DumpExportCommand;
@@ -70,6 +71,9 @@ use Timbrs\DatabaseDumps\Service\Parser\SqlParser;
 use Timbrs\DatabaseDumps\Service\Parser\StatementSplitter;
 use Timbrs\DatabaseDumps\Service\Security\ProductionGuard;
 use Timbrs\DatabaseDumps\Util\EnvFileWriter;
+use Timbrs\DatabaseDumps\Service\Validation\AuditFixer;
+use Timbrs\DatabaseDumps\Service\Validation\ConfigAuditor;
+use Timbrs\DatabaseDumps\Service\Validation\JsonReportWriter;
 use Timbrs\DatabaseDumps\Util\FileSystemHelper;
 use Timbrs\DatabaseDumps\Util\YamlConfigLoader;
 
@@ -428,6 +432,32 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
             );
         });
 
+        // Аудит конфига без БД (validate): слепок схемы вместо подключения.
+        $this->app->singleton(ConfigAuditor::class, function ($app) {
+            return new ConfigAuditor($app->make(FileSystemInterface::class));
+        });
+        $this->app->singleton(AuditFixer::class, function ($app) {
+            return new AuditFixer(
+                $app->make(FileSystemInterface::class),
+                $app->make(LoggerInterface::class)
+            );
+        });
+        $this->app->singleton(JsonReportWriter::class, function ($app) {
+            return new JsonReportWriter($app->make(FileSystemInterface::class));
+        });
+        $this->app->singleton(ValidateConfigCommand::class, function ($app) {
+            return new ValidateConfigCommand(
+                $app->make(ConfigAuditor::class),
+                $app->make(AuditFixer::class),
+                $app->make(JsonReportWriter::class),
+                $app->make(FileSystemInterface::class),
+                $app->make(DbdumpConfigStore::class),
+                (string) $app['config']->get('database-dumps.project_dir'),
+                (string) $app['config']->get('database-dumps.config_path'),
+                $app->make(LoggerInterface::class)
+            );
+        });
+
         $this->app->singleton(DatabaseDumper::class, function ($app) {
             return new DatabaseDumper(
                 $app->make(DataFetcher::class),
@@ -477,6 +507,7 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 PrepareAnalysisCommand::class,
                 ApplyAnalysisCommand::class,
                 RepairConfigsCommand::class,
+                ValidateConfigCommand::class,
             ]);
         }
     }

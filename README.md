@@ -36,6 +36,7 @@ PHP-пакет для экспорта и импорта дампов баз д�
   - [Настройка LLM (интерактивно)](#настройка-llm-интерактивно)
   - [LLM-детекция ПД и профилирование](#llm-детекция-пд-и-профилирование)
   - [Анализ кода через OPENCODE](#анализ-кода-через-opencode)
+- [Проверка конфига без БД (validate)](#проверка-конфига-без-бд-validate)
 - [Настройка Symfony](#настройка-symfony)
   - [Регистрация бандла](#регистрация-бандла)
   - [Структура каталогов (Symfony)](#структура-каталогов-symfony)
@@ -630,6 +631,83 @@ php artisan dbdump:apply-analysis                  # Laravel
 
 Провайдер и модель LLM предполагаются уже настроенными в opencode пользователя (`~/.config/opencode/opencode.json`); агент не задаёт модель явно и наследует дефолтную — отдельной настройки не требуется. Для больших схем дробите прогон по чанку на схему (см. RUN.md).
 
+## Проверка конфига без БД (validate)
+
+`validate` проверяет `dump_config.yaml` и пер-схемные `dump-settings/*.yaml`, **не подключаясь
+к базе**. Схему берёт из замороженного слепка `{data_dir}/analysis/schema_inventory.json`
+(и пер-схемных `schema_inventory.<schema>.json`), который кладёт `prepare-analysis`. Поэтому
+команда работает в CI, в закрытом контуре и до подъёма стенда — в отличие от `repair-configs`,
+который гоняет каждый criterion по живой БД.
+
+```bash
+# Symfony
+php bin/console app:dbdump:validate
+php bin/console app:dbdump:validate --format=json --out=database/analysis/findings.json
+php bin/console app:dbdump:validate -s pdl -s tasks --severity=warning
+php bin/console app:dbdump:validate --fix
+
+# Laravel
+php artisan dbdump:validate
+php artisan dbdump:validate --format=json --out=database/analysis/findings.json
+```
+
+Опции: `--config` и `--inventory` (пути, по умолчанию — `{data_dir}/dump_config.yaml` и
+`{data_dir}/analysis/schema_inventory.json`), `-s|--schema` (повторяемая, только эти схемы),
+`--format=text|json`, `--out=PATH`, `--severity=error|warning|note` (порог вывода),
+`--fix` (применить механически однозначные правки).
+
+**Код возврата — `1`, если есть находки уровня `error`**, иначе `0`. Этого достаточно, чтобы
+скрипт или агент решил «готов конфиг к снятию дампа или нет», не разбирая текст вывода.
+
+### Что проверяется
+
+| код | уровень | что нашли |
+|---|---|---|
+| `S-1` | error | YAML не разобрался или файл из `includes:` пропал |
+| `S-2` | error | `TableConfig` отверг настройки таблицы |
+| `S-3` | error | таблица и в `full_export`, и в `partial_export` |
+| `S-4` | warning | пустая секция / пустая карта `faker` у таблицы |
+| `C-1` | warning | таблица есть в слепке, но не выгружается |
+| `C-2` | warning | таблица есть в конфиге, но её нет в слепке |
+| `C-3` | warning | схема есть на одной стороне и отсутствует на другой |
+| `L-1`…`L-7` | error / warning | несуществующие колонки в `order_by`, `where`, `cascade_from`, `sample.criteria`, `stratify_by`, `faker`, `deferred_columns` |
+| `Q-1`, `Q-2` | error | в критерии алиас таблицы (`t1.`) или bind-параметр (`:name`) — дампер такой критерий пропустит |
+| `Q-3` | error | непригодны ВСЕ критерии таблицы: выборка молча выродится в плоский срез |
+| `Q-4` | warning | повторяющиеся имена критериев |
+| `Q-5` | warning | сумма квот больше `limit` — объединённую выборку молча обрежет |
+| `F-1` | error / warning | faker-паттерн на нетекстовой колонке: на дате/`bytea`/`uuid` INSERT упадёт (error), на числовой — подменит идентификатор (warning) |
+| `F-2` | error | паттерн вне `PatternDetector::ALLOWED_PATTERNS` — `FakerConfig` не примет конфиг |
+| `G-1` | error | родитель `cascade_from` не выгружается — ограничение молча отбросится |
+| `G-2` | error | цикл в `cascade_from` |
+| `G-3` | warning | цепочка длиннее `settings.max_cascade_depth` |
+| `G-4` | warning | родитель с `sample` выгружается ПОЗЖЕ ребёнка |
+| `G-5` | note | родитель с `sample` выгружается раньше — связность держится на порядке имён |
+| `G-6` | note | у таблицы и `sample`, и `cascade_from`: cascade не применится |
+| `D-1` | note | справочник `*_dict` обрезан лимитом или квотами |
+| `H-1` | note | версионная таблица (`date_from`/`date_to`) выбирает только действующие версии |
+
+`G-4` заслуживает отдельного слова. Порядок экспорта строит `TopologicalSorter` по FK из
+слепка; в базе **без FK-констрейнтов** рёбер нет вовсе, и порядок вырождается в алфавитный.
+Тогда родитель, чьё имя идёт позже имени ребёнка, попадает в дамп уже после него, реестр
+выбранных id (`SelectedPkRegistry`) пуст, и `CascadeWhereResolver` откатывается к подзапросу,
+который не повторяет `sample.criteria` — набор строк родителя в дампе и в подзапросе расходится.
+
+### Что делает `--fix`
+
+Только то, где правка однозначна и **не меняет состав выборки**: снимает faker-маппинг с
+нетекстовой колонки (`F-1`) и с неизвестным паттерном (`F-2`), убирает маппинг несуществующей
+колонки (`L-6`) и мёртвую запись `cascade_from` (`L-3`), переименовывает дубль критерия (`Q-4`),
+удаляет пустую секцию (`S-4`). Всё остальное остаётся находкой с подсказкой — решение за
+человеком.
+
+Правки пишутся в тот файл, откуда пришла схема (`dump-settings/<schema>.yaml` или общий
+конфиг); тронутый файл переписывается целиком, поэтому его форматирование становится
+каноническим (записи `cascade_from` разворачиваются из однострочной формы в блочную).
+Файлы, где чинить нечего, не трогаются. После правок содержимое перепроверяется тем же
+`TableConfig`, что и на экспорте: если правка сделала конфиг хуже, файл не записывается.
+
+Проверяется только основное подключение; секция `connections:` в аудит не входит.
+
 ## Настройка Symfony
 
 ### Регистрация бандла
@@ -722,6 +800,14 @@ php bin/console app:dbdump:prepare-config new --no-cascade --no-faker
 php bin/console app:dbdump:prepare-config all --deep
 php bin/console app:dbdump:prepare-analysis --run    # всё одной командой (нужен opencode в PATH)
 # или вручную: prepare-analysis → opencode run → apply-analysis
+
+# Проверить конфиг по слепку схемы, без подключения к БД
+php bin/console app:dbdump:validate
+php bin/console app:dbdump:validate --format=json --out=database/analysis/findings.json
+php bin/console app:dbdump:validate --fix
+
+# Проверить sample.criteria на живой БД и починить падающие через opencode
+php bin/console app:dbdump:repair-configs --dry-run
 ```
 
 ## Настройка Laravel
@@ -798,6 +884,14 @@ php artisan dbdump:prepare-config new --no-cascade --no-faker
 php artisan dbdump:prepare-config all --deep
 php artisan dbdump:prepare-analysis --run            # всё одной командой (нужен opencode в PATH)
 # или вручную: prepare-analysis → opencode run → apply-analysis
+
+# Проверить конфиг по слепку схемы, без подключения к БД
+php artisan dbdump:validate
+php artisan dbdump:validate --format=json --out=database/analysis/findings.json
+php artisan dbdump:validate --fix
+
+# Проверить sample.criteria на живой БД и починить падающие через opencode
+php artisan dbdump:repair-configs --dry-run
 ```
 
 ## Скрипты before/after
