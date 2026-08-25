@@ -7,9 +7,13 @@ use Timbrs\DatabaseDumps\Service\Validation\Rule\CascadeGraphRule;
 use Timbrs\DatabaseDumps\Tests\Support\ValidationTestCase;
 
 /**
- * G-4 — самое ценное правило набора: в базе без FK-констрейнтов порядок экспорта
- * алфавитный, поэтому родитель с sample, чьё имя идёт позже имени ребёнка, попадает
- * в дамп уже после него — и cascade-подзапрос ребёнка не совпадёт с выбранными строками.
+ * G-4 было самым ценным правилом набора, пока порядок экспорта строился на одних лишь
+ * FK-констрейнтах: их в этой базе 0 из 245 таблиц, порядок вырождался в алфавитный, и
+ * родитель с sample, чьё имя идёт позже имени ребёнка, попадал в дамп уже после него.
+ *
+ * Теперь cascade_from подаётся в граф порядка вторым источником рёбер, и штатный случай
+ * закрыт кодом. Правило остаётся детектором ОСТАТОЧНОЙ опасности: ребро могли разорвать
+ * ради цикла, и тогда всё возвращается ровно туда, где было.
  */
 class CascadeGraphRuleTest extends ValidationTestCase
 {
@@ -81,19 +85,46 @@ class CascadeGraphRuleTest extends ValidationTestCase
         ];
     }
 
-    public function testParentSortedAfterChildAndSampledIsReported(): void
+    /**
+     * Тот самый случай, ради которого правило писалось: «tasks.activities» < «tasks.jobs»,
+     * FK в схеме нет. Раньше здесь была находка G-4; теперь ребро cascade_from ставит
+     * родителя впереди, и остаётся только заметка G-5.
+     *
+     * Это ИЗМЕНЕНИЕ СОСТАВА ДАМПА, а не перестановка: строки детей начинают соответствовать
+     * выборке родителя, чего до фикса не было.
+     */
+    public function testCascadeFromNowOrdersParentBeforeChild(): void
     {
-        // «tasks.activities» < «tasks.jobs» — ребёнок уедет в дамп первым.
         $findings = $this->findings([
             'tasks.activities' => $this->cascadeTo('tasks.jobs'),
             'tasks.jobs' => $this->sampled(),
         ]);
 
-        $g4 = $this->firstWithCode($findings, 'G-4');
-        $this->assertNotNull($g4);
-        $this->assertSame(Finding::SEVERITY_WARNING, $g4->getSeverity());
-        $this->assertSame('tasks.activities', $g4->getTarget());
-        $this->assertSame('tasks.jobs', $g4->getSuggestion()['parent']);
+        $this->assertSame(0, $this->countCode($findings, 'G-4'));
+        $this->assertSame(1, $this->countCode($findings, 'G-5'));
+    }
+
+    /**
+     * У правила остаются зубы. Цикл в cascade_from заставляет сортировщик разорвать одно
+     * из рёбер, и разорванное возвращает исходную опасность: родитель с sample снова
+     * уезжает позже ребёнка. Показать это важнее, чем показать красивый порядок.
+     */
+    public function testG4StillFiresWhenCascadeEdgeIsBrokenByCycle(): void
+    {
+        $parent = $this->cascadeTo('tasks.activities', 'id');
+        $parent['sample'] = ['criteria' => [['name' => 'any', 'where' => 'id > 0', 'limit' => 10]]];
+
+        $findings = $this->findings([
+            'tasks.activities' => $this->cascadeTo('tasks.jobs'),
+            'tasks.jobs' => $parent,
+        ]);
+
+        $this->assertSame(1, $this->countCode($findings, 'G-2'), 'цикл обязан быть показан');
+        $this->assertGreaterThan(
+            0,
+            $this->countCode($findings, 'G-4'),
+            'разорванное ребро возвращает исходную опасность, и молчать об этом нельзя'
+        );
     }
 
     public function testParentSortedBeforeChildIsOnlyANote(): void

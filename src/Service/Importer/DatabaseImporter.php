@@ -233,7 +233,26 @@ class DatabaseImporter
             $tableKeys[] = $key;
         }
 
-        $sortedKeys = $this->dependencyResolver->sortForImport($tableKeys, $connectionName);
+        // Тот же второй источник рёбер, что и при выгрузке. Иначе импорт разложит файлы
+        // в другом порядке, чем их писали, и разница проявится ровно там, где её труднее
+        // всего заметить, — на связях, которых нет в схеме констрейнтом.
+        $cascadeByChild = [];
+        foreach ($tableKeys as $key) {
+            $parts = explode('.', $key, 2);
+            if (count($parts) !== 2) {
+                continue;
+            }
+            $raw = $this->dumpConfig->getTableConfig($parts[0], $parts[1]);
+            if (is_array($raw) && isset($raw['cascade_from']) && is_array($raw['cascade_from'])) {
+                $cascadeByChild[$key] = $raw['cascade_from'];
+            }
+        }
+
+        $sortedKeys = $this->dependencyResolver->sortForImport(
+            $tableKeys,
+            $connectionName,
+            TableDependencyResolver::cascadeEdges($cascadeByChild)
+        );
 
         $sortedFiles = [];
         $seen = [];

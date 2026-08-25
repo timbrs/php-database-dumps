@@ -115,7 +115,22 @@ class DatabaseDumper
         }
 
         $connectionName = $tables[0]->getConnectionName();
-        $sortResult = $this->dependencyResolver->sortForExportWithResult($tableKeys, $connectionName);
+
+        // Второй источник рёбер: в базе без FK-констрейнтов связи живут только в конфиге,
+        // и без них порядок выгрузки вырождается в алфавитный (находка G-4 валидатора).
+        $cascadeByChild = [];
+        foreach ($tables as $t) {
+            $cascade = $t->getCascadeFrom();
+            if ($cascade !== null && $cascade !== []) {
+                $cascadeByChild[$t->getFullTableName()] = $cascade;
+            }
+        }
+
+        $sortResult = $this->dependencyResolver->sortForExportWithResult(
+            $tableKeys,
+            $connectionName,
+            TableDependencyResolver::cascadeEdges($cascadeByChild)
+        );
         $sortedKeys = $sortResult->getSorted();
 
         $tableMap = [];

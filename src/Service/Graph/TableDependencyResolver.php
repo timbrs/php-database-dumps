@@ -39,19 +39,21 @@ class TableDependencyResolver
      * Универсальный метод сортировки.
      *
      * @param array<string> $tableKeys "schema.table" keys
+     * @param array<string, array<string, array{source_column: string, target_column: string}>> $extraEdges
      */
-    public function sort(array $tableKeys, ?string $connectionName = null): SortResult
+    public function sort(array $tableKeys, ?string $connectionName = null, array $extraEdges = []): SortResult
     {
-        return $this->sortTablesWithCycleBreaking($tableKeys, $connectionName);
+        return $this->sortTablesWithCycleBreaking($tableKeys, $connectionName, $extraEdges);
     }
 
     /**
      * @param array<string> $tableKeys
+     * @param array<string, array<string, array{source_column: string, target_column: string}>> $extraEdges
      * @return array<string>
      */
-    public function sortForExport(array $tableKeys, ?string $connectionName = null): array
+    public function sortForExport(array $tableKeys, ?string $connectionName = null, array $extraEdges = []): array
     {
-        return $this->sort($tableKeys, $connectionName)->getSorted();
+        return $this->sort($tableKeys, $connectionName, $extraEdges)->getSorted();
     }
 
     /**
@@ -59,19 +61,71 @@ class TableDependencyResolver
      * требует существующих родителей.
      *
      * @param array<string> $tableKeys
+     * @param array<string, array<string, array{source_column: string, target_column: string}>> $extraEdges
      * @return array<string>
      */
-    public function sortForImport(array $tableKeys, ?string $connectionName = null): array
+    public function sortForImport(array $tableKeys, ?string $connectionName = null, array $extraEdges = []): array
     {
-        return $this->sortForExport($tableKeys, $connectionName);
+        return $this->sortForExport($tableKeys, $connectionName, $extraEdges);
     }
 
     /**
      * @param array<string> $tableKeys
+     * @param array<string, array<string, array{source_column: string, target_column: string}>> $extraEdges
      */
-    public function sortForExportWithResult(array $tableKeys, ?string $connectionName = null): SortResult
+    public function sortForExportWithResult(array $tableKeys, ?string $connectionName = null, array $extraEdges = []): SortResult
     {
-        return $this->sort($tableKeys, $connectionName);
+        return $this->sort($tableKeys, $connectionName, $extraEdges);
+    }
+
+    /**
+     * Превращает `cascade_from` из конфига выгрузки в рёбра графа порядка.
+     *
+     * Зачем это вообще нужно. Граф зависимостей строится только из FK-констрейнтов
+     * (getDependencyGraph выше), а в этой базе их 0 из 245 таблиц — топологическая
+     * сортировка получает граф без рёбер и вырождается в алфавитный порядок. Родитель,
+     * чьё имя сортируется позже ребёнка, выгружается ПОСЛЕ него; к моменту построения
+     * WHERE ребёнка SelectedPkRegistry пуст, CascadeWhereResolver откатывается к
+     * подзапросу, а подзапрос не повторяет sample.criteria родителя — и строки детей
+     * расходятся с реально выгруженными родителями.
+     *
+     * Связи между таблицами в такой базе живут только в конфиге и в коде, и `cascade_from` —
+     * это ровно они. Отсюда второй источник рёбер.
+     *
+     * ВАЖНО, и это не перестановка ради красоты: правильный порядок МЕНЯЕТ СОСТАВ ДАМПА.
+     * Строки детей начинают соответствовать выборке родителей — в этом и смысл, — но это
+     * осознанное изменение того, какие строки попадут в дамп, а не безопасная сортировка.
+     *
+     * Тип входа намеренно широкий: сюда приходит и разобранный TableConfig, и сырой массив
+     * из YAML — импорт читает конфиг напрямую, без валидации. Обещать здесь строгую форму
+     * значило бы снять проверки ровно там, где данные и правда бывают кривыми.
+     *
+     * @param array<string, array<int, mixed>> $cascadeByChild
+     * @return array<string, array<string, array{source_column: string, target_column: string}>>
+     */
+    public static function cascadeEdges(array $cascadeByChild): array
+    {
+        $edges = [];
+        foreach ($cascadeByChild as $childKey => $entries) {
+            foreach ($entries as $entry) {
+                if (!is_array($entry) || !isset($entry['parent'])) {
+                    continue;
+                }
+                $parentKey = (string) $entry['parent'];
+                // Самоссылка порядок не задаёт: сортировщик всё равно отправит её в deferred.
+                if ($parentKey === '' || $parentKey === $childKey) {
+                    continue;
+                }
+                if (!isset($edges[$childKey])) {
+                    $edges[$childKey] = [];
+                }
+                $edges[$childKey][$parentKey] = [
+                    'source_column' => isset($entry['fk_column']) ? (string) $entry['fk_column'] : '',
+                    'target_column' => isset($entry['parent_column']) ? (string) $entry['parent_column'] : '',
+                ];
+            }
+        }
+        return $edges;
     }
 
     /**
@@ -130,8 +184,9 @@ class TableDependencyResolver
 
     /**
      * @param array<string> $tableKeys
+     * @param array<string, array<string, array{source_column: string, target_column: string}>> $extraEdges
      */
-    private function sortTablesWithCycleBreaking(array $tableKeys, ?string $connectionName): SortResult
+    private function sortTablesWithCycleBreaking(array $tableKeys, ?string $connectionName, array $extraEdges = []): SortResult
     {
         $graph = $this->getDependencyGraph($connectionName);
         $fks = $this->fkInspector->getForeignKeys($connectionName);
@@ -163,6 +218,31 @@ class TableDependencyResolver
             }
         }
 
+        // Рёбра из конфига добавляются ПОСЛЕ FK и не затирают их детали: FK — факт схемы,
+        // cascade_from — утверждение конфига, и при расхождении верить надо схеме.
+        foreach ($extraEdges as $childKey => $parents) {
+            if (!isset($tableKeySet[$childKey])) {
+                continue;
+            }
+            foreach ($parents as $parentKey => $columns) {
+                if (!isset($tableKeySet[$parentKey]) || $parentKey === $childKey) {
+                    continue;
+                }
+                if (!in_array($parentKey, $adjacency[$childKey], true)) {
+                    $adjacency[$childKey][] = $parentKey;
+                }
+                if (!isset($edgeDetails[$childKey])) {
+                    $edgeDetails[$childKey] = [];
+                }
+                if (!isset($edgeDetails[$childKey][$parentKey])) {
+                    $edgeDetails[$childKey][$parentKey] = $columns;
+                }
+            }
+        }
+
+        // У ребра из конфига нет признака nullable — на нём построен приоритет разрыва
+        // циклов, и подделывать его нечем. Отсутствие записи означает «рвать в последнюю
+        // очередь»: сортировщик сперва ищет nullable-ребро и только потом любое.
         $nullability = $this->fkInspector->getForeignKeyNullability($fks, $connectionName);
         $nullableEdges = [];
         foreach ($tableKeys as $childKey) {

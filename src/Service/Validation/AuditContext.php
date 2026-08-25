@@ -3,6 +3,7 @@
 namespace Timbrs\DatabaseDumps\Service\Validation;
 
 use Timbrs\DatabaseDumps\Config\TableConfig;
+use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
 use Timbrs\DatabaseDumps\Service\Graph\TopologicalSorter;
 
 /**
@@ -163,9 +164,12 @@ class AuditContext
     /**
      * Позиция таблицы в фактическом порядке экспорта или null, если она не выгружается.
      *
-     * Порядок воспроизводится тем же TopologicalSorter, что и в DatabaseDumper, но граф
-     * строится по FK из слепка, а не из живой БД. В базе без FK-констрейнтов рёбер нет
-     * вовсе, и порядок вырождается в алфавитный — на этом держится правило G-4.
+     * Порядок воспроизводится тем же TopologicalSorter и по тем же ДВУМ источникам рёбер,
+     * что и в DatabaseDumper: FK из слепка плюс `cascade_from` из конфига. Второй источник
+     * здесь обязателен — валидатор, считающий порядок иначе, чем его считает выгрузка,
+     * показывал бы G-4 на уже правильном порядке и молчал бы на неправильном.
+     *
+     * FK берутся из слепка, а не из живой БД: её здесь нет и не будет.
      */
     public function exportPosition(string $schema, string $table): ?int
     {
@@ -198,6 +202,37 @@ class AuditContext
             foreach ($this->inventory->foreignKeys($parts[0], $parts[1]) as $fk) {
                 $parentKey = $fk['references_table'];
                 if ($parentKey === $childKey || !isset($keySet[$parentKey])) {
+                    continue;
+                }
+                if (!in_array($parentKey, $adjacency[$childKey], true)) {
+                    $adjacency[$childKey][] = $parentKey;
+                }
+            }
+        }
+
+        // Второй источник рёбер — ровно тот же, что у DatabaseDumper. В базе с 0 FK из 245
+        // таблиц он единственный, который вообще что-то задаёт.
+        $cascadeByChild = [];
+        foreach ($keys as $childKey) {
+            $parts = explode('.', $childKey, 2);
+            if (count($parts) !== 2) {
+                continue;
+            }
+            $tableConfig = $this->tableConfig($parts[0], $parts[1]);
+            if ($tableConfig === null) {
+                continue;
+            }
+            $cascade = $tableConfig->getCascadeFrom();
+            if ($cascade !== null && $cascade !== []) {
+                $cascadeByChild[$childKey] = $cascade;
+            }
+        }
+        foreach (TableDependencyResolver::cascadeEdges($cascadeByChild) as $childKey => $parents) {
+            if (!isset($adjacency[$childKey])) {
+                continue;
+            }
+            foreach ($parents as $parentKey => $_columns) {
+                if (!isset($keySet[$parentKey]) || $parentKey === $childKey) {
                     continue;
                 }
                 if (!in_array($parentKey, $adjacency[$childKey], true)) {
