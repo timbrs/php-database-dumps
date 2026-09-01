@@ -4,6 +4,6 @@ description: Построить карту связей и использова�
 ---
 
 Построй карту связей и использования колонок по инструкции агента dbdump-mapper, опираясь на
-`database/analysis/schema_inventory.json`. Результат запиши в `database/analysis/out/`.
+`{data_dir}/analysis/schema_inventory.json`. Результат запиши в `{data_dir}/analysis/out/`.
 
 $ARGUMENTS

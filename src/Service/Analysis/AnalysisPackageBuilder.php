@@ -17,9 +17,9 @@ use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
  * Готовит пакет для анализа кода хоста агентом OPENCODE (dbdump-mapper):
  *  - .opencode/agents/dbdump-mapper.md      — готовый агент (read-only код + запись в out/)
  *  - .opencode/commands/dbdump-map.md       — слэш-команда (опционально)
- *  - database/analysis/schema_inventory.json — вход (схемы/таблицы/колонки/FK/профили, БЕЗ значений данных)
- *  - database/analysis/output_schema.json    — JSON-контракт вывода
- *  - database/analysis/RUN.md                — инструкции запуска
+ *  - {data_dir}/analysis/schema_inventory.json — вход (схемы/таблицы/колонки/FK/профили, БЕЗ значений данных)
+ *  - {data_dir}/analysis/output_schema.json    — JSON-контракт вывода
+ *  - {data_dir}/analysis/RUN.md                — инструкции запуска
  *  - database/analysis/out/                  — каталог для результатов агента
  *
  * Сам прогон OPENCODE пользователь запускает вручную по RUN.md; модуль его не вызывает.
@@ -88,7 +88,7 @@ class AnalysisPackageBuilder
     }
 
     /**
-     * Базовый каталог данных (относительный): из store, иначе дефолт 'database'.
+     * Базовый каталог данных (относительный): из store, иначе DbdumpConfigStore::DEFAULT_DATA_DIR.
      */
     private function dataDir(): string
     {
@@ -154,28 +154,28 @@ class AnalysisPackageBuilder
             $schemaFiles[$schemaName] = $p;
         }
 
-        $contract = $this->loadResource('output_schema.json');
+        $contract = $this->renderResource('output_schema.json', $dataDir);
         if ($contract !== null) {
             $p = $analysisDir . '/output_schema.json';
             $this->fileSystem->write($p, $contract);
             $paths[] = $p;
         }
 
-        $agent = $this->loadResource('dbdump-mapper.md');
+        $agent = $this->renderResource('dbdump-mapper.md', $dataDir);
         if ($agent !== null) {
             $p = $agentsDir . '/dbdump-mapper.md';
             $this->fileSystem->write($p, $agent);
             $paths[] = $p;
         }
 
-        $command = $this->loadResource('dbdump-map.command.md');
+        $command = $this->renderResource('dbdump-map.command.md', $dataDir);
         if ($command !== null) {
             $p = $commandsDir . '/dbdump-map.md';
             $this->fileSystem->write($p, $command);
             $paths[] = $p;
         }
 
-        $run = $this->loadResource('RUN.md');
+        $run = $this->renderResource('RUN.md', $dataDir);
         if ($run !== null) {
             $p = $analysisDir . '/RUN.md';
             $this->fileSystem->write($p, $run);
@@ -536,6 +536,19 @@ class AnalysisPackageBuilder
         if (!$this->fileSystem->exists($dir)) {
             $this->fileSystem->createDirectory($dir);
         }
+    }
+
+    /**
+     * Ресурс с подставленным data_dir. В шаблонах пути к анализу записаны как
+     * `{data_dir}/analysis/...`: агенту OPENCODE и человеку нужен реальный путь, а он
+     * зависит от настройки, поэтому раскрываем его в момент записи файла в проект.
+     *
+     * @return string|null
+     */
+    protected function renderResource(string $name, string $dataDir)
+    {
+        $content = $this->loadResource($name);
+        return $content === null ? null : str_replace('{data_dir}', $dataDir, $content);
     }
 
     /**

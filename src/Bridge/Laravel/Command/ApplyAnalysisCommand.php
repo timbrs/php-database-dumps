@@ -16,7 +16,7 @@ class ApplyAnalysisCommand extends Command
     protected $signature = 'dbdump:apply-analysis';
 
     /** @var string */
-    protected $description = 'Применить результаты OPENCODE (database/analysis/out/*.json) к dump_config.yaml';
+    protected $description = 'Применить результаты OPENCODE ({data_dir}/analysis/out/*.json) к dump_config.yaml';
 
     /** @var AnalysisIngestor */
     private $ingestor;

@@ -6,7 +6,7 @@ use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 
 /**
- * Поглощает вывод агента OPENCODE: читает database/analysis/out/*.json,
+ * Поглощает вывод агента OPENCODE: читает {data_dir}/analysis/out/*.json,
  * валидирует против контракта (output_schema.json), объединяет чанки и
  * нормализует в структуру для ConfigEnricher.
  *

@@ -1,7 +1,8 @@
 <?php
 
 return [
-    'config_path' => base_path('database/dump_config.yaml'),
+    // Главный конфиг выгрузки лежит внутри data_dir — рядом с dump-settings/, dumps/ и analysis/.
+    'config_path' => base_path(env('DBDUMP_DATA_DIR', 'docker/database') . '/dump_config.yaml'),
     'project_dir' => base_path(),
 
     /*
@@ -9,11 +10,12 @@ return [
     | Базовый каталог данных
     |--------------------------------------------------------------------------
     |
-    | От него считаются дампы ({data_dir}/dumps), анализ ({data_dir}/analysis)
-    | и хуки ({data_dir}/before_exec, {data_dir}/after_exec). По умолчанию
-    | 'database'; можно задать, например, 'var/database'.
+    | От него считаются главный конфиг ({data_dir}/dump_config.yaml), пер-схемные
+    | файлы ({data_dir}/dump-settings), дампы ({data_dir}/dumps), анализ
+    | ({data_dir}/analysis) и хуки ({data_dir}/before_exec, {data_dir}/after_exec).
+    | По умолчанию 'docker/database'; можно задать, например, 'database'.
     */
-    'data_dir' => env('DBDUMP_DATA_DIR', 'database'),
+    'data_dir' => env('DBDUMP_DATA_DIR', 'docker/database'),
 
     /*
     |--------------------------------------------------------------------------

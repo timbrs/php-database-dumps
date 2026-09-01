@@ -45,8 +45,9 @@ class DbInitCommand extends Command
   php bin/console app:dbdump:import --connection=secondary   Импорт из подключения secondary
 
 Скрипты:
-  database/before_exec/*.sql      Выполняются до импорта (по алфавиту)
-  database/after_exec/*.sql       Выполняются после импорта (по алфавиту)
+  {data_dir}/before_exec/*.sql    Выполняются до импорта (по алфавиту)
+  {data_dir}/after_exec/*.sql     Выполняются после импорта (по алфавиту)
+  data_dir по умолчанию docker/database (config/database-dumps.php)
 HELP
             );
     }

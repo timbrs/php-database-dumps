@@ -138,7 +138,7 @@ class ConfigGenerator
     }
 
     /**
-     * Базовый каталог данных (относительный): из store, иначе дефолт 'database'.
+     * Базовый каталог данных (относительный): из store, иначе DbdumpConfigStore::DEFAULT_DATA_DIR.
      */
     private function dataDir(): string
     {
@@ -333,9 +333,9 @@ class ConfigGenerator
             return;
         }
 
-        // Каталог анализа — сиблинг database/dumps (database/analysis), якорится на корне
-        // проекта, чтобы совпадать с prepare-analysis/apply-analysis независимо от того,
-        // где лежит сам dump_config.yaml (в Symfony — config/, в Laravel — database/).
+        // Каталог анализа — сиблинг {data_dir}/dumps, якорится на корне проекта, чтобы
+        // совпадать с prepare-analysis/apply-analysis независимо от того, куда указывает
+        // config_path (его можно переопределить в обход data_dir).
         $analysisDir = $this->projectDir !== null
             ? $this->projectDir . '/' . $this->dataDir() . '/' . AnalysisPackageBuilder::ANALYSIS_DIR
             : dirname($outputPath) . '/analysis';

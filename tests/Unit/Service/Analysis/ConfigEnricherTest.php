@@ -14,7 +14,7 @@ class ConfigEnricherTest extends TestCase
     /** @var array<string, string> path => content */
     private $written = [];
 
-    private const CONFIG_PATH = '/proj/database/dump_config.yaml';
+    private const CONFIG_PATH = '/proj/docker/database/dump_config.yaml';
 
     private function enricher(string $configYaml): ConfigEnricher
     {
@@ -120,7 +120,7 @@ class ConfigEnricherTest extends TestCase
         $enricher = $this->enricher($this->baseConfig());
         $enricher->enrich(self::CONFIG_PATH, $this->ingested());
 
-        $reportPath = '/proj/database/analysis/REPORT.md';
+        $reportPath = '/proj/docker/database/analysis/REPORT.md';
         $this->assertArrayHasKey($reportPath, $this->written);
         $this->assertStringContainsString('Анализ кода (OPENCODE)', $this->written[$reportPath]);
         $this->assertStringContainsString('public.clients', $this->written[$reportPath]);
@@ -317,7 +317,7 @@ class ConfigEnricherTest extends TestCase
         });
 
         // Секция данных уже записана прогоном --deep.
-        $reportPath = '/proj/database/analysis/REPORT.md';
+        $reportPath = '/proj/docker/database/analysis/REPORT.md';
         $written[$reportPath] = "# Отчёт углублённого анализа БД\n<!-- DATA-ANALYSIS:begin -->\n## Анализ данных\nпрофиль\n<!-- DATA-ANALYSIS:end -->\n";
 
         $enricher = new ConfigEnricher($fs, $this->createMock(ConfigSplitter::class), $this->createMock(LoggerInterface::class), '/proj');
@@ -330,7 +330,7 @@ class ConfigEnricherTest extends TestCase
         $this->assertStringContainsString('Анализ кода (OPENCODE)', $md);
 
         // code_analysis записан в JSON.
-        $jsonPath = '/proj/database/analysis/analysis_result.json';
+        $jsonPath = '/proj/docker/database/analysis/analysis_result.json';
         $this->assertArrayHasKey($jsonPath, $written);
         $decoded = json_decode($written[$jsonPath], true);
         $this->assertArrayHasKey('code_analysis', $decoded);
@@ -338,7 +338,7 @@ class ConfigEnricherTest extends TestCase
     }
 
     /**
-     * При заданном projectDir отчёт пишется в projectDir/database/analysis,
+     * При заданном projectDir отчёт пишется в projectDir/docker/database/analysis,
      * независимо от расположения конфига (важно для Symfony, где конфиг лежит в config/).
      */
     public function testReportAnchoredOnProjectDirWhenProvided(): void
@@ -368,8 +368,8 @@ class ConfigEnricherTest extends TestCase
         );
         $enricher->enrich('/proj/config/dump_config.yaml', $this->ingested());
 
-        // Отчёт — в projectDir/database/analysis, а не рядом с конфигом (config/analysis).
-        $this->assertArrayHasKey('/proj/database/analysis/REPORT.md', $this->written);
+        // Отчёт — в projectDir/docker/database/analysis, а не рядом с конфигом (config/analysis).
+        $this->assertArrayHasKey('/proj/docker/database/analysis/REPORT.md', $this->written);
         $this->assertArrayNotHasKey('/proj/config/analysis/REPORT.md', $this->written);
     }
 

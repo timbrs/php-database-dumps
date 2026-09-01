@@ -151,12 +151,12 @@ php bin/console app:dbdump:prepare-analysis --run    # Symfony
 
 Команда сгенерирует в хост-проект всё необходимое для связки с opencode:
 
-- `.opencode/agents/dbdump-mapper.md` — готовый агент (read-only по коду, пишет только в `database/analysis/out/`);
-- `database/analysis/schema_inventory.json` + `schema_inventory.<schema>.json` — инвентарь БД для агента (**без значений данных** — PII не выгружается);
-- `database/analysis/output_schema.json` — контракт JSON-вывода;
-- `database/analysis/RUN.md` — точные команды для ручного прогона.
+- `.opencode/agents/dbdump-mapper.md` — готовый агент (read-only по коду, пишет только в `docker/database/analysis/out/`);
+- `docker/database/analysis/schema_inventory.json` + `schema_inventory.<schema>.json` — инвентарь БД для агента (**без значений данных** — PII не выгружается);
+- `docker/database/analysis/output_schema.json` — контракт JSON-вывода;
+- `docker/database/analysis/RUN.md` — точные команды для ручного прогона.
 
-Результат (связи из кода → `cascade_from: source: code`, бизнес-сегменты → `sample.criteria`) дописывается в `dump_config.yaml`, отчёт — в `database/analysis/REPORT.md`. Пользовательские правки в YAML в приоритете. Если `opencode` не найден — команда не упадёт, а напечатает готовые к вставке строки запуска. Подробнее — в разделе [Анализ кода через OPENCODE](#анализ-кода-через-opencode).
+Результат (связи из кода → `cascade_from: source: code`, бизнес-сегменты → `sample.criteria`) дописывается в `dump_config.yaml`, отчёт — в `docker/database/analysis/REPORT.md`. Пользовательские правки в YAML в приоритете. Если `opencode` не найден — команда не упадёт, а напечатает готовые к вставке строки запуска. Подробнее — в разделе [Анализ кода через OPENCODE](#анализ-кода-через-opencode).
 
 ### Шаг 3. Экспортировать и импортировать дампы
 
@@ -186,7 +186,7 @@ php bin/console app:dbdump:configure-llm         # Symfony
 Timbrs\DatabaseDumps\Bridge\Symfony\DatabaseDumpsBundle::class => ['dev' => true, 'test' => true],
 ```
 
-2. Создайте файл `database/dump_config.yaml` (путь по умолчанию; переопределяется ключом `config_path`):
+2. Создайте файл `docker/database/dump_config.yaml` (путь по умолчанию; переопределяется ключом `config_path`):
 
 ```yaml
 full_export:
@@ -217,9 +217,9 @@ php bin/console app:dbdump:import
 
 ### Laravel
 
-1. Сервис-провайдер подключается автоматически. Файл `database/dump_config.yaml` создаётся при первом запуске.
+1. Сервис-провайдер подключается автоматически. Файл `docker/database/dump_config.yaml` создаётся при первом запуске.
 
-2. Отредактируйте `database/dump_config.yaml` (формат тот же, что и для Symfony).
+2. Отредактируйте `docker/database/dump_config.yaml` (формат тот же, что и для Symfony).
 
 3. Экспортируйте дампы:
 
@@ -389,10 +389,10 @@ faker:
 
 ### Разделение конфига по схемам (includes)
 
-При большом количестве таблиц конфигурация может стать громоздкой. Команда `prepare-config` по умолчанию разбивает конфиг на отдельные файлы по схемам. Главный `dump_config.yaml` лежит в `database/`, а пер-схемные файлы — в подкаталоге `database/dump-settings/`:
+При большом количестве таблиц конфигурация может стать громоздкой. Команда `prepare-config` по умолчанию разбивает конфиг на отдельные файлы по схемам. Главный `dump_config.yaml` лежит в `docker/database/`, а пер-схемные файлы — в подкаталоге `docker/database/dump-settings/`:
 
 ```
-database/
+docker/database/
 ├── dump_config.yaml               # главный файл с includes
 └── dump-settings/
     ├── public.yaml                # конфигурация схемы public
@@ -401,7 +401,7 @@ database/
         └── analytics.yaml
 ```
 
-**Главный файл (`database/dump_config.yaml`):**
+**Главный файл (`docker/database/dump_config.yaml`):**
 
 ```yaml
 includes:
@@ -416,7 +416,7 @@ connections:
 
 > 💡 Пути к include пишутся с префиксом `./` — так PhpStorm/IDE распознают их как ссылки на файлы: `Ctrl+B` / `Cmd+B` (или Ctrl+клик) на пути прыгает прямо в нужный `*.yaml`. На резолв путей загрузчиком префикс не влияет (работают оба варианта — с `./` и без).
 
-**Файл схемы (`database/dump-settings/public.yaml`):**
+**Файл схемы (`docker/database/dump-settings/public.yaml`):**
 
 ```yaml
 full_export:
@@ -468,7 +468,9 @@ connections:
 - Основное подключение: `{data_dir}/dumps/{schema}/{table}.sql`
 - Именованное подключение: `{data_dir}/dumps/{connection}/{schema}/{table}.sql`
 
-`data_dir` — базовый каталог данных (по умолчанию `database`), от него считаются дампы (`{data_dir}/dumps`), анализ (`{data_dir}/analysis`) и хуки (`{data_dir}/before_exec`, `{data_dir}/after_exec`). Изменить можно в `config/database-dumps.php` (ключ `data_dir`, например `'var/database'`) или через env `DBDUMP_DATA_DIR`. В prod всегда используется дефолт `database`.
+`data_dir` — базовый каталог данных (по умолчанию `docker/database`), от него считается **всё**, что порождает пакет: главный конфиг (`{data_dir}/dump_config.yaml`), пер-схемные файлы (`{data_dir}/dump-settings`), дампы (`{data_dir}/dumps`), анализ (`{data_dir}/analysis`) и хуки (`{data_dir}/before_exec`, `{data_dir}/after_exec`). Изменить можно в `config/database-dumps.php` (ключ `data_dir`, например `'database'`) или через env `DBDUMP_DATA_DIR`. В prod всегда используется дефолт `docker/database`.
+
+> **Смена дефолта в 1.1.23.** Раньше дефолтом был `database`, а путь к `dump_config.yaml` был зашит отдельной константой и не следовал за `data_dir`. Теперь дефолт — `docker/database`, и конфиг живёт внутри `data_dir` вместе с дампами. Установка, которая полагалась на прежний дефолт (в `config/database-dumps.php` нет ключа `data_dir`), после обновления перестанет видеть свои файлы — пропишите `'data_dir' => 'database'` либо перенесите каталог.
 
 **Опция `--connection`:**
 
@@ -537,7 +539,7 @@ php artisan dbdump:prepare-config new
 | `--no-split` | Генерировать единый YAML без разделения по схемам | — |
 | `--criteria` | Авто-генерация `sample.criteria` из категориальных колонок | — |
 | `--ai` / `--no-ai` | Включить/отключить LLM-детекцию ПД (авто: включается, если LLM настроен — env `DBDUMP_LLM_URL` или `config/database-dumps.php`). `--no-ai` также подавляет авто-запрос настройки LLM при первом запуске | авто |
-| `--deep` | Глубокий анализ: профилирование + ИИ + `sample.criteria` + отчёт `database/analysis/REPORT.md` | — |
+| `--deep` | Глубокий анализ: профилирование + ИИ + `sample.criteria` + отчёт `docker/database/analysis/REPORT.md` | — |
 
 **Как распределяются таблицы:**
 - Строк <= порога — `full_export`
@@ -583,7 +585,7 @@ php artisan dbdump:prepare-config all --deep
 
 - `--ai` использует LLM для классификации ПД (regex-результаты подаются как hints; принимаются типы с уверенностью выше порога, маппятся на `fio/email/phone/...`). При недоступном LLM — тихий fallback на regex + предупреждение.
 - `--criteria` профилирует категориальные колонки и предлагает `sample.criteria` (по корзине на топ-значение).
-- `--deep` включает всё перечисленное + пишет отчёт `database/analysis/REPORT.md` (+ машинный `analysis_result.json`): режим экспорта, предложенные критерии с SQL и обоснованием, ПД (regex vs LLM), профиль колонок.
+- `--deep` включает всё перечисленное + пишет отчёт `docker/database/analysis/REPORT.md` (+ машинный `analysis_result.json`): режим экспорта, предложенные критерии с SQL и обоснованием, ПД (regex vs LLM), профиль колонок.
 
 Переменные окружения LLM:
 
@@ -617,8 +619,8 @@ php artisan dbdump:prepare-analysis                # Laravel
 
 # 2. Запустить агента по чанку на схему (точные строки печатает команда из шага 1, см. также RUN.md)
 opencode run --agent dbdump-mapper \
-  -f database/analysis/schema_inventory.public.json \
-  "Обработай схему public по инструкции; результат запиши в database/analysis/out/public.json"
+  -f docker/database/analysis/schema_inventory.public.json \
+  "Обработай схему public по инструкции; результат запиши в docker/database/analysis/out/public.json"
 
 # 3. Применить результат к dump_config.yaml
 php bin/console app:dbdump:apply-analysis          # Symfony
@@ -626,13 +628,13 @@ php artisan dbdump:apply-analysis                  # Laravel
 ```
 
 Что провижинит `prepare-analysis` в хост-проект:
-- `.opencode/agents/dbdump-mapper.md` — готовый агент (read-only по коду; пишет только в `database/analysis/out/`);
+- `.opencode/agents/dbdump-mapper.md` — готовый агент (read-only по коду; пишет только в `docker/database/analysis/out/`);
 - `.opencode/commands/dbdump-map.md` — слэш-команда для TUI (опционально);
-- `database/analysis/schema_inventory.json` — полный инвентарь + `schema_inventory.<schema>.json` по каждой схеме (для прогона по чанку без переполнения контекста 128k), **без значений данных** (PII в OPENCODE не выгружается);
-- `database/analysis/output_schema.json` — JSON-контракт ответа;
-- `database/analysis/RUN.md` — точные команды запуска и применения.
+- `docker/database/analysis/schema_inventory.json` — полный инвентарь + `schema_inventory.<schema>.json` по каждой схеме (для прогона по чанку без переполнения контекста 128k), **без значений данных** (PII в OPENCODE не выгружается);
+- `docker/database/analysis/output_schema.json` — JSON-контракт ответа;
+- `docker/database/analysis/RUN.md` — точные команды запуска и применения.
 
-`apply-analysis` читает `database/analysis/out/*.json`, валидирует против контракта, объединяет чанки и обогащает `dump_config.yaml`: `cascade_from` из кода (с пометкой `source: code` в отчёте) и `sample.criteria` из бизнес-сегментов. Пользовательские правки в приоритете — добавляется только отсутствующее; провенанс/уверенность фиксируются в `database/analysis/REPORT.md`.
+`apply-analysis` читает `docker/database/analysis/out/*.json`, валидирует против контракта, объединяет чанки и обогащает `dump_config.yaml`: `cascade_from` из кода (с пометкой `source: code` в отчёте) и `sample.criteria` из бизнес-сегментов. Пользовательские правки в приоритете — добавляется только отсутствующее; провенанс/уверенность фиксируются в `docker/database/analysis/REPORT.md`.
 
 Провайдер и модель LLM предполагаются уже настроенными в opencode пользователя (`~/.config/opencode/opencode.json`); агент не задаёт модель явно и наследует дефолтную — отдельной настройки не требуется. Для больших схем дробите прогон по чанку на схему (см. RUN.md).
 
@@ -647,13 +649,13 @@ php artisan dbdump:apply-analysis                  # Laravel
 ```bash
 # Symfony
 php bin/console app:dbdump:validate
-php bin/console app:dbdump:validate --format=json --out=database/analysis/findings.json
+php bin/console app:dbdump:validate --format=json --out=docker/database/analysis/findings.json
 php bin/console app:dbdump:validate -s pdl -s tasks --severity=warning
 php bin/console app:dbdump:validate --fix
 
 # Laravel
 php artisan dbdump:validate
-php artisan dbdump:validate --format=json --out=database/analysis/findings.json
+php artisan dbdump:validate --format=json --out=docker/database/analysis/findings.json
 ```
 
 Опции: `--config` и `--inventory` (пути, по умолчанию — `{data_dir}/dump_config.yaml` и
@@ -743,22 +745,23 @@ parameters:
 your-symfony-project/
 ├── config/
 │   └── database-dumps.php        # настройки пакета (data_dir + LLM)
-├── database/                     # = data_dir (по умолчанию)
-│   ├── dump_config.yaml          # главный конфиг с includes
-│   ├── dump-settings/            # пер-схемные файлы конфига
-│   │   ├── public.yaml
-│   │   └── system.yaml
-│   ├── before_exec/              # скрипты до импорта
-│   │   └── 01_prepare.sql
-│   ├── dumps/                    # SQL-дампы
-│   │   ├── public/
-│   │   │   ├── users.sql
-│   │   │   └── roles.sql
-│   │   └── analytics/            # именованное подключение
-│   │       └── analytics/
-│   │           └── events.sql
-│   └── after_exec/               # скрипты после импорта
-│       └── 01_finalize.sql
+└── docker/
+    └── database/                 # = data_dir (по умолчанию)
+        ├── dump_config.yaml      # главный конфиг с includes
+        ├── dump-settings/        # пер-схемные файлы конфига
+        │   ├── public.yaml
+        │   └── system.yaml
+        ├── before_exec/          # скрипты до импорта
+        │   └── 01_prepare.sql
+        ├── dumps/                # SQL-дампы
+        │   ├── public/
+        │   │   ├── users.sql
+        │   │   └── roles.sql
+        │   └── analytics/        # именованное подключение
+        │       └── analytics/
+        │           └── events.sql
+        └── after_exec/           # скрипты после импорта
+            └── 01_finalize.sql
 ```
 
 ### Команды Symfony
@@ -808,7 +811,7 @@ php bin/console app:dbdump:prepare-analysis --run    # всё одной ком�
 
 # Проверить конфиг по слепку схемы, без подключения к БД
 php bin/console app:dbdump:validate
-php bin/console app:dbdump:validate --format=json --out=database/analysis/findings.json
+php bin/console app:dbdump:validate --format=json --out=docker/database/analysis/findings.json
 php bin/console app:dbdump:validate --fix
 
 # Проверить sample.criteria на живой БД и починить падающие через opencode
@@ -840,8 +843,10 @@ php artisan vendor:publish --tag=database-dumps-config
 
 ```php
 return [
-    'config_path' => base_path('database/dump_config.yaml'),
+    // config_path следует за data_dir — конфиг лежит рядом с дампами и анализом
+    'config_path' => base_path(env('DBDUMP_DATA_DIR', 'docker/database') . '/dump_config.yaml'),
     'project_dir' => base_path(),
+    'data_dir' => env('DBDUMP_DATA_DIR', 'docker/database'),
 ];
 ```
 
@@ -892,7 +897,7 @@ php artisan dbdump:prepare-analysis --run            # всё одной ком�
 
 # Проверить конфиг по слепку схемы, без подключения к БД
 php artisan dbdump:validate
-php artisan dbdump:validate --format=json --out=database/analysis/findings.json
+php artisan dbdump:validate --format=json --out=docker/database/analysis/findings.json
 php artisan dbdump:validate --fix
 
 # Проверить sample.criteria на живой БД и починить падающие через opencode
@@ -905,16 +910,16 @@ php artisan dbdump:repair-configs --dry-run
 
 | Каталог | Когда выполняется |
 |---------|-------------------|
-| `database/before_exec/` | **до** импорта дампов |
-| `database/after_exec/` | **после** импорта дампов |
+| `docker/database/before_exec/` | **до** импорта дампов |
+| `docker/database/after_exec/` | **после** импорта дампов |
 
 Скрипты выполняются в **алфавитном порядке**. Используйте числовые префиксы для управления очерёдностью:
 
 ```
-database/before_exec/
+docker/database/before_exec/
 ├── 01_disable_triggers.sql
 ├── 02_prepare_temp.sql
-database/after_exec/
+docker/database/after_exec/
 ├── 01_enable_triggers.sql
 ├── 02_refresh_views.sql
 ```
@@ -939,7 +944,7 @@ php artisan dbdump:import --skip-before --skip-after
 # yaml-language-server: $schema=../vendor/timbrs/database-dumps/resources/dump_config.schema.json
 ```
 
-> Путь указывается относительно файла: для Symfony — относительно `config/`, для Laravel — относительно `database/`.
+> Путь указывается относительно файла: для Symfony — относительно `config/`, для Laravel — относительно `docker/database/`.
 
 ### Вариант 2: Настройка PHPStorm вручную
 
@@ -963,7 +968,7 @@ php artisan dbdump:import --skip-before --skip-after
 5. **CascadeWhereResolver** — генерирует WHERE-подзапросы из `cascade_from` для связности данных
 6. **RussianFaker** — заменяет персональные данные (ФИО, email, телефон, пол) на сгенерированные
 7. **SqlGenerator** — генерирует SQL: TRUNCATE + INSERT (с NULL для разорванных FK) + сброс счётчиков + UPDATE (восстановление FK)
-8. Результат сохраняется в `database/dumps/{schema}/{table}.sql`
+8. Результат сохраняется в `docker/database/dumps/{schema}/{table}.sql`
 
 ### Как работает импорт
 
@@ -995,7 +1000,7 @@ php artisan dbdump:import --skip-before --skip-after
 
 Платформа определяется автоматически по подключению к БД.
 
-> **Oracle:** используется `DELETE FROM` вместо `TRUNCATE TABLE`, т.к. Oracle TRUNCATE не поддерживает CASCADE и блокируется FK constraints. Сброс sequences требует PL/SQL — используйте скрипты в `database/after_exec/`.
+> **Oracle:** используется `DELETE FROM` вместо `TRUNCATE TABLE`, т.к. Oracle TRUNCATE не поддерживает CASCADE и блокируется FK constraints. Сброс sequences требует PL/SQL — используйте скрипты в `docker/database/after_exec/`.
 
 <a id="структура-исходного-кода"></a>
 
@@ -1231,7 +1236,7 @@ composer require --dev timbrs/database-dumps
 Timbrs\DatabaseDumps\Bridge\Symfony\DatabaseDumpsBundle::class => ['dev' => true, 'test' => true],
 ```
 
-2. Create `database/dump_config.yaml` (default path; override via `config_path`):
+2. Create `docker/database/dump_config.yaml` (default path; override via `config_path`):
 
 ```yaml
 full_export:
@@ -1262,9 +1267,9 @@ php bin/console app:dbdump:import
 
 ### Laravel
 
-1. The service provider is discovered automatically. The file `database/dump_config.yaml` is created on first run.
+1. The service provider is discovered automatically. The file `docker/database/dump_config.yaml` is created on first run.
 
-2. Edit `database/dump_config.yaml` (same format as Symfony).
+2. Edit `docker/database/dump_config.yaml` (same format as Symfony).
 
 3. Export dumps:
 
@@ -1401,10 +1406,10 @@ Replacement is deterministic — the seed is based on the hash of the FIO value 
 
 ### Config Splitting by Schema (includes)
 
-When dealing with many tables, the configuration can become unwieldy. The `prepare-config` command splits config into per-schema files by default. The main `dump_config.yaml` lives in `database/`, and per-schema files go into the `database/dump-settings/` subdirectory:
+When dealing with many tables, the configuration can become unwieldy. The `prepare-config` command splits config into per-schema files by default. The main `dump_config.yaml` lives in `docker/database/`, and per-schema files go into the `docker/database/dump-settings/` subdirectory:
 
 ```
-database/
+docker/database/
 ├── dump_config.yaml               # main file with includes
 └── dump-settings/
     ├── public.yaml                # public schema config
@@ -1413,7 +1418,7 @@ database/
         └── analytics.yaml
 ```
 
-**Main file (`database/dump_config.yaml`):**
+**Main file (`docker/database/dump_config.yaml`):**
 
 ```yaml
 includes:
@@ -1428,7 +1433,7 @@ connections:
 
 > 💡 Include paths are written with a `./` prefix so PhpStorm/IDEs treat them as file references: `Ctrl+B` / `Cmd+B` (or Ctrl+click) on a path jumps straight to the target `*.yaml`. The prefix does not affect path resolution (both `./`-prefixed and plain relative paths load fine).
 
-**Schema file (`database/dump-settings/public.yaml`):**
+**Schema file (`docker/database/dump-settings/public.yaml`):**
 
 ```yaml
 full_export:
@@ -1477,8 +1482,21 @@ connections:
 ```
 
 **Where dumps are saved:**
-- Main connection: `database/dumps/{schema}/{table}.sql`
-- Named connection: `database/dumps/{connection}/{schema}/{table}.sql`
+- Main connection: `{data_dir}/dumps/{schema}/{table}.sql`
+- Named connection: `{data_dir}/dumps/{connection}/{schema}/{table}.sql`
+
+`data_dir` is the base data directory (default `docker/database`). **Everything** the package
+produces is resolved from it: the main config (`{data_dir}/dump_config.yaml`), per-schema files
+(`{data_dir}/dump-settings`), dumps (`{data_dir}/dumps`), analysis (`{data_dir}/analysis`) and
+hooks (`{data_dir}/before_exec`, `{data_dir}/after_exec`). Change it in
+`config/database-dumps.php` (key `data_dir`, e.g. `'database'`) or via the `DBDUMP_DATA_DIR` env
+var. In prod the default `docker/database` is always used.
+
+> **Default changed in 1.1.23.** It used to be `database`, and the path to `dump_config.yaml` was a
+> separate hardcoded constant that did not follow `data_dir`. The default is now `docker/database`,
+> and the config lives inside `data_dir` next to the dumps. An installation that relied on the old
+> default (no `data_dir` key in `config/database-dumps.php`) will stop seeing its files after the
+> upgrade — set `'data_dir' => 'database'` or move the directory.
 
 **The `--connection` option:**
 
@@ -1583,22 +1601,23 @@ parameters:
 your-symfony-project/
 ├── config/
 │   └── database-dumps.php        # package settings (data_dir + LLM)
-├── database/                     # = data_dir (default)
-│   ├── dump_config.yaml          # main config with includes
-│   ├── dump-settings/            # per-schema config files
-│   │   ├── public.yaml
-│   │   └── system.yaml
-│   ├── before_exec/              # pre-import scripts
-│   │   └── 01_prepare.sql
-│   ├── dumps/                    # SQL dumps
-│   │   ├── public/
-│   │   │   ├── users.sql
-│   │   │   └── roles.sql
-│   │   └── analytics/            # named connection
-│   │       └── analytics/
-│   │           └── events.sql
-│   └── after_exec/               # post-import scripts
-│       └── 01_finalize.sql
+└── docker/
+    └── database/                 # = data_dir (default)
+        ├── dump_config.yaml      # main config with includes
+        ├── dump-settings/        # per-schema config files
+        │   ├── public.yaml
+        │   └── system.yaml
+        ├── before_exec/          # pre-import scripts
+        │   └── 01_prepare.sql
+        ├── dumps/                # SQL dumps
+        │   ├── public/
+        │   │   ├── users.sql
+        │   │   └── roles.sql
+        │   └── analytics/        # named connection
+        │       └── analytics/
+        │           └── events.sql
+        └── after_exec/           # post-import scripts
+            └── 01_finalize.sql
 ```
 
 ### Symfony Commands
@@ -1667,8 +1686,10 @@ This creates `config/database-dumps.php`:
 
 ```php
 return [
-    'config_path' => base_path('database/dump_config.yaml'),
+    // config_path следует за data_dir — конфиг лежит рядом с дампами и анализом
+    'config_path' => base_path(env('DBDUMP_DATA_DIR', 'docker/database') . '/dump_config.yaml'),
     'project_dir' => base_path(),
+    'data_dir' => env('DBDUMP_DATA_DIR', 'docker/database'),
 ];
 ```
 
@@ -1719,16 +1740,16 @@ You can run custom SQL scripts before and after import.
 
 | Directory | When it runs |
 |-----------|-------------|
-| `database/before_exec/` | **before** importing dumps |
-| `database/after_exec/` | **after** importing dumps |
+| `docker/database/before_exec/` | **before** importing dumps |
+| `docker/database/after_exec/` | **after** importing dumps |
 
 Scripts run in **alphabetical order**. Use numeric prefixes to control the order:
 
 ```
-database/before_exec/
+docker/database/before_exec/
 ├── 01_disable_triggers.sql
 ├── 02_prepare_temp.sql
-database/after_exec/
+docker/database/after_exec/
 ├── 01_enable_triggers.sql
 ├── 02_refresh_views.sql
 ```
@@ -1753,7 +1774,7 @@ Add to the top of your `dump_config.yaml`:
 # yaml-language-server: $schema=../vendor/timbrs/database-dumps/resources/dump_config.schema.json
 ```
 
-> The path is relative to the file: for Symfony — relative to `config/`, for Laravel — relative to `database/`.
+> The path is relative to the file: for Symfony — relative to `config/`, for Laravel — relative to `docker/database/`.
 
 ### Option 2: PHPStorm manual setup
 
@@ -1777,7 +1798,7 @@ Command → TableConfigResolver → DatabaseDumper → [FK sorting + Cycle Break
 5. **CascadeWhereResolver** — generates WHERE subqueries from `cascade_from` for data consistency
 6. **RussianFaker** — replaces personal data (names, email, phone, gender) with generated values
 7. **SqlGenerator** — generates SQL: TRUNCATE + INSERT (with NULL for broken FKs) + counter reset + UPDATE (FK restoration)
-8. Result is saved to `database/dumps/{schema}/{table}.sql`
+8. Result is saved to `docker/database/dumps/{schema}/{table}.sql`
 
 ### How Import Works
 
@@ -1809,7 +1830,7 @@ The package generates the right SQL depending on the database:
 
 The platform is detected automatically from the DB connection.
 
-> **Oracle:** `DELETE FROM` is used instead of `TRUNCATE TABLE` because Oracle TRUNCATE doesn't support CASCADE and is blocked by FK constraints. Sequence reset requires PL/SQL — use scripts in `database/after_exec/`.
+> **Oracle:** `DELETE FROM` is used instead of `TRUNCATE TABLE` because Oracle TRUNCATE doesn't support CASCADE and is blocked by FK constraints. Sequence reset requires PL/SQL — use scripts in `docker/database/after_exec/`.
 
 <a id="source-directory-structure"></a>
 

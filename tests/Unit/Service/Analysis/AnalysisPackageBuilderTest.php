@@ -165,7 +165,7 @@ class AnalysisPackageBuilderTest extends TestCase
         $this->written = [];
         $this->builder()->build();
 
-        $invPath = '/proj/database/analysis/schema_inventory.json';
+        $invPath = '/proj/docker/database/analysis/schema_inventory.json';
         $this->assertArrayHasKey($invPath, $this->written);
         $content = $this->written[$invPath];
         $this->assertStringNotContainsString('СЕКРЕТНОЕ_ПД_ЗНАЧЕНИЕ', $content);
@@ -189,11 +189,35 @@ class AnalysisPackageBuilderTest extends TestCase
         $result = $this->builder()->build();
 
         $paths = implode("\n", array_keys($this->written));
-        $this->assertStringContainsString('/proj/database/analysis/schema_inventory.json', $paths);
+        $this->assertStringContainsString('/proj/docker/database/analysis/schema_inventory.json', $paths);
         $this->assertStringContainsString('/proj/.opencode/agents/dbdump-mapper.md', $paths);
-        $this->assertStringContainsString('/proj/database/analysis/RUN.md', $paths);
-        $this->assertStringContainsString('/proj/database/analysis/output_schema.json', $paths);
+        $this->assertStringContainsString('/proj/docker/database/analysis/RUN.md', $paths);
+        $this->assertStringContainsString('/proj/docker/database/analysis/output_schema.json', $paths);
         $this->assertSame(2, $result['tables']);
+    }
+
+    /**
+     * Шаблоны для OPENCODE ссылаются на каталог анализа как {data_dir}/analysis. Агент получает
+     * их как есть, поэтому плейсхолдер обязан раскрыться при записи — иначе агент пишет туда,
+     * откуда apply-analysis ничего не читает.
+     */
+    public function testProvisionedResourcesResolveDataDirPlaceholder(): void
+    {
+        $this->written = [];
+        $this->builder()->build();
+
+        foreach (['/proj/docker/database/analysis/RUN.md',
+                  '/proj/.opencode/agents/dbdump-mapper.md',
+                  '/proj/.opencode/commands/dbdump-map.md',
+                  '/proj/docker/database/analysis/output_schema.json'] as $path) {
+            $this->assertArrayHasKey($path, $this->written);
+            $this->assertStringNotContainsString('{data_dir}', $this->written[$path], $path);
+        }
+
+        $this->assertStringContainsString(
+            'docker/database/analysis/out/',
+            $this->written['/proj/.opencode/agents/dbdump-mapper.md']
+        );
     }
 
     public function testBuildWritesPerSchemaInventory(): void
@@ -202,7 +226,7 @@ class AnalysisPackageBuilderTest extends TestCase
         $result = $this->builder()->build();
 
         // Пер-схемный файл записан и содержит ТОЛЬКО свою схему.
-        $perSchema = '/proj/database/analysis/schema_inventory.public.json';
+        $perSchema = '/proj/docker/database/analysis/schema_inventory.public.json';
         $this->assertArrayHasKey($perSchema, $this->written);
         $decoded = json_decode($this->written[$perSchema], true);
         $this->assertSame(['public'], array_keys($decoded['schemas']));
@@ -221,7 +245,7 @@ class AnalysisPackageBuilderTest extends TestCase
         $this->builder()->build();
 
         // Монолитный инвентарь несёт code_hints по таблице clients (entity + entity usage).
-        $invPath = '/proj/database/analysis/schema_inventory.json';
+        $invPath = '/proj/docker/database/analysis/schema_inventory.json';
         $this->assertArrayHasKey($invPath, $this->written);
         $inv = json_decode($this->written[$invPath], true);
         $hints = $inv['schemas']['public']['tables']['clients']['code_hints'];
@@ -229,7 +253,7 @@ class AnalysisPackageBuilderTest extends TestCase
         $this->assertArrayHasKey('entity usage', $hints['counts']);
 
         // Пер-схемный файл наследует code_hints.
-        $perSchema = '/proj/database/analysis/schema_inventory.public.json';
+        $perSchema = '/proj/docker/database/analysis/schema_inventory.public.json';
         $ps = json_decode($this->written[$perSchema], true);
         $this->assertArrayHasKey('code_hints', $ps['schemas']['public']['tables']['clients']);
 

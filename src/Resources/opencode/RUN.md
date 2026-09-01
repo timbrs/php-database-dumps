@@ -24,13 +24,13 @@ SELECT без JOIN/параметров) и при ошибках **сам пе�
 
 ## Что провижинено
 
-- `.opencode/agents/dbdump-mapper.md` — агент (read-only по коду, запись только в `database/analysis/out/`).
+- `.opencode/agents/dbdump-mapper.md` — агент (read-only по коду, запись только в `{data_dir}/analysis/out/`).
 - `.opencode/commands/dbdump-map.md` — слэш-команда для запуска из TUI (опционально).
-- `database/analysis/schema_inventory.json` — полный инвентарь (обзор / маленькие БД).
-- `database/analysis/schema_inventory.<schema>.json` — пер-схемный инвентарь (для прогона по чанку на схему,
+- `{data_dir}/analysis/schema_inventory.json` — полный инвентарь (обзор / маленькие БД).
+- `{data_dir}/analysis/schema_inventory.<schema>.json` — пер-схемный инвентарь (для прогона по чанку на схему,
   чтобы не переполнять контекст 128k на больших БД).
-- `database/analysis/output_schema.json` — контракт JSON-вывода.
-- `database/analysis/out/` — каталог, куда агент пишет результаты.
+- `{data_dir}/analysis/output_schema.json` — контракт JSON-вывода.
+- `{data_dir}/analysis/out/` — каталог, куда агент пишет результаты.
 
 Провайдер и модель по умолчанию настраиваются в `~/.config/opencode/opencode.json`; агент `dbdump-mapper`
 не задаёт модель явно и наследует дефолтную — отдельная настройка обычно не нужна.
@@ -50,7 +50,7 @@ opencode agent list      # в списке должен быть dbdump-mapper
 ```bash
 cd <host-project>
 opencode run --agent dbdump-mapper -m <provider/model> \
-  "Прочитай файл database/analysis/schema_inventory.json, построй карту связей и использования колонок по инструкции агента и запиши результат в database/analysis/out/"
+  "Прочитай файл {data_dir}/analysis/schema_inventory.json, построй карту связей и использования колонок по инструкции агента и запиши результат в {data_dir}/analysis/out/"
 ```
 
 Многосхемный/большой проект (контекст 128k) — дроби по чанку на схему, используя ПЕР-СХЕМНЫЙ инвентарь
@@ -58,7 +58,7 @@ opencode run --agent dbdump-mapper -m <provider/model> \
 
 ```bash
 opencode run --agent dbdump-mapper -m <provider/model> \
-  "Прочитай файл database/analysis/schema_inventory.public.json, обработай схему public по инструкции; результат — database/analysis/out/public.json"
+  "Прочитай файл {data_dir}/analysis/schema_inventory.public.json, обработай схему public по инструкции; результат — {data_dir}/analysis/out/public.json"
 ```
 
 Если бинарь называется иначе (напр. `opencode-cli`) — подставь своё имя (в командах `--run` оно
@@ -83,7 +83,7 @@ read/edit/write/grep/glob/list = allow) — отдельного CLI-флага 
 
 ## Чтение вывода
 
-Агент пишет файлы `database/analysis/out/*.json` по контракту `output_schema.json` (ключи
+Агент пишет файлы `{data_dir}/analysis/out/*.json` по контракту `output_schema.json` (ключи
 `relationships` / `columns` / `criteria`).
 
 ## Применение
@@ -96,6 +96,6 @@ php artisan dbdump:apply-analysis
 php bin/console app:dbdump:apply-analysis
 ```
 
-`apply-analysis` читает `database/analysis/out/*.json`, валидирует против контракта, объединяет чанки,
+`apply-analysis` читает `{data_dir}/analysis/out/*.json`, валидирует против контракта, объединяет чанки,
 обогащает `dump_config.yaml` (`cascade_from` с пометкой `source: code`, `sample.criteria`) и дополняет
-`database/analysis/REPORT.md`. Пользовательские правки в YAML в приоритете — добавляется только отсутствующее.
+`{data_dir}/analysis/REPORT.md`. Пользовательские правки в YAML в приоритете — добавляется только отсутствующее.

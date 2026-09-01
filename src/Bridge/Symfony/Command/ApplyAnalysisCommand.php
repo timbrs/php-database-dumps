@@ -54,7 +54,7 @@ class ApplyAnalysisCommand extends Command
     {
         $this
             ->setName('app:dbdump:apply-analysis')
-            ->setDescription('Применить результаты OPENCODE (database/analysis/out/*.json) к dump_config.yaml');
+            ->setDescription('Применить результаты OPENCODE ({data_dir}/analysis/out/*.json) к dump_config.yaml');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int

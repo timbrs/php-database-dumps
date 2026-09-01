@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Контракт вывода агента dbdump-mapper",
-  "description": "Файлы в database/analysis/out/*.json. Каждый файл может содержать любой набор из трёх ключей.",
+  "description": "Файлы в {data_dir}/analysis/out/*.json. Каждый файл может содержать любой набор из трёх ключей.",
   "type": "object",
   "properties": {
     "relationships": {

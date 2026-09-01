@@ -13,7 +13,8 @@ use Symfony\Component\Config\Definition\ConfigurationInterface;
  *   batch_size: 1000
  *   sample_size: 200
  *   max_cascade_depth: 10
- *   config_path: '%kernel.project_dir%/database/dump_config.yaml' (default)
+ *   config_path: null (default) — вычисляется как {data_dir}/dump_config.yaml,
+ *                где data_dir по умолчанию 'docker/database' (см. DbdumpConfigStore)
  */
 class Configuration implements ConfigurationInterface
 {

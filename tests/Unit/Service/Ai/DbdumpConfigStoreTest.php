@@ -110,7 +110,7 @@ class DbdumpConfigStoreTest extends TestCase
         $loaded = $store->load($this->projectDir);
         $this->assertIsArray($loaded);
         $this->assertSame('https://gpt.example.com/v1', $loaded['llm']['url']);
-        $this->assertSame('database', $loaded['data_dir']);
+        $this->assertSame('docker/database', $loaded['data_dir']);
     }
 
     public function testSavePreservesUnknownKeys(): void
@@ -219,7 +219,7 @@ class DbdumpConfigStoreTest extends TestCase
 
     public function testGetDataDirDefaultsWhenAbsent(): void
     {
-        $this->assertSame('database', $this->store()->getDataDir($this->projectDir));
+        $this->assertSame('docker/database', $this->store()->getDataDir($this->projectDir));
     }
 
     public function testGetDataDirDefaultsInProduction(): void
@@ -227,7 +227,32 @@ class DbdumpConfigStoreTest extends TestCase
         $store = $this->store(new EnvironmentConfig('prod'));
         $store->save($this->projectDir, AiConfig::fromArray(['url' => '', 'enabled' => false]), 'var/database');
 
-        $this->assertSame('database', $store->getDataDir($this->projectDir));
+        $this->assertSame('docker/database', $store->getDataDir($this->projectDir));
+    }
+
+    public function testGetConfigPathDefaultsUnderDataDir(): void
+    {
+        $this->assertSame(
+            $this->projectDir . '/docker/database/dump_config.yaml',
+            $this->store()->getConfigPath($this->projectDir)
+        );
+    }
+
+    public function testGetConfigPathFollowsDataDir(): void
+    {
+        $store = $this->store();
+        $store->save($this->projectDir, AiConfig::fromArray(['url' => '', 'enabled' => false]), 'var/database');
+
+        $this->assertSame(
+            $this->projectDir . '/var/database/dump_config.yaml',
+            $store->getConfigPath($this->projectDir)
+        );
+
+        putenv(DbdumpConfigStore::ENV_DATA_DIR . '=custom/dir');
+        $this->assertSame(
+            $this->projectDir . '/custom/dir/dump_config.yaml',
+            $store->getConfigPath($this->projectDir)
+        );
     }
 
     public function testGetOpencodeBinDefaultsWhenAbsent(): void

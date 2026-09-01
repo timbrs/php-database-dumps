@@ -11,22 +11,32 @@ use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
  *
  * Файл возвращает массив:
  *   [
- *     'data_dir' => 'database',   // база для дампов/анализа/хуков (можно 'var/database')
+ *     'data_dir' => 'docker/database', // база для конфига/дампов/анализа/хуков (можно 'var/database')
  *     'llm' => ['enabled' => .., 'url' => .., 'model' => .., 'timeout' => ..],
  *   ]
  * Секрет (token) в файле НЕ хранится — он в .env.local (DBDUMP_LLM_TOKEN),
  * см. EnvFileWriter. В Laravel это родной публикуемый конфиг (с env()).
  *
  * Приоритеты:
- *  - data_dir: env DBDUMP_DATA_DIR → файл data_dir → 'database'; в prod → 'database'.
+ *  - data_dir: env DBDUMP_DATA_DIR → файл data_dir → 'docker/database'; в prod → 'docker/database'.
  *  - llm: env DBDUMP_LLM_* (если задан URL) → файл; в prod → LLM выключен.
  *    Токен из окружения применяется поверх файла (URL из файла + token из env).
  */
 class DbdumpConfigStore
 {
     public const RELATIVE_PATH = 'config/database-dumps.php';
-    public const DEFAULT_DATA_DIR = 'database';
+
+    /**
+     * Базовый каталог данных по умолчанию. Всё, что порождает пакет, лежит под ним:
+     * главный конфиг ({data_dir}/dump_config.yaml), пер-схемные файлы
+     * ({data_dir}/dump-settings), дампы ({data_dir}/dumps), анализ ({data_dir}/analysis)
+     * и хуки ({data_dir}/before_exec, {data_dir}/after_exec).
+     */
+    public const DEFAULT_DATA_DIR = 'docker/database';
     public const ENV_DATA_DIR = 'DBDUMP_DATA_DIR';
+
+    /** Имя главного файла конфига выгрузки внутри data_dir. */
+    public const MAIN_CONFIG_FILE = 'dump_config.yaml';
 
     /** Имя бинаря opencode (напр. 'opencode-cli'): дефолт, env и ключ файла opencode.bin. */
     public const DEFAULT_OPENCODE_BIN = 'opencode';
@@ -147,7 +157,8 @@ class DbdumpConfigStore
     }
 
     /**
-     * Базовый каталог данных (относительный): env → файл → 'database'; в prod — всегда 'database'.
+     * Базовый каталог данных (относительный): env → файл → DEFAULT_DATA_DIR;
+     * в prod — всегда DEFAULT_DATA_DIR.
      */
     public function getDataDir(string $projectDir): string
     {
@@ -166,6 +177,17 @@ class DbdumpConfigStore
         }
 
         return self::DEFAULT_DATA_DIR;
+    }
+
+    /**
+     * Абсолютный путь к главному конфигу выгрузки: {projectDir}/{data_dir}/dump_config.yaml.
+     *
+     * Единая точка правды для бриджей — иначе конфиг и дампы разъезжаются по разным каталогам,
+     * когда data_dir переопределён, а путь к конфигу зашит константой.
+     */
+    public function getConfigPath(string $projectDir): string
+    {
+        return rtrim($projectDir, '/\\') . '/' . $this->getDataDir($projectDir) . '/' . self::MAIN_CONFIG_FILE;
     }
 
     /**

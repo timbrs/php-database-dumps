@@ -286,7 +286,7 @@ class DatabaseDumper
     }
 
     /**
-     * Базовый каталог данных (относительный): из store, иначе дефолт 'database'.
+     * Базовый каталог данных (относительный): из store, иначе DbdumpConfigStore::DEFAULT_DATA_DIR.
      */
     private function dataDir(): string
     {
