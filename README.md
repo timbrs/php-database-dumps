@@ -516,17 +516,22 @@ php artisan dbdump:prepare-config new
 
 | Режим | Описание |
 |-------|----------|
-| `all` | Полная регенерация конфигурации (перезаписывает файл) |
+| `all` | Полная регенерация конфигурации. Поверх существующего конфига **отказывает** — нужен `--force` |
 | `schema=<name>` | Перегенерация одной схемы, мёрж в существующий конфиг |
 | `table=<schema.table>` | Перегенерация одной таблицы, мёрж в существующий конфиг |
 | `new` | Обнаружение и дописывание новых таблиц (не затрагивает существующие) |
+
+Режим `all` собирает конфиг заново и существующий файл не читает: настроенные вручную `sample.criteria`,
+`cascade_from`, `limit` и `faker` он заменяет машинной догадкой. Поэтому при существующем `dump_config.yaml`
+команда отказывается работать и называет режимы, которые мёржат, а не затирают (`new`, `schema=`, `table=`),
+а также `repair-configs` и `validate`. Осознанная пересборка с нуля — `prepare-config all --force`.
 
 **Опции:**
 
 | Опция | Описание | По умолчанию |
 |-------|----------|-------------|
 | `--threshold`, `-t` | Порог строк: таблицы с количеством строк <= порога идут в full_export, больше — в partial_export | 500 |
-| `--force`, `-f` | Перезаписать файл без подтверждения (только для режима `all`) | — |
+| `--force`, `-f` | Разрешить полную регенерацию поверх существующего конфига (только для режима `all`) | — |
 | `--no-cascade` | Пропустить обнаружение FK и генерацию `cascade_from` | — |
 | `--no-faker` | Пропустить обнаружение персональных данных | — |
 | `--no-split` | Генерировать единый YAML без разделения по схемам | — |
@@ -1521,17 +1526,23 @@ php artisan dbdump:prepare-config new
 
 | Mode | Description |
 |------|-------------|
-| `all` | Full config regeneration (overwrites file) |
+| `all` | Full config regeneration. **Refuses** over an existing config — `--force` required |
 | `schema=<name>` | Regenerate one schema, merge into existing config |
 | `table=<schema.table>` | Regenerate one table, merge into existing config |
 | `new` | Detect and append new tables only (doesn't touch existing entries) |
+
+`all` mode rebuilds the config from scratch and never reads the existing file: hand-tuned
+`sample.criteria`, `cascade_from`, `limit` and `faker` are replaced by machine guesses. That is why
+the command refuses to run over an existing `dump_config.yaml` and points at the modes that merge
+instead of overwriting (`new`, `schema=`, `table=`), plus `repair-configs` and `validate`.
+A deliberate rebuild from scratch is `prepare-config all --force`.
 
 **Options:**
 
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--threshold`, `-t` | Row threshold: tables with rows <= threshold go to full_export, more — to partial_export | 500 |
-| `--force`, `-f` | Overwrite file without asking (only for `all` mode) | — |
+| `--force`, `-f` | Allow full regeneration over an existing config (only for `all` mode) | — |
 | `--no-cascade` | Skip FK detection and `cascade_from` generation | — |
 | `--no-faker` | Skip personal data detection | — |
 | `--no-split` | Generate a single YAML without splitting by schema | — |

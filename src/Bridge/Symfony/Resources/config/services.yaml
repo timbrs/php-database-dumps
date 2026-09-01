@@ -87,6 +87,7 @@ services:
     Timbrs\DatabaseDumps\Service\ConfigGenerator\ServiceTableFilter: ~
     Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigSplitter: ~
     Timbrs\DatabaseDumps\Service\ConfigGenerator\ModeParser: ~
+    Timbrs\DatabaseDumps\Service\ConfigGenerator\RegenerationGuard: ~
     Timbrs\DatabaseDumps\Service\Generator\TruncateGenerator: ~
     Timbrs\DatabaseDumps\Service\Generator\SequenceGenerator: ~
     Timbrs\DatabaseDumps\Service\Generator\DeferredUpdateGenerator: ~

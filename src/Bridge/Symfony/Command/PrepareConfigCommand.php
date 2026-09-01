@@ -16,6 +16,7 @@ use Timbrs\DatabaseDumps\Service\Ai\AiClientFactory;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigGenerator;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ModeParser;
+use Timbrs\DatabaseDumps\Service\ConfigGenerator\RegenerationGuard;
 use Timbrs\DatabaseDumps\Util\EnvFileWriter;
 
 class PrepareConfigCommand extends Command
@@ -44,6 +45,9 @@ class PrepareConfigCommand extends Command
     /** @var EnvFileWriter */
     private $envWriter;
 
+    /** @var RegenerationGuard */
+    private $guard;
+
     public function __construct(
         ConfigGenerator $generator,
         ModeParser $modeParser,
@@ -52,7 +56,8 @@ class PrepareConfigCommand extends Command
         HttpTransportInterface $transport,
         string $projectDir,
         LoggerInterface $logger,
-        EnvFileWriter $envWriter
+        EnvFileWriter $envWriter,
+        RegenerationGuard $guard
     ) {
         $this->generator = $generator;
         $this->modeParser = $modeParser;
@@ -62,6 +67,7 @@ class PrepareConfigCommand extends Command
         $this->projectDir = rtrim($projectDir, '/\\');
         $this->logger = $logger;
         $this->envWriter = $envWriter;
+        $this->guard = $guard;
         parent::__construct();
     }
 
@@ -113,13 +119,10 @@ class PrepareConfigCommand extends Command
             return Command::FAILURE;
         }
 
-        if ($parsed['mode'] === ConfigGenerator::MODE_ALL) {
-            if (!$input->getOption('force') && file_exists($outputPath)) {
-                if (!$io->confirm("Файл {$outputPath} уже существует. Перезаписать?", false)) {
-                    $io->warning('Отменено');
-                    return Command::SUCCESS;
-                }
-            }
+        if ($this->guard->blocks($parsed['mode'], $outputPath, (bool) $input->getOption('force'))) {
+            $io->error('Полная регенерация отменена');
+            $io->text($this->guard->getRefusalLines($outputPath, 'app:dbdump:'));
+            return Command::FAILURE;
         }
 
         try {

@@ -43,6 +43,7 @@ use Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigSplitter;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\CriteriaSuggester;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ForeignKeyInspector;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ModeParser;
+use Timbrs\DatabaseDumps\Service\ConfigGenerator\RegenerationGuard;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ServiceTableFilter;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\TableInspector;
 use Timbrs\DatabaseDumps\Service\ConnectionRegistry;
@@ -163,6 +164,9 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
         $this->app->singleton(ScriptExecutor::class);
         $this->app->singleton(TableConfigResolver::class);
         $this->app->singleton(ModeParser::class);
+        $this->app->singleton(RegenerationGuard::class, function ($app) {
+            return new RegenerationGuard($app->make(FileSystemInterface::class));
+        });
 
         $this->app->singleton(TruncateGenerator::class);
         $this->app->singleton(InsertGenerator::class, function ($app) {
@@ -317,7 +321,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(DbdumpConfigStore::class),
                 $app->make(HttpTransportInterface::class),
                 $app['config']->get('database-dumps.project_dir'),
-                $app->make(EnvFileWriter::class)
+                $app->make(EnvFileWriter::class),
+                $app->make(RegenerationGuard::class)
             );
         });
 

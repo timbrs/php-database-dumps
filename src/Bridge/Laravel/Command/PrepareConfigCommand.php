@@ -11,6 +11,7 @@ use Timbrs\DatabaseDumps\Service\Ai\AiClientFactory;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigGenerator;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ModeParser;
+use Timbrs\DatabaseDumps\Service\ConfigGenerator\RegenerationGuard;
 use Timbrs\DatabaseDumps\Util\EnvFileWriter;
 
 class PrepareConfigCommand extends Command
@@ -55,6 +56,9 @@ class PrepareConfigCommand extends Command
     /** @var EnvFileWriter */
     private $envWriter;
 
+    /** @var RegenerationGuard */
+    private $guard;
+
     public function __construct(
         ConfigGenerator $generator,
         ModeParser $modeParser,
@@ -63,7 +67,8 @@ class PrepareConfigCommand extends Command
         DbdumpConfigStore $aiConfigStore,
         HttpTransportInterface $transport,
         string $projectDir,
-        EnvFileWriter $envWriter
+        EnvFileWriter $envWriter,
+        RegenerationGuard $guard
     ) {
         parent::__construct();
         $this->generator = $generator;
@@ -74,6 +79,7 @@ class PrepareConfigCommand extends Command
         $this->transport = $transport;
         $this->projectDir = rtrim($projectDir, '/\\');
         $this->envWriter = $envWriter;
+        $this->guard = $guard;
     }
 
     public function handle(): int
@@ -101,13 +107,12 @@ class PrepareConfigCommand extends Command
             return self::FAILURE;
         }
 
-        if ($parsed['mode'] === ConfigGenerator::MODE_ALL) {
-            if (!$this->option('force') && file_exists($this->configPath)) {
-                if (!$this->confirm("Файл {$this->configPath} уже существует. Перезаписать?", false)) {
-                    $this->warn('Отменено');
-                    return self::SUCCESS;
-                }
+        if ($this->guard->blocks($parsed['mode'], $this->configPath, (bool) $this->option('force'))) {
+            $this->error('Полная регенерация отменена');
+            foreach ($this->guard->getRefusalLines($this->configPath, 'dbdump:') as $line) {
+                $this->line($line);
             }
+            return self::FAILURE;
         }
 
         try {
