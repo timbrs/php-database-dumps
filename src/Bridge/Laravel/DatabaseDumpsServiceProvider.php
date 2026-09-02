@@ -29,14 +29,12 @@ use Timbrs\DatabaseDumps\Service\Ai\AiClientFactory;
 use Timbrs\DatabaseDumps\Service\Ai\CurlHttpTransport;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
-use Timbrs\DatabaseDumps\Service\Analysis\AnalysisRepairLoop;
 use Timbrs\DatabaseDumps\Service\Analysis\CriteriaSqlTester;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisReportWriter;
 use Timbrs\DatabaseDumps\Service\Analysis\CodeHintScanner;
 use Timbrs\DatabaseDumps\Service\Analysis\ConfigCriteriaRepairer;
 use Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher;
-use Timbrs\DatabaseDumps\Service\Analysis\OpencodeRunner;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ColumnStatisticsInspector;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigGenerator;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigSplitter;
@@ -327,7 +325,7 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
         });
 
         // Анализ кода через OPENCODE
-        // Grep-сканер использований таблиц в коде хоста (projectDir + logger, как OpencodeRunner).
+        // Grep-сканер использований таблиц в коде хоста (projectDir + logger).
         $this->app->singleton(CodeHintScanner::class, function ($app) {
             return new CodeHintScanner(
                 $app['config']->get('database-dumps.project_dir'),
@@ -363,24 +361,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(DbdumpConfigStore::class)
             );
         });
-        $this->app->singleton(OpencodeRunner::class, function ($app) {
-            return new OpencodeRunner(
-                $app->make(LoggerInterface::class),
-                $app->make(DbdumpConfigStore::class),
-                (string) $app['config']->get('database-dumps.project_dir')
-            );
-        });
         $this->app->singleton(CriteriaSqlTester::class, function ($app) {
             return new CriteriaSqlTester($app->make(ConnectionRegistryInterface::class));
-        });
-        $this->app->singleton(AnalysisRepairLoop::class, function ($app) {
-            return new AnalysisRepairLoop(
-                $app->make(OpencodeRunner::class),
-                $app->make(FileSystemInterface::class),
-                $app->make(CriteriaSqlTester::class),
-                $app->make(LoggerInterface::class),
-                (string) $app['config']->get('database-dumps.project_dir')
-            );
         });
 
         $this->app->singleton(ConfigureLlmCommand::class, function ($app) {
@@ -395,13 +377,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
         $this->app->singleton(PrepareAnalysisCommand::class, function ($app) {
             return new PrepareAnalysisCommand(
                 $app->make(AnalysisPackageBuilder::class),
-                $app->make(OpencodeRunner::class),
-                $app->make(AnalysisIngestor::class),
-                $app->make(ConfigEnricher::class),
-                $app->make(AnalysisRepairLoop::class),
                 $app->make(LoggerInterface::class),
                 $app['config']->get('database-dumps.project_dir'),
-                $app['config']->get('database-dumps.config_path'),
                 $app->make(DbdumpConfigStore::class)
             );
         });
@@ -420,10 +397,6 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(FileSystemInterface::class),
                 $app->make(ConfigLoaderInterface::class),
                 $app->make(CriteriaSqlTester::class),
-                $app->make(OpencodeRunner::class),
-                $app->make(AnalysisRepairLoop::class),
-                $app->make(AnalysisIngestor::class),
-                $app->make(ConfigEnricher::class),
                 $app->make(LoggerInterface::class),
                 (string) $app['config']->get('database-dumps.project_dir'),
                 $app->make(DbdumpConfigStore::class)

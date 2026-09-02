@@ -58,11 +58,8 @@ class ConfigureLlmCommand extends Command
 
         $current = $this->store->resolve($this->projectDir);
 
-        // Команда запуска opencode (не зависит от LLM) — спрашиваем всегда, сохраняем в обеих ветках.
-        $opencodeBin = $this->askOpencodeBin($io);
-
         if (!$io->confirm('Использовать LLM для анализа (PII, профилирование, подсказки)?', $current->isEnabled())) {
-            $this->store->save($this->projectDir, AiConfig::fromArray(['url' => '', 'enabled' => false]), null, $opencodeBin);
+            $this->store->save($this->projectDir, AiConfig::fromArray(['url' => '', 'enabled' => false]));
             $io->writeln('<info>LLM отключён.</info> Анализ будет работать на regex-эвристиках.');
             $io->writeln('Файл настроек: ' . $this->store->path($this->projectDir));
             return Command::SUCCESS;
@@ -133,10 +130,9 @@ class ConfigureLlmCommand extends Command
             $io->newLine();
         }
 
-        $this->store->save($this->projectDir, $config, null, $opencodeBin);
+        $this->store->save($this->projectDir, $config);
         $io->writeln('<info>Готово:</info> настройки LLM сохранены.');
         $io->writeln('Файл: ' . $this->store->path($this->projectDir) . ' (без токена)');
-        $io->writeln('Команда opencode: ' . $opencodeBin . ' (переопределяется env DBDUMP_OPENCODE_BIN).');
 
         if ($newToken !== null) {
             $envPath = $this->envWriter->setVar($this->projectDir, AiConfig::ENV_TOKEN, $newToken);
@@ -145,18 +141,6 @@ class ConfigureLlmCommand extends Command
         $io->writeln('Переменные окружения DBDUMP_LLM_* (если заданы) перекрывают этот файл.');
 
         return Command::SUCCESS;
-    }
-
-    /**
-     * Спросить команду запуска opencode (бинарь в PATH) с текущим значением по умолчанию.
-     */
-    private function askOpencodeBin(SymfonyStyle $io): string
-    {
-        $current = $this->store->getOpencodeBin($this->projectDir);
-        $answer = $io->ask('Команда запуска opencode (бинарь в PATH, напр. opencode или opencode-cli)', $current);
-        $answer = is_string($answer) ? trim($answer) : '';
-
-        return $answer !== '' ? $answer : $current;
     }
 
     /**

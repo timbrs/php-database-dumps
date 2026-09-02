@@ -8,19 +8,18 @@ use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\Analysis\ConfigCriteriaRepairer;
 
 /**
- * repair-configs: прогнать каждый sample.criterion уже сгенерированного конфига в БД и точечно
- * доисправить падающие через opencode (без полного пересбора инвентаря). См. ConfigCriteriaRepairer.
+ * check-criteria: прогнать каждый sample.criterion уже сгенерированного конфига в БД и
+ * записать отчёт о падающих — с текстом ошибки СУБД. Правит конфиг тот, кто читает отчёт.
+ * См. ConfigCriteriaRepairer.
  */
 class RepairConfigsCommand extends Command
 {
     /** @var string */
-    protected $signature = 'dbdump:repair-configs'
-        . ' {--c|connection= : Имя подключения (по умолчанию — дефолтное)}'
-        . ' {--repair-attempts=2 : Корректирующих перепрогонов на схему (0 — только проверка)}'
-        . ' {--dry-run : Только проверить и показать падающие criteria, без починки}';
+    protected $signature = 'dbdump:check-criteria'
+        . ' {--c|connection= : Имя подключения (по умолчанию — дефолтное)}';
 
     /** @var string */
-    protected $description = 'Прогнать sample.criteria конфига в БД и точечно доисправить падающие (opencode)';
+    protected $description = 'Прогнать sample.criteria конфига в БД и показать падающие (с ошибкой СУБД)';
 
     /** @var ConfigCriteriaRepairer */
     private $repairer;
@@ -37,6 +36,8 @@ class RepairConfigsCommand extends Command
         $this->repairer = $repairer;
         $this->configPath = $configPath;
         $this->logger = $logger;
+        // Прежнее имя команды: у неё был режим автопочинки через внешнего агента.
+        $this->setAliases(['dbdump:repair-configs']);
     }
 
     public function handle(): int
@@ -47,44 +48,39 @@ class RepairConfigsCommand extends Command
                 $cmd->line($message);
             });
         }
-        $this->info('Проверка и починка criteria в конфиге');
+        $this->info('Проверка criteria в конфиге');
 
         $connection = $this->option('connection');
-        $attempts = $this->option('dry-run') ? 0 : (int) $this->option('repair-attempts');
 
         try {
-            $result = $this->repairer->repair(
+            $result = $this->repairer->inspect(
                 $this->configPath,
-                $attempts,
                 ($connection !== null && $connection !== '') ? (string) $connection : null
             );
         } catch (\Exception $e) {
-            $this->error('Ошибка repair-configs: ' . $e->getMessage());
+            $this->error('Ошибка проверки criteria: ' . $e->getMessage());
+
             return self::FAILURE;
         }
 
         if ($result['failing'] === 0) {
             $this->info(sprintf('Проверено criteria: %d — все исполняются в БД.', $result['tested']));
+
             return self::SUCCESS;
         }
 
-        if (!$result['repaired']) {
-            $this->warn(sprintf(
-                'Падающих criteria: %d в %d схемах (проверено %d). Починка не выполнялась (dry-run / нет opencode).',
-                $result['failing'],
-                $result['schemas'],
-                $result['tested']
-            ));
-            return self::SUCCESS;
-        }
-
-        $this->info(sprintf(
-            'Проверено %d, падало %d в %d схемах; применено исправлений criteria: +%d.',
-            $result['tested'],
+        $this->warn(sprintf(
+            'Падающих criteria: %d в %d схемах (проверено %d).',
             $result['failing'],
             $result['schemas'],
-            $result['criteria_added']
+            $result['tested']
         ));
+
+        if ($result['report'] !== null) {
+            $this->line('Отчёт с текстом ошибок: ' . $result['report']);
+            $this->line('Экспорт такие criteria пропускает (SampleQueryBuilder), то есть выборка беднее задуманной.');
+        }
+
         return self::SUCCESS;
     }
 }

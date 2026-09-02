@@ -20,7 +20,7 @@ use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
  *  - {data_dir}/analysis/schema_inventory.json — вход (схемы/таблицы/колонки/FK/профили, БЕЗ значений данных)
  *  - {data_dir}/analysis/output_schema.json    — JSON-контракт вывода
  *  - {data_dir}/analysis/RUN.md                — инструкции запуска
- *  - database/analysis/out/                  — каталог для результатов агента
+ *  - {data_dir}/analysis/out/                — каталог для результатов агента
  *
  * Сам прогон OPENCODE пользователь запускает вручную по RUN.md; модуль его не вызывает.
  * Sample-значения PII в инвентарь НЕ кладутся (только типы/кардинальность).

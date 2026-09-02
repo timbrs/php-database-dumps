@@ -8,16 +8,13 @@ use Timbrs\DatabaseDumps\Contract\ConfigLoaderInterface;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
-use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
-use Timbrs\DatabaseDumps\Service\Analysis\AnalysisRepairLoop;
 use Timbrs\DatabaseDumps\Service\Analysis\ConfigCriteriaRepairer;
-use Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher;
 use Timbrs\DatabaseDumps\Service\Analysis\CriteriaSqlTester;
-use Timbrs\DatabaseDumps\Service\Analysis\OpencodeRunner;
 
 class ConfigCriteriaRepairerTest extends TestCase
 {
-    private const CONFIG = '/proj/database/dump_config.yaml';
+    private const CONFIG = '/proj/docker/database/dump_config.yaml';
+    private const REPORT = '/proj/docker/database/analysis/failing-criteria.json';
 
     /** @var array<string, string> path => content записанного */
     private $written = [];
@@ -33,14 +30,8 @@ class ConfigCriteriaRepairerTest extends TestCase
     /**
      * @param array<int, string> $failingWheres wheres, которые тестер считает падающими
      */
-    private function repairer(
-        DumpConfig $config,
-        array $failingWheres,
-        bool $opencodeAvailable,
-        AnalysisRepairLoop $repairLoop = null,
-        AnalysisIngestor $ingestor = null,
-        ConfigEnricher $enricher = null
-    ): ConfigCriteriaRepairer {
+    private function repairer(DumpConfig $config, array $failingWheres): ConfigCriteriaRepairer
+    {
         $loader = $this->createMock(ConfigLoaderInterface::class);
         $loader->method('load')->willReturn($config);
 
@@ -49,9 +40,6 @@ class ConfigCriteriaRepairerTest extends TestCase
             return in_array($where, $failingWheres, true) ? 'ERROR: 42P01 bad' : null;
         });
 
-        $runner = $this->createMock(OpencodeRunner::class);
-        $runner->method('isAvailable')->willReturn($opencodeAvailable);
-
         $fs = $this->createMock(FileSystemInterface::class);
         $fs->method('exists')->willReturn(true);
         $fs->method('write')->willReturnCallback(function ($path, $content) {
@@ -59,16 +47,12 @@ class ConfigCriteriaRepairerTest extends TestCase
         });
 
         $store = $this->createMock(DbdumpConfigStore::class);
-        $store->method('getDataDir')->willReturn('database');
+        $store->method('getDataDir')->willReturn('docker/database');
 
         return new ConfigCriteriaRepairer(
             $fs,
             $loader,
             $tester,
-            $runner,
-            $repairLoop ?? $this->createMock(AnalysisRepairLoop::class),
-            $ingestor ?? $this->createMock(AnalysisIngestor::class),
-            $enricher ?? $this->createMock(ConfigEnricher::class),
             $this->createMock(LoggerInterface::class),
             '/proj',
             $store
@@ -76,7 +60,10 @@ class ConfigCriteriaRepairerTest extends TestCase
     }
 
     /**
-     * @param array<int, array{name: string, where: string}> $criteria
+     * Тип нарочно широкий: часть тестов подаёт неполные criteria (без name или без where) —
+     * это и есть проверяемый вход.
+     *
+     * @param array<int, array<string, string>> $criteria
      * @return array<string, array<string, mixed>>
      */
     private function schemaWithCriteria(array $criteria): array
@@ -84,104 +71,100 @@ class ConfigCriteriaRepairerTest extends TestCase
         return ['users' => ['users' => ['limit' => 500, 'sample' => ['criteria' => $criteria]]]];
     }
 
-    public function testAllValidCriteriaNoRepair(): void
+    public function testAllCriteriaValidWritesNoReport(): void
     {
         $config = $this->dumpConfig($this->schemaWithCriteria([
-            ['name' => 'active', 'where' => "active_flg = 1"],
+            ['name' => 'active', 'where' => 'active_flg = 1'],
+            ['name' => 'recent', 'where' => 'created_at > now() - interval \'1 year\''],
         ]));
-        $repairLoop = $this->createMock(AnalysisRepairLoop::class);
-        $repairLoop->expects($this->never())->method('run');
 
-        $result = $this->repairer($config, [], true, $repairLoop)->repair(self::CONFIG, 2, null);
+        $result = $this->repairer($config, [])->inspect(self::CONFIG, null);
 
-        $this->assertSame(1, $result['tested']);
+        $this->assertSame(2, $result['tested']);
         $this->assertSame(0, $result['failing']);
-        $this->assertFalse($result['repaired']);
+        $this->assertSame(0, $result['schemas']);
+        $this->assertNull($result['report']);
+        $this->assertSame([], $this->written, 'отчёта быть не должно');
     }
 
-    public function testFailingCriterionTriggersRepairSeedAndEnrich(): void
+    public function testFailingCriteriaCounted(): void
     {
         $config = $this->dumpConfig($this->schemaWithCriteria([
-            ['name' => 'active', 'where' => 't1.active_flg = 1'],
-            ['name' => 'ok', 'where' => "active_flg = 1"],
+            ['name' => 'active', 'where' => 'active_flg = 1'],
+            ['name' => 'broken', 'where' => 't1.nope = 1'],
         ]));
 
-        $repairLoop = $this->createMock(AnalysisRepairLoop::class);
-        $repairLoop->expects($this->once())->method('run');
-
-        $ingestor = $this->createMock(AnalysisIngestor::class);
-        $ingestor->method('ingestFiles')->willReturn(['cascade_from' => [], 'sample_criteria' => [], 'relationships' => [], 'columns' => [], 'files' => []]);
-
-        $enricher = $this->createMock(ConfigEnricher::class);
-        $enricher->expects($this->once())->method('enrich')->willReturn(['cascade_added' => 0, 'criteria_added' => 1]);
-
-        $result = $this->repairer($config, ['t1.active_flg = 1'], true, $repairLoop, $ingestor, $enricher)
-            ->repair(self::CONFIG, 2, null);
+        $result = $this->repairer($config, ['t1.nope = 1'])->inspect(self::CONFIG, null);
 
         $this->assertSame(2, $result['tested']);
         $this->assertSame(1, $result['failing']);
-        $this->assertTrue($result['repaired']);
-        $this->assertSame(1, $result['criteria_added']);
-
-        // Засеян out/<schema>.json падающим criterion.
-        $this->assertArrayHasKey('/proj/database/analysis/out/users.json', $this->written);
-        $this->assertStringContainsString('t1.active_flg', $this->written['/proj/database/analysis/out/users.json']);
+        $this->assertSame(1, $result['schemas']);
+        $this->assertSame(self::REPORT, $result['report']);
     }
 
-    public function testIncrementalPerSchemaEnrich(): void
+    /**
+     * Текст ошибки СУБД — то, ради чего отчёт и существует: по нему видно, чего именно нет.
+     */
+    public function testReportCarriesDbErrorAndCriterion(): void
     {
-        // Две схемы с падающими criteria → enrich/ingestFiles вызываются ПО РАЗУ на схему
-        // (инкрементальная запись .yaml после каждой схемы → устойчивость к падению).
+        $config = $this->dumpConfig($this->schemaWithCriteria([
+            ['name' => 'broken', 'where' => 't1.nope = 1'],
+        ]));
+
+        $this->repairer($config, ['t1.nope = 1'])->inspect(self::CONFIG, null);
+
+        $this->assertArrayHasKey(self::REPORT, $this->written);
+        $payload = json_decode($this->written[self::REPORT], true);
+
+        $this->assertSame(1, $payload['tested']);
+        $this->assertSame(1, $payload['failing']);
+        $this->assertSame(self::CONFIG, $payload['config_path']);
+
+        $entry = $payload['schemas']['users'][0];
+        $this->assertSame('users.users', $entry['table']);
+        $this->assertSame('broken', $entry['name']);
+        $this->assertSame('t1.nope = 1', $entry['sql_where']);
+        $this->assertStringContainsString('42P01', $entry['error']);
+    }
+
+    public function testReportGroupsBySchema(): void
+    {
         $config = $this->dumpConfig([
-            'users' => ['users' => ['sample' => ['criteria' => [['name' => 'a', 'where' => 't1.x = 1']]]]],
-            'orders' => ['orders' => ['sample' => ['criteria' => [['name' => 'b', 'where' => 't1.y = 1']]]]],
+            'users' => ['users' => ['sample' => ['criteria' => [['name' => 'a', 'where' => 'bad1']]]]],
+            'tasks' => ['tasks' => ['sample' => ['criteria' => [['name' => 'b', 'where' => 'bad2']]]]],
         ]);
 
-        $repairLoop = $this->createMock(AnalysisRepairLoop::class);
-        $repairLoop->expects($this->exactly(2))->method('run');
-
-        $ingestor = $this->createMock(AnalysisIngestor::class);
-        $ingestor->expects($this->exactly(2))->method('ingestFiles')
-            ->willReturn(['cascade_from' => [], 'sample_criteria' => [], 'relationships' => [], 'columns' => [], 'files' => []]);
-
-        $enricher = $this->createMock(ConfigEnricher::class);
-        $enricher->expects($this->exactly(2))->method('enrich')->willReturn(['cascade_added' => 0, 'criteria_added' => 1]);
-
-        $result = $this->repairer($config, ['t1.x = 1', 't1.y = 1'], true, $repairLoop, $ingestor, $enricher)
-            ->repair(self::CONFIG, 2, null);
+        $result = $this->repairer($config, ['bad1', 'bad2'])->inspect(self::CONFIG, null);
 
         $this->assertSame(2, $result['failing']);
-        $this->assertSame(2, $result['criteria_added']);
-        $this->assertArrayHasKey('/proj/database/analysis/out/users.json', $this->written);
-        $this->assertArrayHasKey('/proj/database/analysis/out/orders.json', $this->written);
+        $this->assertSame(2, $result['schemas']);
+
+        $payload = json_decode($this->written[self::REPORT], true);
+        $this->assertSame(['users', 'tasks'], array_keys($payload['schemas']));
     }
 
-    public function testDryRunReportsButDoesNotRepair(): void
+    public function testCriteriaWithoutWhereOrNameAreSkipped(): void
     {
         $config = $this->dumpConfig($this->schemaWithCriteria([
-            ['name' => 'active', 'where' => 't1.active_flg = 1'],
+            ['name' => 'ok', 'where' => 'active_flg = 1'],
+            ['name' => 'no-where'],
+            ['where' => 'no-name = 1'],
         ]));
-        $repairLoop = $this->createMock(AnalysisRepairLoop::class);
-        $repairLoop->expects($this->never())->method('run');
 
-        // maxAttempts = 0 → только проверка.
-        $result = $this->repairer($config, ['t1.active_flg = 1'], true, $repairLoop)->repair(self::CONFIG, 0, null);
+        $result = $this->repairer($config, [])->inspect(self::CONFIG, null);
 
-        $this->assertSame(1, $result['failing']);
-        $this->assertFalse($result['repaired']);
+        $this->assertSame(1, $result['tested'], 'неполные criteria не считаются проверенными');
     }
 
-    public function testNoOpencodeReportsOnly(): void
+    public function testTableWithoutSampleIsSkipped(): void
     {
-        $config = $this->dumpConfig($this->schemaWithCriteria([
-            ['name' => 'active', 'where' => 't1.active_flg = 1'],
-        ]));
-        $repairLoop = $this->createMock(AnalysisRepairLoop::class);
-        $repairLoop->expects($this->never())->method('run');
+        $config = $this->dumpConfig([
+            'users' => ['users' => ['limit' => 500]],
+        ]);
 
-        $result = $this->repairer($config, ['t1.active_flg = 1'], false, $repairLoop)->repair(self::CONFIG, 2, null);
+        $result = $this->repairer($config, [])->inspect(self::CONFIG, null);
 
-        $this->assertSame(1, $result['failing']);
-        $this->assertFalse($result['repaired']);
+        $this->assertSame(0, $result['tested']);
+        $this->assertSame(0, $result['failing']);
     }
 }

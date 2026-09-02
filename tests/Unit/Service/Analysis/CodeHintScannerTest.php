@@ -9,7 +9,7 @@ use Timbrs\DatabaseDumps\Service\Analysis\CodeHintScanner;
 class CodeHintScannerTest extends TestCase
 {
     /**
-     * Сканер с подменёнными enumerateFiles()/readFile() (как OpencodeRunnerTest).
+     * Сканер с подменёнными enumerateFiles()/readFile().
      *
      * @param array<string, string> $files абсолютный путь => содержимое
      */

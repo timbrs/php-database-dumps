@@ -25,7 +25,6 @@ class DbdumpConfigStoreTest extends TestCase
         AiConfig::ENV_ENABLED,
         AiConfig::ENV_VERIFY_SSL,
         DbdumpConfigStore::ENV_DATA_DIR,
-        DbdumpConfigStore::ENV_OPENCODE_BIN,
     ];
 
     /** @var string */
@@ -245,13 +244,11 @@ class DbdumpConfigStoreTest extends TestCase
             null,
             [
                 'data_dir' => 'var/from-di',
-                'opencode' => ['bin' => 'opencode-cli'],
                 'llm' => ['url' => 'https://di/v1', 'enabled' => null],
             ]
         );
 
         $this->assertSame('var/from-di', $injected->getDataDir($this->projectDir));
-        $this->assertSame('opencode-cli', $injected->getOpencodeBin($this->projectDir));
         $this->assertSame('https://di/v1', $injected->resolve($this->projectDir)->getUrl());
     }
 
@@ -306,39 +303,7 @@ return ['platform' => 'mysql', 'data_dir' => 'var/from-file'];
         );
     }
 
-    public function testGetOpencodeBinDefaultsWhenAbsent(): void
-    {
-        $this->assertSame('opencode', $this->store()->getOpencodeBin($this->projectDir));
-    }
 
-    public function testSaveWritesAndReadsOpencodeBin(): void
-    {
-        $store = $this->store();
-        $store->save($this->projectDir, AiConfig::fromArray(['url' => '', 'enabled' => false]), null, 'opencode-cli');
 
-        $this->assertSame('opencode-cli', $store->getOpencodeBin($this->projectDir));
 
-        $loaded = $store->load($this->projectDir);
-        $this->assertIsArray($loaded);
-        $this->assertSame('opencode-cli', $loaded['opencode']['bin']);
-    }
-
-    public function testSaveNullOpencodeBinPreservesExisting(): void
-    {
-        $store = $this->store();
-        $store->save($this->projectDir, AiConfig::fromArray(['url' => '', 'enabled' => false]), null, 'opencode-cli');
-        // Повторное сохранение без явного bin (null) не должно затирать ранее записанный.
-        $store->save($this->projectDir, AiConfig::fromArray(['url' => 'https://x/v1', 'enabled' => true]));
-
-        $this->assertSame('opencode-cli', $store->getOpencodeBin($this->projectDir));
-    }
-
-    public function testGetOpencodeBinEnvOverridesFile(): void
-    {
-        $store = $this->store();
-        $store->save($this->projectDir, AiConfig::fromArray(['url' => '', 'enabled' => false]), null, 'opencode-cli');
-
-        putenv(DbdumpConfigStore::ENV_OPENCODE_BIN . '=my-opencode');
-        $this->assertSame('my-opencode', $store->getOpencodeBin($this->projectDir));
-    }
 }

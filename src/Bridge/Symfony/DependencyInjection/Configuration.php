@@ -41,16 +41,6 @@ class Configuration implements ConfigurationInterface
                 // Путь к главному конфигу выгрузки. null — {data_dir}/dump_config.yaml.
                 ->scalarNode('config_path')->defaultNull()->end()
 
-                ->arrayNode('opencode')
-                    ->addDefaultsIfNotSet()
-                    ->children()
-                        ->scalarNode('bin')
-                            ->defaultValue(DbdumpConfigStore::DEFAULT_OPENCODE_BIN)
-                            ->cannotBeEmpty()
-                        ->end()
-                    ->end()
-                ->end()
-
                 ->arrayNode('llm')
                     ->addDefaultsIfNotSet()
                     ->children()

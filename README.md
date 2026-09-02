@@ -145,8 +145,8 @@ php bin/console app:dbdump:prepare-config all
 
 ```bash
 # Одной командой: провижинит агента + инвентарь, прогонит opencode по схемам и применит результат
-php artisan dbdump:prepare-analysis --run            # Laravel
-php bin/console app:dbdump:prepare-analysis --run    # Symfony
+php artisan dbdump:prepare-analysis            # Laravel
+php bin/console app:dbdump:prepare-analysis    # Symfony
 ```
 
 Команда сгенерирует в хост-проект всё необходимое для связки с opencode:
@@ -156,7 +156,7 @@ php bin/console app:dbdump:prepare-analysis --run    # Symfony
 - `docker/database/analysis/output_schema.json` — контракт JSON-вывода;
 - `docker/database/analysis/RUN.md` — точные команды для ручного прогона.
 
-Результат (связи из кода → `cascade_from: source: code`, бизнес-сегменты → `sample.criteria`) дописывается в `dump_config.yaml`, отчёт — в `docker/database/analysis/REPORT.md`. Пользовательские правки в YAML в приоритете. Если `opencode` не найден — команда не упадёт, а напечатает готовые к вставке строки запуска. Подробнее — в разделе [Анализ кода через OPENCODE](#анализ-кода-через-opencode).
+Команда собирает пакет и печатает, где он лежит; агента она **не запускает** — это делается снаружи (см. [Анализ кода через OPENCODE](#анализ-кода-через-opencode)). Результат агента (связи из кода → `cascade_from: source: code`, бизнес-сегменты → `sample.criteria`) применяет `apply-analysis`; отчёт — в `{data_dir}/analysis/REPORT.md`. Пользовательские правки в YAML в приоритете.
 
 ### Шаг 3. Экспортировать и импортировать дампы
 
@@ -526,7 +526,7 @@ php artisan dbdump:prepare-config new
 Режим `all` собирает конфиг заново и существующий файл не читает: настроенные вручную `sample.criteria`,
 `cascade_from`, `limit` и `faker` он заменяет машинной догадкой. Поэтому при существующем `dump_config.yaml`
 команда отказывается работать и называет режимы, которые мёржат, а не затирают (`new`, `schema=`, `table=`),
-а также `repair-configs` и `validate`. Осознанная пересборка с нуля — `prepare-config all --force`.
+а также `check-criteria` и `validate`. Осознанная пересборка с нуля — `prepare-config all --force`.
 
 **Опции:**
 
@@ -601,14 +601,23 @@ HTTP-запросы выполняются через `ext-curl` (без guzzle)
 
 ### Анализ кода через OPENCODE
 
+> **Пакет не запускает агента.** До 1.1.26 `prepare-analysis --run` дёргал `opencode` через
+> `exec()` из PHP — и это оказалось неверным слоем. Агент сам решает, чем и в каком порядке
+> пользоваться, и умеет вызвать `prepare-analysis`, `validate` и `check-criteria` куда
+> осмысленнее, чем PHP умеет вызвать агента. За пакетом осталась детерминированная часть:
+> собрать факты (инвентарь схемы, находки валидатора, падающие criteria с ошибкой СУБД) и
+> применить готовый результат (`apply-analysis`). Решения — эвристики, починка, выбор режима
+> выгрузки — снаружи. В пакете не осталось ни одного вызова внешнего процесса.
+
+
 **Самый простой путь — одной командой** (нужен `opencode` в PATH):
 
 ```bash
-php artisan dbdump:prepare-analysis --run            # Laravel
-php bin/console app:dbdump:prepare-analysis --run    # Symfony
+php artisan dbdump:prepare-analysis            # Laravel
+php bin/console app:dbdump:prepare-analysis    # Symfony
 ```
 
-С `--run` модуль сам провижинит пакет, прогонит OPENCODE по чанку на каждую схему и применит результат к `dump_config.yaml`. Если opencode не найден — команда напечатает готовые к вставке строки запуска и не упадёт.
+Команда собирает пакет (инвентарь схемы, пер-схемные инвентари, контракт вывода, `RUN.md`) и печатает, где он лежит. Прогон агента — снаружи, по `RUN.md`; применение результата — `apply-analysis`.
 
 **Ручной путь (3 шага)** — если хотите контролировать прогон агента:
 
@@ -643,7 +652,7 @@ php artisan dbdump:apply-analysis                  # Laravel
 `validate` проверяет `dump_config.yaml` и пер-схемные `dump-settings/*.yaml`, **не подключаясь
 к базе**. Схему берёт из замороженного слепка `{data_dir}/analysis/schema_inventory.json`
 (и пер-схемных `schema_inventory.<schema>.json`), который кладёт `prepare-analysis`. Поэтому
-команда работает в CI, в закрытом контуре и до подъёма стенда — в отличие от `repair-configs`,
+команда работает в CI, в закрытом контуре и до подъёма стенда — в отличие от `check-criteria`,
 который гоняет каждый criterion по живой БД.
 
 ```bash
@@ -771,9 +780,6 @@ database_dumps:
     # Путь к главному конфигу выгрузки. По умолчанию — {data_dir}/dump_config.yaml.
     # config_path: '%kernel.project_dir%/docker/database/dump_config.yaml'
 
-    opencode:
-        bin: 'opencode'           # имя бинаря (напр. opencode-cli)
-
     llm:
         url: 'https://llm.example.com/v1'
         model: 'openai/gpt-oss-120b'
@@ -862,7 +868,7 @@ php bin/console app:dbdump:prepare-config new --no-cascade --no-faker
 
 # Углублённый анализ
 php bin/console app:dbdump:prepare-config all --deep
-php bin/console app:dbdump:prepare-analysis --run    # всё одной командой (нужен opencode в PATH)
+php bin/console app:dbdump:prepare-analysis          # собрать пакет для агента
 # или вручную: prepare-analysis → opencode run → apply-analysis
 
 # Проверить конфиг по слепку схемы, без подключения к БД
@@ -871,7 +877,7 @@ php bin/console app:dbdump:validate --format=json --out=docker/database/analysis
 php bin/console app:dbdump:validate --fix
 
 # Проверить sample.criteria на живой БД и починить падающие через opencode
-php bin/console app:dbdump:repair-configs --dry-run
+php bin/console app:dbdump:check-criteria
 ```
 
 ## Настройка Laravel
@@ -948,7 +954,7 @@ php artisan dbdump:prepare-config new --no-cascade --no-faker
 
 # Углублённый анализ
 php artisan dbdump:prepare-config all --deep
-php artisan dbdump:prepare-analysis --run            # всё одной командой (нужен opencode в PATH)
+php artisan dbdump:prepare-analysis                  # собрать пакет для агента
 # или вручную: prepare-analysis → opencode run → apply-analysis
 
 # Проверить конфиг по слепку схемы, без подключения к БД
@@ -957,7 +963,7 @@ php artisan dbdump:validate --format=json --out=docker/database/analysis/finding
 php artisan dbdump:validate --fix
 
 # Проверить sample.criteria на живой БД и починить падающие через opencode
-php artisan dbdump:repair-configs --dry-run
+php artisan dbdump:check-criteria
 ```
 
 ## Скрипты before/after
@@ -1608,7 +1614,7 @@ php artisan dbdump:prepare-config new
 `all` mode rebuilds the config from scratch and never reads the existing file: hand-tuned
 `sample.criteria`, `cascade_from`, `limit` and `faker` are replaced by machine guesses. That is why
 the command refuses to run over an existing `dump_config.yaml` and points at the modes that merge
-instead of overwriting (`new`, `schema=`, `table=`), plus `repair-configs` and `validate`.
+instead of overwriting (`new`, `schema=`, `table=`), plus `check-criteria` and `validate`.
 A deliberate rebuild from scratch is `prepare-config all --force`.
 
 **Options:**
@@ -1682,9 +1688,6 @@ database_dumps:
 
     # Path to the main dump config. Defaults to {data_dir}/dump_config.yaml.
     # config_path: '%kernel.project_dir%/docker/database/dump_config.yaml'
-
-    opencode:
-        bin: 'opencode'           # binary name (e.g. opencode-cli)
 
     llm:
         url: 'https://llm.example.com/v1'

@@ -53,11 +53,8 @@ class ConfigureLlmCommand extends Command
 
         $current = $this->store->resolve($this->projectDir);
 
-        // Команда запуска opencode (не зависит от LLM) — спрашиваем всегда, сохраняем в обеих ветках.
-        $opencodeBin = $this->askOpencodeBin();
-
         if (!$this->confirm('Использовать LLM для анализа (PII, профилирование, подсказки)?', $current->isEnabled())) {
-            $this->store->save($this->projectDir, AiConfig::fromArray(['url' => '', 'enabled' => false]), null, $opencodeBin);
+            $this->store->save($this->projectDir, AiConfig::fromArray(['url' => '', 'enabled' => false]));
             $this->info('LLM отключён. Анализ будет работать на regex-эвристиках.');
             $this->line('Файл настроек: ' . $this->store->path($this->projectDir));
             return self::SUCCESS;
@@ -120,10 +117,9 @@ class ConfigureLlmCommand extends Command
             }
         }
 
-        $this->store->save($this->projectDir, $config, null, $opencodeBin);
+        $this->store->save($this->projectDir, $config);
         $this->info('Настройки LLM сохранены.');
         $this->line('Файл: ' . $this->store->path($this->projectDir) . ' (без токена)');
-        $this->line('Команда opencode: ' . $opencodeBin . ' (переопределяется env DBDUMP_OPENCODE_BIN).');
 
         if ($newToken !== null) {
             $envPath = $this->envWriter->setVar($this->projectDir, AiConfig::ENV_TOKEN, $newToken);
@@ -132,18 +128,6 @@ class ConfigureLlmCommand extends Command
         $this->line('Переменные окружения DBDUMP_LLM_* (если заданы) перекрывают этот файл.');
 
         return self::SUCCESS;
-    }
-
-    /**
-     * Спросить команду запуска opencode (бинарь в PATH) с текущим значением по умолчанию.
-     */
-    private function askOpencodeBin(): string
-    {
-        $current = $this->store->getOpencodeBin($this->projectDir);
-        $answer = (string) $this->ask('Команда запуска opencode (бинарь в PATH, напр. opencode или opencode-cli)', $current);
-        $answer = trim($answer);
-
-        return $answer !== '' ? $answer : $current;
     }
 
     /**

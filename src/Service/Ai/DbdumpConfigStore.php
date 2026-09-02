@@ -45,10 +45,6 @@ class DbdumpConfigStore
     /** Имя главного файла конфига выгрузки внутри data_dir. */
     public const MAIN_CONFIG_FILE = 'dump_config.yaml';
 
-    /** Имя бинаря opencode (напр. 'opencode-cli'): дефолт, env и ключ настроек opencode.bin. */
-    public const DEFAULT_OPENCODE_BIN = 'opencode';
-    public const ENV_OPENCODE_BIN = 'DBDUMP_OPENCODE_BIN';
-
     /** @var SettingsFileInterface */
     private $settingsFile;
 
@@ -112,10 +108,8 @@ class DbdumpConfigStore
      * load(): в Symfony load() отдаёт разобранные значения из контейнера, где чужих
      * ключей уже нет, и запись затёрла бы их.
      *
-     * @param string|null $opencodeBin если задан — переопределяет секцию opencode.bin;
-     *                                 null — сохраняется существующая (если была)
      */
-    public function save(string $projectDir, AiConfig $config, ?string $dataDir = null, ?string $opencodeBin = null): void
+    public function save(string $projectDir, AiConfig $config, ?string $dataDir = null): void
     {
         $existing = $this->settingsFile->read($projectDir);
         $existing = is_array($existing) ? $existing : [];
@@ -150,35 +144,9 @@ class DbdumpConfigStore
             }
             $out[$k] = $v;
         }
-        // Новое значение opencode.bin переопределяет существующее; null — сохраняем прежнее (через foreach выше).
-        if ($opencodeBin !== null && $opencodeBin !== '') {
-            $out['opencode'] = ['bin' => $opencodeBin];
-        }
         $out['llm'] = $llm;
 
         $this->settingsFile->write($projectDir, $out);
-    }
-
-    /**
-     * Имя/путь бинаря opencode: env DBDUMP_OPENCODE_BIN → настройки opencode.bin → 'opencode'.
-     */
-    public function getOpencodeBin(string $projectDir): string
-    {
-        $env = $this->readEnv(self::ENV_OPENCODE_BIN);
-        if ($env !== null) {
-            return $env;
-        }
-
-        $data = $this->load($projectDir);
-        if ($data !== null
-            && isset($data['opencode']['bin'])
-            && is_string($data['opencode']['bin'])
-            && $data['opencode']['bin'] !== ''
-        ) {
-            return $data['opencode']['bin'];
-        }
-
-        return self::DEFAULT_OPENCODE_BIN;
     }
 
     /**

@@ -289,7 +289,7 @@ class DatabaseImporter
     }
 
     /**
-     * Извлечь {schema, table} из пути database/dumps/{schema}/{table}.sql.
+     * Извлечь {schema, table} из пути {data_dir}/dumps/{schema}/{table}.sql.
      * Поддерживает оба разделителя для кросс-платформенности.
      *
      * @return array{0: string, 1: string}

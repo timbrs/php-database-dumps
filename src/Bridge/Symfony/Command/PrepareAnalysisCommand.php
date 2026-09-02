@@ -10,34 +10,25 @@ use Symfony\Component\Console\Style\SymfonyStyle;
 use Timbrs\DatabaseDumps\Bridge\Symfony\ConsoleLogger;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
-use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
-use Timbrs\DatabaseDumps\Service\Analysis\AnalysisRepairLoop;
-use Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher;
-use Timbrs\DatabaseDumps\Service\Analysis\OpencodeRunner;
 
+/**
+ * Собирает пакет для анализа кода внешним агентом: инвентарь схемы (без значений данных),
+ * пер-схемные инвентари, JSON-контракт вывода и инструкцию запуска.
+ *
+ * Команда НЕ запускает агента. Раньше запускала — через exec() из PHP, — но управлять агентом
+ * из библиотеки оказалось неверным слоем: агент сам решает, чем и в каком порядке пользоваться,
+ * и умеет вызвать эту команду, `validate` и `repair-configs` куда осмысленнее, чем PHP умеет
+ * вызвать агента. Здесь остаётся детерминированная часть: собрать факты и сказать, где они лежат.
+ * Применяет результат агента `app:dbdump:apply-analysis`.
+ */
 class PrepareAnalysisCommand extends Command
 {
     /** @var AnalysisPackageBuilder */
     private $builder;
 
-    /** @var OpencodeRunner */
-    private $runner;
-
-    /** @var AnalysisIngestor */
-    private $ingestor;
-
-    /** @var ConfigEnricher */
-    private $enricher;
-
-    /** @var AnalysisRepairLoop */
-    private $repairLoop;
-
     /** @var string */
     private $projectDir;
-
-    /** @var string */
-    private $configPath;
 
     /** @var DbdumpConfigStore */
     private $configStore;
@@ -47,22 +38,12 @@ class PrepareAnalysisCommand extends Command
 
     public function __construct(
         AnalysisPackageBuilder $builder,
-        OpencodeRunner $runner,
-        AnalysisIngestor $ingestor,
-        ConfigEnricher $enricher,
-        AnalysisRepairLoop $repairLoop,
         string $projectDir,
-        string $configPath,
         DbdumpConfigStore $configStore,
         LoggerInterface $logger
     ) {
         $this->builder = $builder;
-        $this->runner = $runner;
-        $this->ingestor = $ingestor;
-        $this->enricher = $enricher;
-        $this->repairLoop = $repairLoop;
         $this->projectDir = rtrim($projectDir, '/\\');
-        $this->configPath = $configPath;
         $this->configStore = $configStore;
         $this->logger = $logger;
         parent::__construct();
@@ -72,137 +53,60 @@ class PrepareAnalysisCommand extends Command
     {
         $this
             ->setName('app:dbdump:prepare-analysis')
-            ->setDescription('Подготовить пакет для анализа кода хоста агентом OPENCODE')
-            ->addOption('connection', 'c', InputOption::VALUE_REQUIRED, 'Имя подключения (по умолчанию — дефолтное)')
-            ->addOption('run', null, InputOption::VALUE_NONE, 'Сразу запустить OPENCODE (по чанку на схему) и применить результат — всё одной командой')
-            ->addOption('repair-attempts', null, InputOption::VALUE_REQUIRED, 'Корректирующих перепрогонов OPENCODE на схему при невалидных criteria (0 — выключить)', (string) AnalysisRepairLoop::DEFAULT_MAX_ATTEMPTS);
+            ->setDescription('Собрать пакет для анализа кода внешним агентом (инвентарь схемы + контракт вывода)')
+            ->addOption('connection', 'c', InputOption::VALUE_REQUIRED, 'Имя подключения (по умолчанию — дефолтное)');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $io = new SymfonyStyle($input, $output);
-        // Роутим пошаговый прогресс в консоль — сбор инвентаря по всем таблицам
-        // (подсчёт строк + профилирование колонок) иначе выглядит как «зависание».
         if ($this->logger instanceof ConsoleLogger) {
             $this->logger->setIo($io);
         }
-        $io->title('Подготовка пакета анализа (OPENCODE)');
 
-        $run = (bool) $input->getOption('run');
-        $this->printRoadmap($io, $run);
+        $io->title('Пакет для анализа кода');
 
-        $connection = $input->getOption('connection');
+        $connectionName = $input->getOption('connection');
+        $connectionName = is_string($connectionName) && $connectionName !== '' ? $connectionName : null;
 
         try {
-            if ($run) {
-                $io->section('Этап 1/3 — инвентаризация БД + скан кода хоста (grep)');
-            }
-            $result = $this->builder->build($connection !== null ? (string) $connection : null);
-            $io->success(sprintf('Подготовлено файлов: %d (таблиц: %d)', count($result['paths']), $result['tables']));
-
-            if ($input->getOption('run')) {
-                return $this->runPipeline(
-                    $io,
-                    $result['schema_files'],
-                    (int) $input->getOption('repair-attempts'),
-                    $connection !== null ? (string) $connection : null
-                );
-            }
-
-            $this->printManualInstructions($io, $result['schema_files']);
-            return Command::SUCCESS;
+            $result = $this->builder->build($connectionName);
         } catch (\Exception $e) {
-            $io->error('Ошибка подготовки пакета: ' . $e->getMessage());
+            $io->error('Не удалось собрать пакет: ' . $e->getMessage());
+
             return Command::FAILURE;
         }
-    }
 
-    /**
-     * Короткая карта предстоящих фаз — чтобы было ясно, что ещё впереди.
-     */
-    private function printRoadmap(SymfonyStyle $io, bool $run): void
-    {
-        $step2 = $run
-            ? ' 2. OPENCODE по каждой схеме — анализ кода агентом (нужен opencode в PATH)'
-            : ' 2. Запуск OPENCODE — вручную по инструкции ниже (или повторите с --run)';
-        $step3 = $run
-            ? ' 3. Применение результата — cascade_from / sample.criteria → dump_config.yaml'
-            : ' 3. Применение результата — app:dbdump:apply-analysis → dump_config.yaml';
+        $io->success(sprintf('Собрано: %d таблиц, %d файлов', $result['tables'], count($result['paths'])));
+        $this->printNextSteps($io, $result['schema_files']);
 
-        $io->text($run ? 'Этапы (--run, всё одной командой):' : 'Этапы:');
-        $io->text([
-            ' 1. Подготовка пакета (один проход по БД и коду):',
-            '    1a. Инвентаризация БД — по каждой таблице: COUNT(*) + случайная выборка ~200 строк →',
-            '        профили колонок (доля NULL, кардинальность, категориальность). Значения данных НЕ сохраняются.',
-            '    1b. Скан кода хоста (grep) — сразу после инвентаря, один проход по коду: где используются',
-            '        таблицы (entity/model/repository/sql), связи и сегменты выборки.',
-            $step2,
-            $step3,
-        ]);
-    }
-
-    /**
-     * @param array<string, string> $schemaFiles
-     */
-    private function runPipeline(SymfonyStyle $io, array $schemaFiles, int $repairAttempts, ?string $connectionName): int
-    {
-        if (!$this->runner->isAvailable()) {
-            $io->warning('opencode не найден в PATH — автозапуск невозможен. Запустите вручную:');
-            $this->printManualInstructions($io, $schemaFiles);
-            return Command::SUCCESS;
-        }
-
-        $dataDir = $this->configStore->getDataDir($this->projectDir);
-        $outRel = $dataDir . '/' . AnalysisPackageBuilder::OUT_DIR;
-        $io->section('Этап 2/3 — OPENCODE по схемам');
-        $io->note("Запуск OPENCODE автономно. Права — из frontmatter агента (read/edit/write/glob/grep/list + узкий allowlist bash). Агент пишет только в {$outRel}/.");
-        foreach ($schemaFiles as $schema => $absPath) {
-            $relFile = $dataDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.' . $schema . '.json';
-            $prompt = "Обработай схему {$schema} по инструкции; результат запиши в {$outRel}/{$schema}.json";
-            $io->section("Схема: {$schema}");
-            $code = $this->runner->runAgent($this->projectDir, $relFile, $prompt);
-            if ($code !== 0) {
-                $io->warning("OPENCODE завершился с кодом {$code} для схемы {$schema}");
-            }
-        }
-
-        if ($repairAttempts > 0) {
-            $io->section('Проверка и авто-исправление criteria');
-            $io->note("Прогон каждого criterion в БД и до {$repairAttempts} корректирующих перепрогонов агента на схему.");
-            $this->repairLoop->run($dataDir, $schemaFiles, $repairAttempts, $connectionName);
-        }
-
-        $io->section('Этап 3/3 — применение результата к dump_config.yaml');
-        $outDir = $this->projectDir . '/' . $outRel;
-        $ingested = $this->ingestor->ingest($outDir);
-        $stats = $this->enricher->enrich($this->configPath, $ingested);
-
-        $io->success(sprintf(
-            'Готово одной командой: cascade_from +%d, sample.criteria +%d',
-            $stats['cascade_added'],
-            $stats['criteria_added']
-        ));
         return Command::SUCCESS;
     }
 
     /**
      * @param array<string, string> $schemaFiles
      */
-    private function printManualInstructions(SymfonyStyle $io, array $schemaFiles): void
+    private function printNextSteps(SymfonyStyle $io, array $schemaFiles): void
     {
         $dataDir = $this->configStore->getDataDir($this->projectDir);
-        $io->section('Запуск OPENCODE вручную (скопируйте команды)');
-        if (empty($schemaFiles)) {
-            $io->text($this->runner->manualCommandHint($dataDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.json'));
-        } else {
-            $io->text('# по чанку на схему (рекомендуется для больших БД):');
-            foreach ($schemaFiles as $schema => $absPath) {
-                $relFile = $dataDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR . '/schema_inventory.' . $schema . '.json';
-                $io->text($this->runner->manualCommandHint($relFile));
-            }
+        $analysisDir = $dataDir . '/' . AnalysisPackageBuilder::ANALYSIS_DIR;
+
+        $io->section('Что дальше');
+        $io->text([
+            'Пакет собран, запускать агента команда не будет — это делается снаружи.',
+            '',
+            'Вход для агента:',
+            '  ' . $analysisDir . '/schema_inventory.json          полный инвентарь',
+            '  ' . $analysisDir . '/schema_inventory.<schema>.json  по одной схеме (для прогона по чанку)',
+            '  ' . $analysisDir . '/output_schema.json              контракт JSON-вывода',
+            '  ' . $analysisDir . '/RUN.md                          инструкция запуска',
+            '',
+            'Результат агент кладёт в ' . $dataDir . '/' . AnalysisPackageBuilder::OUT_DIR . '/<schema>.json,',
+            'затем: app:dbdump:apply-analysis — применить, app:dbdump:validate — проверить.',
+        ]);
+
+        if (!empty($schemaFiles)) {
+            $io->text('Схем в пакете: ' . count($schemaFiles) . ' (' . implode(', ', array_keys($schemaFiles)) . ')');
         }
-        $io->newLine();
-        $io->text('Затем примените результат: php bin/console app:dbdump:apply-analysis');
-        $io->note('Или повторите эту команду с флагом --run, чтобы сделать всё автоматически (нужен opencode в PATH).');
     }
 }

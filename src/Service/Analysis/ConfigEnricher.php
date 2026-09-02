@@ -391,7 +391,7 @@ class ConfigEnricher
     }
 
     /**
-     * Каталог анализа: projectDir/database/analysis (как у prepare-analysis), иначе —
+     * Каталог анализа: projectDir/{data_dir}/analysis (как у prepare-analysis), иначе —
      * сиблинг конфига (BC, когда projectDir не задан).
      */
     private function resolveAnalysisDir(string $configPath): string

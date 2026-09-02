@@ -144,12 +144,6 @@ services:
             $projectDir: '%kernel.project_dir%'
     Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor: ~
     Timbrs\DatabaseDumps\Service\Analysis\CriteriaSqlTester: ~
-    Timbrs\DatabaseDumps\Service\Analysis\OpencodeRunner:
-        arguments:
-            $projectDir: '%kernel.project_dir%'
-    Timbrs\DatabaseDumps\Service\Analysis\AnalysisRepairLoop:
-        arguments:
-            $projectDir: '%kernel.project_dir%'
     Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher:
         arguments:
             $projectDir: '%kernel.project_dir%'
@@ -212,7 +206,6 @@ services:
     Timbrs\DatabaseDumps\Bridge\Symfony\Command\PrepareAnalysisCommand:
         arguments:
             $projectDir: '%kernel.project_dir%'
-            $configPath: '%database_dumps.config_path%'
         tags:
             - { name: 'console.command', command: 'app:dbdump:prepare-analysis' }
 
@@ -227,6 +220,9 @@ services:
         arguments:
             $configPath: '%database_dumps.config_path%'
         tags:
+            # Оба имени регистрируем явно: у ленивой команды Symfony берёт имя из тега,
+            # объект не создаётся, и getAliases() ему взять неоткуда.
+            - { name: 'console.command', command: 'app:dbdump:check-criteria' }
             - { name: 'console.command', command: 'app:dbdump:repair-configs' }
 
     Timbrs\DatabaseDumps\Bridge\Symfony\Command\ValidateConfigCommand:

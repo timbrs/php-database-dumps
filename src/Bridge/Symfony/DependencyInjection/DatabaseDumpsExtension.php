@@ -39,7 +39,6 @@ class DatabaseDumpsExtension extends Extension
         // Так у Symfony один источник (DI), а env-оверрайды по-прежнему делает store.
         $container->setParameter('database_dumps.settings', [
             'data_dir' => $dataDir,
-            'opencode' => $processed['opencode'],
             'llm' => $processed['llm'],
         ]);
 

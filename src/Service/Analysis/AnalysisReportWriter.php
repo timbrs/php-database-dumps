@@ -6,8 +6,8 @@ use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 
 /**
  * Пишет результаты углублённого анализа в двух формах:
- *  - человекочитаемый отчёт database/analysis/REPORT.md
- *  - машинный database/analysis/analysis_result.json
+ *  - человекочитаемый отчёт {data_dir}/analysis/REPORT.md
+ *  - машинный {data_dir}/analysis/analysis_result.json
  *
  * Провенанс/уверенность фиксируются здесь (symfony/yaml не хранит комментарии),
  * а сами значения попадают в dump_config.yaml через ConfigEnricher.

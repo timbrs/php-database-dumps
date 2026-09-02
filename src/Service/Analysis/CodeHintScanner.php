@@ -19,7 +19,7 @@ use Timbrs\DatabaseDumps\Contract\LoggerInterface;
  *   2) использование обнаруженных классов (даёт счётчик «entity/model/repository usage»).
  *
  * Никаких значений данных БД не читается — только исходный код хоста. Enumerate/read вынесены
- * в protected-методы для подмены в юнит-тестах (как OpencodeRunner::execProcess).
+ * в protected-методы для подмены в юнит-тестах.
  *
  * PHP 7.2-совместимо (без typed properties / arrow fn / union types).
  */
