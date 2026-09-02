@@ -3,21 +3,17 @@
 namespace Timbrs\DatabaseDumps\Bridge\Symfony\DependencyInjection;
 
 use Symfony\Component\Config\FileLocator;
-use Symfony\Component\Config\Resource\FileExistenceResource;
-use Symfony\Component\Config\Resource\FileResource;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Extension\Extension;
 use Symfony\Component\DependencyInjection\Loader\YamlFileLoader;
 use Timbrs\DatabaseDumps\Config\EnvironmentConfig;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
-use Timbrs\DatabaseDumps\Util\FileSystemHelper;
 
 /**
- * DI Extension для регистрации сервисов пакета.
+ * DI Extension: config/packages/database_dumps.yaml → параметры контейнера.
  *
- * Принимает конфиг через стандартный механизм Symfony (config/packages/database_dumps.yaml).
- * Дефолты заданы в Configuration; контейнер ВСЕГДА получит валидные значения
- * параметров, даже если пользователь ничего не настраивал.
+ * Дефолты заданы в Configuration, поэтому контейнер ВСЕГДА получает валидные значения,
+ * даже если пользователь ничего не настраивал и файла нет.
  */
 class DatabaseDumpsExtension extends Extension
 {
@@ -36,7 +32,22 @@ class DatabaseDumpsExtension extends Extension
         $container->setParameter('database_dumps.sample_size', $processed['sample_size']);
         $container->setParameter('database_dumps.max_cascade_depth', $processed['max_cascade_depth']);
 
-        $configPath = $processed['config_path'] ?: $this->resolveDefaultConfigPath($container);
+        $dataDir = $this->resolveDataDir($processed, $container);
+        $container->setParameter('database_dumps.data_dir', $dataDir);
+
+        // Настройки для DbdumpConfigStore — в той же форме, в какой их отдавал файл.
+        // Так у Symfony один источник (DI), а env-оверрайды по-прежнему делает store.
+        $container->setParameter('database_dumps.settings', [
+            'data_dir' => $dataDir,
+            'opencode' => $processed['opencode'],
+            'llm' => $processed['llm'],
+        ]);
+
+        // Главный конфиг выгрузки лежит внутри data_dir — рядом с dump-settings/, dumps/
+        // и analysis/. Явный config_path перекрывает это правило.
+        $configPath = $processed['config_path']
+            ?: rtrim((string) $container->getParameter('kernel.project_dir'), '/\\')
+                . '/' . $dataDir . '/' . DbdumpConfigStore::MAIN_CONFIG_FILE;
         $container->setParameter('database_dumps.config_path', $configPath);
 
         $loader = new YamlFileLoader($container, new FileLocator(__DIR__ . '/../Resources/config'));
@@ -44,25 +55,19 @@ class DatabaseDumpsExtension extends Extension
     }
 
     /**
-     * Дефолтный путь к главному конфигу — {data_dir}/dump_config.yaml, где data_dir берётся
-     * из того же источника, что и дампы с анализом (env DBDUMP_DATA_DIR → config/database-dumps.php
-     * → docker/database). Иначе конфиг остался бы в одном каталоге, а дампы уехали бы в другой.
+     * В production data_dir всегда дефолтный — то же правило, что и в
+     * DbdumpConfigStore::getDataDir(). Иначе параметр контейнера и рантайм разошлись бы,
+     * и config_path указывал бы не туда, куда пишутся дампы.
      *
-     * config/database-dumps.php читается на этапе компиляции контейнера, поэтому регистрируем его
-     * ресурсом: правка data_dir пересобирает контейнер, а не оставляет протухший путь в кэше.
+     * @param array<string, mixed> $processed
      */
-    private function resolveDefaultConfigPath(ContainerBuilder $container): string
+    private function resolveDataDir(array $processed, ContainerBuilder $container): string
     {
-        $projectDir = (string) $container->getParameter('kernel.project_dir');
         $environment = new EnvironmentConfig((string) $container->getParameter('kernel.environment'));
-        $store = new DbdumpConfigStore(new FileSystemHelper(), $environment);
-
-        $storePath = $store->path($projectDir);
-        $container->addResource(new FileExistenceResource($storePath));
-        if (is_file($storePath)) {
-            $container->addResource(new FileResource($storePath));
+        if ($environment->isProduction()) {
+            return DbdumpConfigStore::DEFAULT_DATA_DIR;
         }
 
-        return $store->getConfigPath($projectDir);
+        return rtrim(trim((string) $processed['data_dir']), '/\\');
     }
 }

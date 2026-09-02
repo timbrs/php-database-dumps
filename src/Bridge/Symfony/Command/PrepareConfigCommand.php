@@ -198,7 +198,7 @@ class PrepareConfigCommand extends Command
     /**
      * Первый запуск: если LLM ещё не настроен (нет ни env, ни сохранённого файла) —
      * предложить задать API URL, модель и token. Несекретное сохраняется в
-     * config/database-dumps.php, токен — в .env.local; применяется немедленно.
+     * config/packages/database_dumps.yaml, токен — в .env.local; применяется немедленно.
      * LLM — основной сценарий.
      */
     private function ensureLlmConfigured(SymfonyStyle $io, InputInterface $input): void

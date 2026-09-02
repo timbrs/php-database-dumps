@@ -27,11 +27,23 @@ services:
             $platformName: '%database_dumps.platform%'
 
     # Config
+    # Окружение берём у ядра, а не из getenv('APP_ENV'): kernel.environment учитывает
+    # --env и .env, и совпадает с тем, по чему DI-расширение считает data_dir.
+    # Иначе prod-гейтинг в рантайме и путь к конфигу в контейнере разъезжаются.
     Timbrs\DatabaseDumps\Config\EnvironmentConfig:
-        factory: ['Timbrs\DatabaseDumps\Config\EnvironmentConfig', 'fromEnv']
+        arguments:
+            $currentEnv: '%kernel.environment%'
 
-    # Единое хранилище настроек (data_dir + LLM) в config/database-dumps.php
-    Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore: ~
+    # Файл настроек бандла: config/packages/database_dumps.yaml (запись из configure-llm).
+    Timbrs\DatabaseDumps\Contract\SettingsFileInterface:
+        class: Timbrs\DatabaseDumps\Config\SettingsFile\YamlBundleSettingsFile
+
+    # Единое хранилище настроек. ЧИТАЕТ из контейнера ($settings), а не из файла:
+    # так работают дефолты Configuration и оверрайды config/packages/{env}/.
+    Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore:
+        arguments:
+            $settingsFile: '@Timbrs\DatabaseDumps\Contract\SettingsFileInterface'
+            $settings: '%database_dumps.settings%'
 
     # Запись токена в .env.local/.env
     Timbrs\DatabaseDumps\Util\EnvFileWriter: ~

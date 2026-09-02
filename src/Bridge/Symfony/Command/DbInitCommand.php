@@ -47,7 +47,7 @@ class DbInitCommand extends Command
 Скрипты:
   {data_dir}/before_exec/*.sql    Выполняются до импорта (по алфавиту)
   {data_dir}/after_exec/*.sql     Выполняются после импорта (по алфавиту)
-  data_dir по умолчанию docker/database (config/database-dumps.php)
+  data_dir по умолчанию docker/database (config/packages/database_dumps.yaml)
 HELP
             );
     }

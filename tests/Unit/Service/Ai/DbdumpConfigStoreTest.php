@@ -230,6 +230,57 @@ class DbdumpConfigStoreTest extends TestCase
         $this->assertSame('docker/database', $store->getDataDir($this->projectDir));
     }
 
+    /**
+     * Symfony отдаёт разобранные настройки из контейнера: они, а не файл, — источник чтения.
+     * Иначе дефолты Configuration и оверрайды config/packages/{env}/ проходили бы мимо.
+     */
+    public function testInjectedSettingsWinOverFile(): void
+    {
+        $fileStore = $this->store();
+        $fileStore->save($this->projectDir, AiConfig::fromArray(['url' => 'https://file/v1']), 'var/from-file');
+
+        $injected = new DbdumpConfigStore(
+            new FileSystemHelper(),
+            new EnvironmentConfig('dev'),
+            null,
+            [
+                'data_dir' => 'var/from-di',
+                'opencode' => ['bin' => 'opencode-cli'],
+                'llm' => ['url' => 'https://di/v1', 'enabled' => null],
+            ]
+        );
+
+        $this->assertSame('var/from-di', $injected->getDataDir($this->projectDir));
+        $this->assertSame('opencode-cli', $injected->getOpencodeBin($this->projectDir));
+        $this->assertSame('https://di/v1', $injected->resolve($this->projectDir)->getUrl());
+    }
+
+    /**
+     * save() берёт «чужие» ключи из ФАЙЛА, а не из внедрённых настроек: в контейнере их нет,
+     * и запись из configure-llm снесла бы platform/batch_size.
+     */
+    public function testSaveKeepsFileKeysWhenSettingsAreInjected(): void
+    {
+        $path = $this->projectDir . '/config/database-dumps.php';
+        mkdir(dirname($path), 0777, true);
+        file_put_contents($path, "<?php
+return ['platform' => 'mysql', 'data_dir' => 'var/from-file'];
+");
+
+        $store = new DbdumpConfigStore(
+            new FileSystemHelper(),
+            new EnvironmentConfig('dev'),
+            null,
+            ['data_dir' => 'var/from-di', 'llm' => []]
+        );
+        $store->save($this->projectDir, AiConfig::fromArray(['url' => 'https://x/v1']));
+
+        $written = include $path;
+        $this->assertSame('mysql', $written['platform']);
+        $this->assertSame('var/from-file', $written['data_dir']);
+        $this->assertSame('https://x/v1', $written['llm']['url']);
+    }
+
     public function testGetConfigPathDefaultsUnderDataDir(): void
     {
         $this->assertSame(

@@ -133,9 +133,9 @@ php bin/console app:dbdump:prepare-config all
 3. `Модель` — имя модели (по умолчанию `openai/gpt-oss-120b`);
 4. `Token` — Bearer-токен; **можно оставить пустым** (Enter).
 
-Несекретные ответы (URL/модель) сохраняются в `config/database-dumps.php`, а `Token` — в `.env.local` (`DBDUMP_LLM_TOKEN`, при отсутствии — в `.env`); настройки **применяются сразу в этом же запуске**. Повторно спрашивать не будет. Если откажетесь — выбор тоже запомнится (анализ пойдёт на regex); включить позже — командой `configure-llm` (см. ниже).
+Несекретные ответы (URL/модель) сохраняются в файл настроек — `config/packages/database_dumps.yaml` (Symfony) / `config/database-dumps.php` (Laravel), а `Token` — в `.env.local` (`DBDUMP_LLM_TOKEN`, при отсутствии — в `.env`); настройки **применяются сразу в этом же запуске**. Повторно спрашивать не будет. Если откажетесь — выбор тоже запомнится (анализ пойдёт на regex); включить позже — командой `configure-llm` (см. ниже).
 
-> ℹ️ Токен в файл настроек не пишется — он хранится в `.env.local`, поэтому `config/database-dumps.php` безопасно коммитить. В Symfony этот файл подтягивается только вне prod.
+> ℹ️ Токен в файл настроек не пишется — он хранится в `.env.local`, поэтому файл настроек безопасно коммитить. В Symfony бандл регистрируется только вне prod.
 
 Результат: `dump_config.yaml` (+ per-schema файлы) с автоопределёнными `full_export`/`partial_export`, секцией `faker` (LLM-детекция ПД) и каскадами по FK.
 
@@ -172,7 +172,7 @@ php artisan dbdump:configure-llm                 # Laravel
 php bin/console app:dbdump:configure-llm         # Symfony
 ```
 
-Интерактивно меняет URL/модель/token, умеет проверить соединение и пересохранить настройки: несекретное — в `config/database-dumps.php`, токен — в `.env.local` (`DBDUMP_LLM_TOKEN`).
+Интерактивно меняет URL/модель/token, умеет проверить соединение и пересохранить настройки: несекретное — в файл настроек `config/packages/database_dumps.yaml` (Symfony) / `config/database-dumps.php` (Laravel), токен — в `.env.local` (`DBDUMP_LLM_TOKEN`).
 
 ## Быстрый старт
 
@@ -468,9 +468,9 @@ connections:
 - Основное подключение: `{data_dir}/dumps/{schema}/{table}.sql`
 - Именованное подключение: `{data_dir}/dumps/{connection}/{schema}/{table}.sql`
 
-`data_dir` — базовый каталог данных (по умолчанию `docker/database`), от него считается **всё**, что порождает пакет: главный конфиг (`{data_dir}/dump_config.yaml`), пер-схемные файлы (`{data_dir}/dump-settings`), дампы (`{data_dir}/dumps`), анализ (`{data_dir}/analysis`) и хуки (`{data_dir}/before_exec`, `{data_dir}/after_exec`). Изменить можно в `config/database-dumps.php` (ключ `data_dir`, например `'database'`) или через env `DBDUMP_DATA_DIR`. В prod всегда используется дефолт `docker/database`.
+`data_dir` — базовый каталог данных (по умолчанию `docker/database`), от него считается **всё**, что порождает пакет: главный конфиг (`{data_dir}/dump_config.yaml`), пер-схемные файлы (`{data_dir}/dump-settings`), дампы (`{data_dir}/dumps`), анализ (`{data_dir}/analysis`) и хуки (`{data_dir}/before_exec`, `{data_dir}/after_exec`). Изменить можно ключом `data_dir` в файле настроек — `config/packages/database_dumps.yaml` (Symfony) / `config/database-dumps.php` (Laravel) — или через env `DBDUMP_DATA_DIR`. В prod всегда используется дефолт `docker/database`.
 
-> **Смена дефолта в 1.1.23.** Раньше дефолтом был `database`, а путь к `dump_config.yaml` был зашит отдельной константой и не следовал за `data_dir`. Теперь дефолт — `docker/database`, и конфиг живёт внутри `data_dir` вместе с дампами. Установка, которая полагалась на прежний дефолт (в `config/database-dumps.php` нет ключа `data_dir`), после обновления перестанет видеть свои файлы — пропишите `'data_dir' => 'database'` либо перенесите каталог.
+> **Смена дефолта в 1.1.23.** Раньше дефолтом был `database`, а путь к `dump_config.yaml` был зашит отдельной константой и не следовал за `data_dir`. Теперь дефолт — `docker/database`, и конфиг живёт внутри `data_dir` вместе с дампами. Установка, которая полагалась на прежний дефолт (ключ `data_dir` не задан), после обновления перестанет видеть свои файлы — пропишите `data_dir: 'database'` либо перенесите каталог.
 
 **Опция `--connection`:**
 
@@ -538,7 +538,7 @@ php artisan dbdump:prepare-config new
 | `--no-faker` | Пропустить обнаружение персональных данных | — |
 | `--no-split` | Генерировать единый YAML без разделения по схемам | — |
 | `--criteria` | Авто-генерация `sample.criteria` из категориальных колонок | — |
-| `--ai` / `--no-ai` | Включить/отключить LLM-детекцию ПД (авто: включается, если LLM настроен — env `DBDUMP_LLM_URL` или `config/database-dumps.php`). `--no-ai` также подавляет авто-запрос настройки LLM при первом запуске | авто |
+| `--ai` / `--no-ai` | Включить/отключить LLM-детекцию ПД (авто: включается, если LLM настроен — env `DBDUMP_LLM_URL` или файл настроек). `--no-ai` также подавляет авто-запрос настройки LLM при первом запуске | авто |
 | `--deep` | Глубокий анализ: профилирование + ИИ + `sample.criteria` + отчёт `docker/database/analysis/REPORT.md` | — |
 
 **Как распределяются таблицы:**
@@ -560,7 +560,7 @@ php artisan dbdump:prepare-config new
 
 ### Настройка LLM (интерактивно)
 
-**При первом запуске `prepare-config`** (если настройки LLM ещё не заданы и сессия интерактивна) пакет сам предложит настроить LLM — спросит `API URL`, `Модель` и `Token` (token можно оставить пустым), сохранит несекретное в `config/database-dumps.php`, токен — в `.env.local` (`DBDUMP_LLM_TOKEN`), и применит настройки немедленно в этом же запуске. Отказ тоже запоминается, чтобы не спрашивать снова. Авто-запрос подавляется флагом `--no-ai` и в неинтерактивном режиме (`--no-interaction`, CI).
+**При первом запуске `prepare-config`** (если настройки LLM ещё не заданы и сессия интерактивна) пакет сам предложит настроить LLM — спросит `API URL`, `Модель` и `Token` (token можно оставить пустым), сохранит несекретное в файл настроек, токен — в `.env.local` (`DBDUMP_LLM_TOKEN`), и применит настройки немедленно в этом же запуске. Отказ тоже запоминается, чтобы не спрашивать снова. Авто-запрос подавляется флагом `--no-ai` и в неинтерактивном режиме (`--no-interaction`, CI).
 
 Настроить или изменить LLM в любой момент можно явной командой — она дополнительно умеет проверить соединение:
 
@@ -569,7 +569,7 @@ php artisan dbdump:configure-llm                 # Laravel
 php bin/console app:dbdump:configure-llm         # Symfony
 ```
 
-После настройки `--ai`/`--deep` и `prepare-analysis` подхватывают параметры автоматически. Приоритет источников: переменные окружения `DBDUMP_LLM_*` (если задан URL) перекрывают файл `config/database-dumps.php`; токен всегда берётся из окружения (`.env.local` → `.env`) и в файл настроек не пишется. В Symfony файл подтягивается только вне prod.
+После настройки `--ai`/`--deep` и `prepare-analysis` подхватывают параметры автоматически. Приоритет источников: переменные окружения `DBDUMP_LLM_*` (если задан URL) перекрывают файл настроек `config/packages/database_dumps.yaml` (Symfony) / `config/database-dumps.php` (Laravel); токен всегда берётся из окружения (`.env.local` → `.env`) и в файл настроек не пишется.
 
 ### LLM-детекция ПД и профилирование
 
@@ -730,12 +730,45 @@ return [
 
 Регистрация в `dev`/`test` соответствует установке через `composer require --dev`. Если пакет ставится в prod (без `--dev`), регистрируйте бандл как `['all' => true]`.
 
-Укажите платформу в `services.yaml`:
+### Настройки бандла
+
+Все настройки живут в одном файле `config/packages/database_dumps.yaml` под корневым ключом
+`database_dumps:`. Файл необязателен — без него работают дефолты.
 
 ```yaml
-parameters:
-    database_dumps.platform: 'postgresql'  # или 'mysql', 'oracle'
+database_dumps:
+    platform: 'postgresql'        # или 'mysql', 'oracle'
+    batch_size: 1000              # строк в одном INSERT
+    sample_size: 200              # выборка для детекции ПД и профилирования
+    max_cascade_depth: 10         # глубина каскадных подзапросов
+
+    # Базовый каталог: от него считаются dump_config.yaml, dump-settings/, dumps/,
+    # analysis/ и хуки before_exec/after_exec.
+    data_dir: 'docker/database'
+
+    # Путь к главному конфигу выгрузки. По умолчанию — {data_dir}/dump_config.yaml.
+    # config_path: '%kernel.project_dir%/docker/database/dump_config.yaml'
+
+    opencode:
+        bin: 'opencode'           # имя бинаря (напр. opencode-cli)
+
+    llm:
+        url: 'https://llm.example.com/v1'
+        model: 'openai/gpt-oss-120b'
+        timeout: 120
+        verify_ssl: true
+        # enabled: не задано — auto: включено, если задан url
 ```
+
+**Токен сюда не кладётся.** Он живёт в `.env.local` (`DBDUMP_LLM_TOKEN`), поэтому файл
+безопасно коммитить. Переменные окружения `DBDUMP_*` перекрывают значения из этого файла.
+Работают и оверрайды по окружениям — `config/packages/dev/database_dumps.yaml`.
+
+> **Переезд конфига в 1.1.24.** Раньше `data_dir`, `llm` и `opencode` лежали отдельным PHP-файлом
+> `config/database-dumps.php`, а бандл читал его в обход DI. Теперь это обычный конфиг бандла.
+> При обновлении перенесите значения из старого файла в `config/packages/database_dumps.yaml`
+> под ключ `database_dumps:` и удалите старый — Symfony-бридж его больше не читает.
+> В Laravel формат не изменился: там по-прежнему публикуемый `config/database-dumps.php`.
 
 <a id="структура-каталогов-symfony"></a>
 
@@ -744,7 +777,8 @@ parameters:
 ```
 your-symfony-project/
 ├── config/
-│   └── database-dumps.php        # настройки пакета (data_dir + LLM)
+│   └── packages/
+│       └── database_dumps.yaml # настройки пакета (data_dir, llm, opencode)
 └── docker/
     └── database/                 # = data_dir (по умолчанию)
         ├── dump_config.yaml      # главный конфиг с includes
@@ -1489,14 +1523,14 @@ connections:
 produces is resolved from it: the main config (`{data_dir}/dump_config.yaml`), per-schema files
 (`{data_dir}/dump-settings`), dumps (`{data_dir}/dumps`), analysis (`{data_dir}/analysis`) and
 hooks (`{data_dir}/before_exec`, `{data_dir}/after_exec`). Change it in
-`config/database-dumps.php` (key `data_dir`, e.g. `'database'`) or via the `DBDUMP_DATA_DIR` env
-var. In prod the default `docker/database` is always used.
+the `data_dir` key of the settings file — `config/packages/database_dumps.yaml` (Symfony) /
+`config/database-dumps.php` (Laravel) — or via the `DBDUMP_DATA_DIR` env var. In prod the default `docker/database` is always used.
 
 > **Default changed in 1.1.23.** It used to be `database`, and the path to `dump_config.yaml` was a
 > separate hardcoded constant that did not follow `data_dir`. The default is now `docker/database`,
 > and the config lives inside `data_dir` next to the dumps. An installation that relied on the old
-> default (no `data_dir` key in `config/database-dumps.php`) will stop seeing its files after the
-> upgrade — set `'data_dir' => 'database'` or move the directory.
+> default (no `data_dir` key set) will stop seeing its files after the upgrade — set
+> `data_dir: 'database'` or move the directory.
 
 **The `--connection` option:**
 
@@ -1586,12 +1620,46 @@ return [
 
 Registering under `dev`/`test` matches installation via `composer require --dev`. If the package is installed for prod (without `--dev`), register the bundle as `['all' => true]`.
 
-Set the platform in `services.yaml`:
+### Bundle Settings
+
+All settings live in a single `config/packages/database_dumps.yaml` under the `database_dumps:`
+root key. The file is optional — defaults apply without it.
 
 ```yaml
-parameters:
-    database_dumps.platform: 'postgresql'  # or 'mysql', 'oracle'
+database_dumps:
+    platform: 'postgresql'        # or 'mysql', 'oracle'
+    batch_size: 1000              # rows per INSERT
+    sample_size: 200              # sample for PII detection and profiling
+    max_cascade_depth: 10         # cascade subquery depth
+
+    # Base directory: dump_config.yaml, dump-settings/, dumps/, analysis/
+    # and the before_exec/after_exec hooks are all resolved from it.
+    data_dir: 'docker/database'
+
+    # Path to the main dump config. Defaults to {data_dir}/dump_config.yaml.
+    # config_path: '%kernel.project_dir%/docker/database/dump_config.yaml'
+
+    opencode:
+        bin: 'opencode'           # binary name (e.g. opencode-cli)
+
+    llm:
+        url: 'https://llm.example.com/v1'
+        model: 'openai/gpt-oss-120b'
+        timeout: 120
+        verify_ssl: true
+        # enabled: unset — auto: on when url is set
 ```
+
+**The token does not go here.** It lives in `.env.local` (`DBDUMP_LLM_TOKEN`), so the file is safe
+to commit. `DBDUMP_*` environment variables override values from this file. Per-environment
+overrides work too — `config/packages/dev/database_dumps.yaml`.
+
+> **Config moved in 1.1.24.** `data_dir`, `llm` and `opencode` used to live in a separate PHP file,
+> `config/database-dumps.php`, which the bundle read bypassing DI. It is now an ordinary bundle
+> config. When upgrading, move the values from the old file into
+> `config/packages/database_dumps.yaml` under the `database_dumps:` key and delete the old one —
+> the Symfony bridge no longer reads it. Laravel is unchanged: still the published
+> `config/database-dumps.php`.
 
 <a id="directory-structure-symfony"></a>
 
@@ -1600,7 +1668,8 @@ parameters:
 ```
 your-symfony-project/
 ├── config/
-│   └── database-dumps.php        # package settings (data_dir + LLM)
+│   └── packages/
+│       └── database_dumps.yaml # package settings (data_dir, llm, opencode)
 └── docker/
     └── database/                 # = data_dir (default)
         ├── dump_config.yaml      # main config with includes

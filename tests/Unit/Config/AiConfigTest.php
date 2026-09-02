@@ -211,6 +211,18 @@ class AiConfigTest extends TestCase
         $this->assertFalse($config->isEnabled());
     }
 
+    /**
+     * Явный null у ключа enabled — это «auto» (включено, если задан url), а не «выключено».
+     * Дерево конфигурации Symfony всегда материализует ключ со значением defaultNull().
+     */
+    public function testFromArrayNullEnabledMeansAuto(): void
+    {
+        $this->assertTrue(
+            AiConfig::fromArray(['url' => 'https://gpt.example.com/v1', 'enabled' => null])->isEnabled()
+        );
+        $this->assertFalse(AiConfig::fromArray(['url' => '', 'enabled' => null])->isEnabled());
+    }
+
     public function testVerifySslDefaultsTrue(): void
     {
         $this->assertTrue(AiConfig::fromEnv()->getVerifySsl());

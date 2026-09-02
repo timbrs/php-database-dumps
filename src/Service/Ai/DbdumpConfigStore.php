@@ -4,28 +4,35 @@ namespace Timbrs\DatabaseDumps\Service\Ai;
 
 use Timbrs\DatabaseDumps\Config\AiConfig;
 use Timbrs\DatabaseDumps\Config\EnvironmentConfig;
+use Timbrs\DatabaseDumps\Config\SettingsFile\PhpArraySettingsFile;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
+use Timbrs\DatabaseDumps\Contract\SettingsFileInterface;
 
 /**
- * Единое хранилище настроек timbrs/database-dumps в config/database-dumps.php.
+ * Единое хранилище несекретных настроек пакета:
  *
- * Файл возвращает массив:
  *   [
  *     'data_dir' => 'docker/database', // база для конфига/дампов/анализа/хуков (можно 'var/database')
- *     'llm' => ['enabled' => .., 'url' => .., 'model' => .., 'timeout' => ..],
+ *     'opencode' => ['bin' => 'opencode'],
+ *     'llm' => ['enabled' => .., 'url' => .., 'model' => .., 'timeout' => .., 'verify_ssl' => ..],
  *   ]
- * Секрет (token) в файле НЕ хранится — он в .env.local (DBDUMP_LLM_TOKEN),
- * см. EnvFileWriter. В Laravel это родной публикуемый конфиг (с env()).
+ *
+ * ГДЕ они лежат — дело бриджа (SettingsFileInterface): в Symfony это
+ * config/packages/database_dumps.yaml, в Laravel — публикуемый config/database-dumps.php.
+ * Секрет (token) не хранится ни там, ни там — он в .env.local (DBDUMP_LLM_TOKEN),
+ * см. EnvFileWriter.
+ *
+ * ОТКУДА читать — тоже дело бриджа. Symfony передаёт уже разобранные значения из
+ * контейнера ($settings): так работают дефолты Configuration и оверрайды
+ * config/packages/{env}/. Laravel и агностик-использование читают файл напрямую.
  *
  * Приоритеты:
- *  - data_dir: env DBDUMP_DATA_DIR → файл data_dir → 'docker/database'; в prod → 'docker/database'.
- *  - llm: env DBDUMP_LLM_* (если задан URL) → файл; в prod → LLM выключен.
- *    Токен из окружения применяется поверх файла (URL из файла + token из env).
+ *  - data_dir: env DBDUMP_DATA_DIR → настройки → 'docker/database'; в prod → 'docker/database'.
+ *  - llm: env DBDUMP_LLM_* (если задан URL) → настройки; в prod → LLM выключен.
+ *    Токен из окружения применяется поверх (URL из настроек + token из env).
  */
 class DbdumpConfigStore
 {
-    public const RELATIVE_PATH = 'config/database-dumps.php';
-
     /**
      * Базовый каталог данных по умолчанию. Всё, что порождает пакет, лежит под ним:
      * главный конфиг ({data_dir}/dump_config.yaml), пер-схемные файлы
@@ -38,66 +45,79 @@ class DbdumpConfigStore
     /** Имя главного файла конфига выгрузки внутри data_dir. */
     public const MAIN_CONFIG_FILE = 'dump_config.yaml';
 
-    /** Имя бинаря opencode (напр. 'opencode-cli'): дефолт, env и ключ файла opencode.bin. */
+    /** Имя бинаря opencode (напр. 'opencode-cli'): дефолт, env и ключ настроек opencode.bin. */
     public const DEFAULT_OPENCODE_BIN = 'opencode';
     public const ENV_OPENCODE_BIN = 'DBDUMP_OPENCODE_BIN';
 
-    /** @var FileSystemInterface */
-    private $fileSystem;
+    /** @var SettingsFileInterface */
+    private $settingsFile;
 
     /** @var EnvironmentConfig */
     private $environment;
 
-    public function __construct(FileSystemInterface $fileSystem, EnvironmentConfig $environment = null)
-    {
-        $this->fileSystem = $fileSystem;
+    /**
+     * Разобранные настройки от бриджа (Symfony — из DI). null — читать файл.
+     *
+     * @var array<string, mixed>|null
+     */
+    private $settings;
+
+    /**
+     * @param array<string, mixed>|null $settings готовые настройки от бриджа; null — читать файл
+     */
+    public function __construct(
+        FileSystemInterface $fileSystem,
+        EnvironmentConfig $environment = null,
+        SettingsFileInterface $settingsFile = null,
+        ?array $settings = null
+    ) {
+        $this->settingsFile = $settingsFile !== null ? $settingsFile : new PhpArraySettingsFile($fileSystem);
         $this->environment = $environment !== null ? $environment : EnvironmentConfig::fromEnv();
+        $this->settings = $settings;
     }
 
+    /**
+     * Путь к файлу настроек — для сообщений пользователю.
+     */
     public function path(string $projectDir): string
     {
-        return rtrim($projectDir, '/\\') . '/' . self::RELATIVE_PATH;
+        return $this->settingsFile->path($projectDir);
     }
 
     public function exists(string $projectDir): bool
     {
-        return $this->fileSystem->exists($this->path($projectDir));
+        return $this->settingsFile->read($projectDir) !== null;
     }
 
     /**
-     * Загрузить массив настроек из PHP-файла или null (нет файла / результат не массив).
+     * Действующие настройки: из бриджа, иначе из файла; null — ничего нет.
      *
      * @return array<string, mixed>|null
      */
     public function load(string $projectDir): ?array
     {
-        $path = $this->path($projectDir);
-        if (!$this->fileSystem->exists($path) || !is_file($path)) {
-            return null;
+        if ($this->settings !== null) {
+            return $this->settings;
         }
-        /** @psalm-suppress UnresolvableInclude */
-        $data = include $path;
-        return is_array($data) ? $data : null;
+
+        return $this->settingsFile->read($projectDir);
     }
 
     /**
-     * Сохранить несекретные настройки (data_dir + llm без token) в config/database-dumps.php.
+     * Сохранить несекретные настройки (data_dir + opencode + llm без token) в файл настроек.
      * Токен НИКОГДА не пишется в файл — он живёт в .env.local (см. EnvFileWriter).
      *
-     * Неизвестные ключи (напр. Laravel config_path/project_dir, opencode) сохраняются.
+     * Ключи, которыми пакет не управляет (Laravel config_path/project_dir, бандловые
+     * platform/batch_size/…), сохраняются. За основу берётся СОДЕРЖИМОЕ ФАЙЛА, а не
+     * load(): в Symfony load() отдаёт разобранные значения из контейнера, где чужих
+     * ключей уже нет, и запись затёрла бы их.
      *
      * @param string|null $opencodeBin если задан — переопределяет секцию opencode.bin;
      *                                 null — сохраняется существующая (если была)
      */
     public function save(string $projectDir, AiConfig $config, ?string $dataDir = null, ?string $opencodeBin = null): void
     {
-        $path = $this->path($projectDir);
-        $dir = dirname($path);
-        if (!$this->fileSystem->exists($dir)) {
-            $this->fileSystem->createDirectory($dir);
-        }
-
-        $existing = $this->load($projectDir);
+        $existing = $this->settingsFile->read($projectDir);
         $existing = is_array($existing) ? $existing : [];
 
         $existingLlm = (isset($existing['llm']) && is_array($existing['llm'])) ? $existing['llm'] : [];
@@ -110,11 +130,16 @@ class DbdumpConfigStore
         ]);
         unset($llm['token']); // секрет в файл не пишем
 
+        // Действующий data_dir, а не только записанный в файле: в Symfony он может прийти
+        // из дефолта Configuration, и save() не должен молча вернуть его к константе.
+        $current = $this->load($projectDir);
         $resolvedDataDir = self::DEFAULT_DATA_DIR;
         if ($dataDir !== null && $dataDir !== '') {
             $resolvedDataDir = $dataDir;
         } elseif (isset($existing['data_dir']) && is_string($existing['data_dir']) && $existing['data_dir'] !== '') {
             $resolvedDataDir = $existing['data_dir'];
+        } elseif (is_array($current) && isset($current['data_dir']) && is_string($current['data_dir']) && $current['data_dir'] !== '') {
+            $resolvedDataDir = $current['data_dir'];
         }
 
         // Стабильный порядок вывода: data_dir, прочие сохранённые ключи, llm.
@@ -131,11 +156,11 @@ class DbdumpConfigStore
         }
         $out['llm'] = $llm;
 
-        $this->fileSystem->writeAtomic($path, $this->render($out));
+        $this->settingsFile->write($projectDir, $out);
     }
 
     /**
-     * Имя/путь бинаря opencode: env DBDUMP_OPENCODE_BIN → файл opencode.bin → 'opencode'.
+     * Имя/путь бинаря opencode: env DBDUMP_OPENCODE_BIN → настройки opencode.bin → 'opencode'.
      */
     public function getOpencodeBin(string $projectDir): string
     {
@@ -232,58 +257,6 @@ class DbdumpConfigStore
     {
         $trimmed = rtrim(trim($value), '/\\');
         return $trimmed === '' ? self::DEFAULT_DATA_DIR : $trimmed;
-    }
-
-    /**
-     * @param array<string, mixed> $data
-     */
-    private function render(array $data): string
-    {
-        $header = "<?php\n\n"
-            . "// timbrs/database-dumps — настройки. Подтягивается только вне prod.\n"
-            . "// Секреты держите в .env.local: DBDUMP_LLM_TOKEN=... (env перекрывает значения ниже).\n"
-            . "// Файл создаётся/обновляется командами configure-llm и prepare-config.\n\n"
-            . "return ";
-        return $header . $this->renderValue($data, 0) . ";\n";
-    }
-
-    /**
-     * @param mixed $value
-     */
-    private function renderValue($value, int $indent): string
-    {
-        if (is_array($value)) {
-            $pad = str_repeat('    ', $indent + 1);
-            $close = str_repeat('    ', $indent);
-            $isList = array_keys($value) === range(0, count($value) - 1);
-            $lines = [];
-            foreach ($value as $k => $v) {
-                $prefix = $isList ? '' : $this->renderScalar($k) . ' => ';
-                $lines[] = $pad . $prefix . $this->renderValue($v, $indent + 1);
-            }
-            if (empty($lines)) {
-                return '[]';
-            }
-            return "[\n" . implode(",\n", $lines) . ",\n" . $close . ']';
-        }
-        return $this->renderScalar($value);
-    }
-
-    /**
-     * @param mixed $value
-     */
-    private function renderScalar($value): string
-    {
-        if (is_bool($value)) {
-            return $value ? 'true' : 'false';
-        }
-        if ($value === null) {
-            return 'null';
-        }
-        if (is_int($value) || is_float($value)) {
-            return (string) $value;
-        }
-        return var_export((string) $value, true);
     }
 
     /**

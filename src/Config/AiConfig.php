@@ -136,7 +136,12 @@ class AiConfig
         $model = isset($data['model']) && $data['model'] !== '' ? (string) $data['model'] : self::DEFAULT_MODEL;
         $token = (isset($data['token']) && $data['token'] !== '') ? (string) $data['token'] : null;
         $timeout = isset($data['timeout']) ? (int) $data['timeout'] : self::DEFAULT_TIMEOUT;
-        $enabled = array_key_exists('enabled', $data) ? (bool) $data['enabled'] : null;
+        // null — это «auto» (включено, если задан url), а не «выключено». Ключ приходит
+        // со значением null из дерева конфигурации Symfony, где defaultNull() означает
+        // именно auto; (bool) null молча выключил бы LLM при заданном URL.
+        $enabled = (array_key_exists('enabled', $data) && $data['enabled'] !== null)
+            ? (bool) $data['enabled']
+            : null;
         $verifySsl = array_key_exists('verify_ssl', $data) ? self::toBool($data['verify_ssl'], true) : true;
 
         return new self($url, $model, $token, $timeout, $enabled, $verifySsl);

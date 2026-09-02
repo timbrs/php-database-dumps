@@ -14,7 +14,7 @@ use Timbrs\DatabaseDumps\Util\EnvFileWriter;
 
 /**
  * Интерактивная настройка LLM: спрашивает наличие LLM, URL, модель и token.
- * Несекретное сохраняется в config/database-dumps.php (DbdumpConfigStore),
+ * Несекретное сохраняется в config/packages/database_dumps.yaml (DbdumpConfigStore),
  * токен — в .env.local/.env (EnvFileWriter, DBDUMP_LLM_TOKEN).
  */
 class ConfigureLlmCommand extends Command
