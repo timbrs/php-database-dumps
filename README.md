@@ -735,6 +735,28 @@ return [
 Все настройки живут в одном файле `config/packages/database_dumps.yaml` под корневым ключом
 `database_dumps:`. Файл необязателен — без него работают дефолты.
 
+> ⚠️ **Если бандл зарегистрирован как `['dev' => true, 'test' => true]`** (рекомендованный
+> вариант выше), секцию ОБЯЗАТЕЛЬНО оборачивать в `when@dev:` / `when@test:`. Файлы
+> `config/packages/*.yaml` грузятся во всех окружениях, а расширения `database_dumps` в prod
+> нет — голый корневой ключ уронит сборку контейнера:
+> `There is no extension able to load the configuration for "database_dumps"`.
+> Так же устроены штатные `web_profiler.yaml` и `debug.yaml`. При регистрации `['all' => true]`
+> обёртка не нужна.
+
+```yaml
+# Вариант для бандла, зарегистрированного в dev/test. Значения одинаковые,
+# поэтому блок задан YAML-якорем.
+when@dev: &database_dumps
+    database_dumps:
+        data_dir: 'docker/database'
+        llm:
+            url: 'https://llm.example.com/v1'
+
+when@test: *database_dumps
+```
+
+Полный список ключей (здесь без обёртки, для случая `['all' => true]`):
+
 ```yaml
 database_dumps:
     platform: 'postgresql'        # или 'mysql', 'oracle'
@@ -1624,6 +1646,28 @@ Registering under `dev`/`test` matches installation via `composer require --dev`
 
 All settings live in a single `config/packages/database_dumps.yaml` under the `database_dumps:`
 root key. The file is optional — defaults apply without it.
+
+> ⚠️ **If the bundle is registered as `['dev' => true, 'test' => true]`** (the recommended setup
+> above), the section MUST be wrapped in `when@dev:` / `when@test:`. Files under
+> `config/packages/*.yaml` are loaded in every environment, and there is no `database_dumps`
+> extension in prod — a bare root key breaks the container build:
+> `There is no extension able to load the configuration for "database_dumps"`.
+> The built-in `web_profiler.yaml` and `debug.yaml` work the same way. With `['all' => true]`
+> no wrapper is needed.
+
+```yaml
+# For a bundle registered in dev/test. The values are identical,
+# so the block is shared through a YAML anchor.
+when@dev: &database_dumps
+    database_dumps:
+        data_dir: 'docker/database'
+        llm:
+            url: 'https://llm.example.com/v1'
+
+when@test: *database_dumps
+```
+
+Full key list (shown without the wrapper, i.e. for `['all' => true]`):
 
 ```yaml
 database_dumps:
