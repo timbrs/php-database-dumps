@@ -189,7 +189,7 @@ class ColumnExistenceRule implements RuleInterface
                 'L-3',
                 sprintf(
                     'cascade_from[%d] ссылается на несуществующую колонку (%s) — CascadeWhereResolver '
-                    . 'молча отбросит ограничение, ребёнок выгрузится без связи с родителем',
+                    . 'подставит её в WHERE как есть, и export упадёт на этой таблице',
                     $index,
                     implode('; ', $dead)
                 ),
