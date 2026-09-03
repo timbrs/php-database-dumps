@@ -39,8 +39,21 @@ class DossierBuilderTest extends TestCase
         $attrs = (new DossierBuilder())->build('tasks', $this->inventory(), $this->config())['tables'];
         self::assertArrayHasKey('clients_attrs', $attrs);
         self::assertSame(['role' => 'values', 'pair' => 'clients_attrs_dict'], $attrs['clients_attrs']['traits']['eav']);
+        self::assertSame(['role' => 'dictionary', 'pair' => 'clients_attrs'], $attrs['clients_attrs_dict']['traits']['eav']);
         self::assertTrue($attrs['jobs']['traits']['scd2']);
         self::assertTrue($attrs['jobs']['traits']['active_flag']);
+    }
+
+    public function testEavPairIsTakenFromTheSchemaNotFromTheName(): void
+    {
+        $attrs = (new DossierBuilder())->build('tasks', $this->inventory(), $this->config())['tables'];
+
+        // Конвенция промахнулась (`party_attrs_dict` не существует) — словарь нашёлся по связи,
+        // и в досье попало имя из базы, без префикса своей же схемы.
+        self::assertSame(['role' => 'values', 'pair' => 'attr_dict'], $attrs['party_attrs']['traits']['eav']);
+
+        // Словаря нет ни по имени, ни по связи: роль остаётся, имени нет — выдумывать нечего.
+        self::assertSame(['role' => 'values', 'pair' => null], $attrs['orphan_attrs']['traits']['eav']);
     }
 
     public function testEdgesMergeForeignKeysConfigAndIncomingLinks(): void
@@ -132,6 +145,48 @@ class DossierBuilderTest extends TestCase
                             'foreign_keys' => [
                                 ['column' => 'job_id', 'references_table' => 'tasks.jobs', 'references_column' => 'id'],
                             ],
+                            'profiles' => [],
+                        ],
+                        // Пара по конвенции: `<x>_attrs` + `<x>_attrs_dict`.
+                        'clients_attrs_dict' => [
+                            'row_count' => 12,
+                            'columns' => [
+                                ['name' => 'id', 'type' => 'integer', 'nullable' => false],
+                                ['name' => 'name', 'type' => 'character varying', 'nullable' => true],
+                            ],
+                            'foreign_keys' => [],
+                            'profiles' => [],
+                        ],
+                        // Словарь назван не по конвенции — его находит внешний ключ от attr_id.
+                        'party_attrs' => [
+                            'row_count' => 30,
+                            'columns' => [
+                                ['name' => 'id', 'type' => 'bigint', 'nullable' => false],
+                                ['name' => 'attr_id', 'type' => 'integer', 'nullable' => true],
+                                ['name' => 'value_int', 'type' => 'integer', 'nullable' => true],
+                            ],
+                            'foreign_keys' => [
+                                ['column' => 'attr_id', 'references_table' => 'tasks.attr_dict', 'references_column' => 'id'],
+                            ],
+                            'profiles' => [],
+                        ],
+                        'attr_dict' => [
+                            'row_count' => 4,
+                            'columns' => [
+                                ['name' => 'id', 'type' => 'integer', 'nullable' => false],
+                                ['name' => 'name', 'type' => 'character varying', 'nullable' => true],
+                            ],
+                            'foreign_keys' => [],
+                            'profiles' => [],
+                        ],
+                        // Словаря нет вовсе: ни по имени, ни по связи.
+                        'orphan_attrs' => [
+                            'row_count' => 7,
+                            'columns' => [
+                                ['name' => 'id', 'type' => 'bigint', 'nullable' => false],
+                                ['name' => 'attr_id', 'type' => 'integer', 'nullable' => true],
+                            ],
+                            'foreign_keys' => [],
                             'profiles' => [],
                         ],
                     ],

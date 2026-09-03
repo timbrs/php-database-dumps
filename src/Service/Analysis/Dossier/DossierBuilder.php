@@ -51,6 +51,10 @@ class DossierBuilder
             ? $inventory['schemas'][$schema]['tables']
             : [];
 
+        // Имена таблиц схемы: по ним проверяются догадки об именах (пара EAV), чтобы досье
+        // не называло таблицу, которой нет.
+        $siblings = array_map('strval', array_keys($tables));
+
         $inDegree = $this->countInDegree($inventory);
         $migrations = $this->migrations !== null ? $this->migrations->scan() : [];
         $views = $this->views !== null ? $this->views->scan($schema) : [];
@@ -68,7 +72,8 @@ class DossierBuilder
                 $dumpConfig,
                 isset($inDegree[$key]) ? $inDegree[$key] : [],
                 isset($migrations[$key]) ? $migrations[$key] : null,
-                isset($views[$key]) ? $views[$key] : []
+                isset($views[$key]) ? $views[$key] : [],
+                $siblings
             );
         }
         // Таблицы, настроенные в конфиге, которых в слепке нет: их не выгрузит ни один экспорт,
@@ -128,6 +133,7 @@ class DossierBuilder
      * @param array<int, array<string, mixed>>           $inDegree
      * @param array<string, mixed>|null                  $migration
      * @param array<int, string>                         $views
+     * @param array<int, string>                         $siblings
      *
      * @return array<string, mixed>
      */
@@ -138,7 +144,8 @@ class DossierBuilder
         DumpConfig $dumpConfig,
         array $inDegree,
         $migration,
-        array $views
+        array $views,
+        array $siblings
     ): array {
         $raw = $dumpConfig->getTableConfig($schema, $table);
         $isFull = in_array($table, $dumpConfig->getFullExportTables($schema), true);
@@ -173,7 +180,7 @@ class DossierBuilder
                 'sample' => $raw !== null && isset($raw[TableConfig::KEY_SAMPLE]) ? $raw[TableConfig::KEY_SAMPLE] : null,
                 'cascade_from' => $raw !== null && isset($raw[TableConfig::KEY_CASCADE_FROM]) ? $raw[TableConfig::KEY_CASCADE_FROM] : null,
             ],
-            'traits' => $this->traits($table, $entry, $columns, count($inDegree)),
+            'traits' => $this->traits($schema, $table, $columns, count($inDegree), $siblings, $edges),
             'edges' => $edges,
             'views' => $views,
             'migrations' => $migration,
@@ -290,33 +297,83 @@ class DossierBuilder
     /**
      * Роль таблицы: словарь, версионная (SCD2), EAV-пара, число ссылающихся.
      *
-     * @param array<string, mixed>                $entry
      * @param array<string, array<string, mixed>> $columns
+     * @param array<int, string>                  $siblings
+     * @param array<int, array<string, mixed>>    $edges
      *
      * @return array<string, mixed>
      */
-    private function traits(string $table, array $entry, array $columns, int $inDegree): array
+    private function traits(string $schema, string $table, array $columns, int $inDegree, array $siblings, array $edges): array
     {
         $names = array_keys($columns);
         $has = function (string $column) use ($names): bool {
             return in_array($column, $names, true);
         };
 
-        $eav = null;
-        if (substr($table, -6) === '_attrs') {
-            $eav = ['role' => 'values', 'pair' => $table . '_dict'];
-        } elseif (substr($table, -11) === '_attrs_dict') {
-            $eav = ['role' => 'dictionary', 'pair' => substr($table, 0, -5)];
-        }
-
         return [
             'dict' => substr($table, -5) === '_dict',
             'scd2' => $has('date_from') && $has('date_to'),
             'active_flag' => $has('active_flg') || $has('active_flag') || $has('is_active'),
-            'eav' => $eav,
+            'eav' => $this->eav($schema, $table, $siblings, $edges),
             'in_degree' => $inDegree,
             'columns' => count($columns),
         ];
+    }
+
+    /**
+     * Роль в EAV-паре и вторая её половина.
+     *
+     * Роль выводится из имени (`<x>_attrs` — значения, `<x>_attrs_dict` — словарь), а вот имя парной
+     * таблицы — уже догадка, и она верна не везде: словарь может называться иначе (`attr_dict`) или
+     * не существовать вовсе. Досье читает агент и ходит по названным путям, поэтому имя, не
+     * подтверждённое слепком, сюда не попадает: сначала проверяется конвенция, затем словарь ищется
+     * по связи от колонки атрибута, и если не нашлось ни там, ни там — `pair` остаётся `null`. Роль
+     * при этом сохраняется: стратификация по `attr_id` (R3) от знания словаря не зависит.
+     *
+     * @param array<int, string>               $siblings
+     * @param array<int, array<string, mixed>> $edges
+     *
+     * @return array<string, mixed>|null
+     */
+    private function eav(string $schema, string $table, array $siblings, array $edges): ?array
+    {
+        if (substr($table, -11) === '_attrs_dict') {
+            $pair = substr($table, 0, -5);
+
+            return ['role' => 'dictionary', 'pair' => in_array($pair, $siblings, true) ? $pair : null];
+        }
+        if (substr($table, -6) !== '_attrs') {
+            return null;
+        }
+        if (in_array($table . '_dict', $siblings, true)) {
+            return ['role' => 'values', 'pair' => $table . '_dict'];
+        }
+
+        return ['role' => 'values', 'pair' => $this->dictionaryByEdge($schema, $edges)];
+    }
+
+    /**
+     * Словарь EAV по связи от колонки атрибута: имя даёт база или конфиг, а не конвенция.
+     *
+     * @param array<int, array<string, mixed>> $edges
+     */
+    private function dictionaryByEdge(string $schema, array $edges): ?string
+    {
+        foreach ($edges as $edge) {
+            if (!isset($edge['dir'], $edge['column'], $edge['table']) || $edge['dir'] !== 'out') {
+                continue;
+            }
+            if (!in_array($edge['column'], ['attr_id', 'attribute_id'], true)) {
+                continue;
+            }
+            $target = (string) $edge['table'];
+            $short = strpos($target, $schema . '.') === 0 ? substr($target, strlen($schema) + 1) : $target;
+            if (substr($short, -5) === '_dict') {
+                return $short;
+            }
+        }
+
+        return null;
     }
 
     /**
