@@ -31,6 +31,9 @@ use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
 use Timbrs\DatabaseDumps\Service\Analysis\CriteriaSqlTester;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
+use Timbrs\DatabaseDumps\Service\Analysis\Dossier\DossierBuilder;
+use Timbrs\DatabaseDumps\Service\Analysis\Dossier\MigrationScanner;
+use Timbrs\DatabaseDumps\Service\Analysis\Dossier\ViewScanner;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisReportWriter;
 use Timbrs\DatabaseDumps\Service\Analysis\CodeHintScanner;
 use Timbrs\DatabaseDumps\Service\Analysis\ConfigCriteriaRepairer;
@@ -380,7 +383,12 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(CodeHintScanner::class),
                 $app->make(DbdumpConfigStore::class),
                 $app->make(RowCounter::class),
-                $app->make(PgStatsReader::class)
+                $app->make(PgStatsReader::class),
+                $app->make(DumpConfig::class),
+                new DossierBuilder(
+                    new MigrationScanner($app['config']->get('database-dumps.project_dir')),
+                    new ViewScanner($app->make(ConnectionRegistryInterface::class))
+                )
             );
         });
         $this->app->singleton(AnalysisIngestor::class, function ($app) {

@@ -137,11 +137,21 @@ class ColumnUsageDetector
         foreach ($files as $f) {
             $content = $f['content'];
 
+            // FQCN enum'а: короткое имя в хосте неоднозначно (три разных TypeEnum), поэтому
+            // разворачиваем его по use-импортам файла, где написан маппинг.
+            $imports = UseStatementResolver::imports($content);
+
             // Eloquent $casts: 'col' => Enum::class | 'boolean' | 'datetime'
-            if (preg_match_all('/[\'"]([A-Za-z_][\w]*)[\'"]\s*=>\s*([A-Za-z_\x{0080}-\x{FFFF}][A-Za-z0-9_\\\\\x{0080}-\x{FFFF}]*)::class/u', $content, $mm, PREG_SET_ORDER)) {
+            if (preg_match_all('/[\'"]([A-Za-z_][\w]*)[\'"]\s*=>\s*([A-Za-z_\\\\\x{0080}-\x{FFFF}][A-Za-z0-9_\\\\\x{0080}-\x{FFFF}]*)::class/u', $content, $mm, PREG_SET_ORDER)) {
                 foreach ($mm as $m) {
                     if (isset($known[$m[1]])) {
-                        $meta[$m[1]]['enum'] = ['type' => $this->shortClass($m[2])];
+                        $meta[$m[1]]['enum'] = [
+                            'type' => $this->shortClass($m[2]),
+                            'fqcn' => UseStatementResolver::resolve($m[2], $imports),
+                            'bridge' => 'casts',
+                            'confidence' => 'high',
+                            'evidence' => ['file' => $f['rel']],
+                        ];
                     }
                 }
             }
@@ -163,7 +173,13 @@ class ColumnUsageDetector
                 }
                 $col = $this->doctrineColumnName($line, $f['lines'], $idx);
                 if ($col !== null && isset($known[$col])) {
-                    $meta[$col]['enum'] = ['type' => $this->shortClass($em[1])];
+                    $meta[$col]['enum'] = [
+                        'type' => $this->shortClass($em[1]),
+                        'fqcn' => UseStatementResolver::resolve($em[1], $imports),
+                        'bridge' => 'enum_type',
+                        'confidence' => 'high',
+                        'evidence' => ['file' => $f['rel'], 'line' => $idx + 1],
+                    ];
                 }
             }
         }

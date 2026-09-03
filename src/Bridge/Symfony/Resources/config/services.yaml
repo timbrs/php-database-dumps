@@ -278,6 +278,15 @@ services:
         tags:
             - { name: 'console.command', command: 'app:dbdump:verify-dump' }
 
+    # Досье по таблице и колонке: слепок + код + конфиг + миграции + вьюхи в одном файле на схему.
+    Timbrs\DatabaseDumps\Service\Analysis\Dossier\MigrationScanner:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+
+    Timbrs\DatabaseDumps\Service\Analysis\Dossier\ViewScanner: ~
+
+    Timbrs\DatabaseDumps\Service\Analysis\Dossier\DossierBuilder: ~
+
     # Единая проверка: стадии static/live/plan/dump/import, один JSON, реестр кодов FindingCatalog.
     Timbrs\DatabaseDumps\Service\Check\CheckRunner:
         arguments:

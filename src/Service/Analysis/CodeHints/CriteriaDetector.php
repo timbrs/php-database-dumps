@@ -115,15 +115,22 @@ class CriteriaDetector
      */
     private function detectEnums(string $content, array $lines): array
     {
-        if (!preg_match('/\benum\s+([A-Za-z_\x{0080}-\x{FFFF}][A-Za-z0-9_\x{0080}-\x{FFFF}]*)\s*:\s*(?:string|int)\b/u', $content, $em)) {
+        if (!preg_match('/\benum\s+([A-Za-z_\x{0080}-\x{FFFF}][A-Za-z0-9_\x{0080}-\x{FFFF}]*)\s*:\s*(string|int)\b/u', $content, $em)) {
             return [];
         }
         $enum = $em[1];
+        $backing = $em[2] === 'int' ? 'int' : 'string';
         $values = [];
+        $cases = [];
         $line = 0;
         foreach ($lines as $idx => $l) {
-            if (preg_match('/\bcase\s+[A-Za-z_]\w*\s*=\s*[\'"]([^\'"]+)[\'"]/', $l, $cm)) {
-                $values[] = $cm[1];
+            // Целочисленные case'ы (в том числе отрицательные) — большинство enum'ов хоста;
+            // прежний шаблон требовал кавычек и молча выбрасывал их вместе с колонкой.
+            if (preg_match('/\bcase\s+([A-Za-z_]\w*)\s*=\s*(-?\d+|\'[^\']*\'|"[^"]*")\s*;/', $l, $cm)) {
+                $raw = $cm[2];
+                $value = ($raw[0] === '\'' || $raw[0] === '"') ? substr($raw, 1, -1) : $raw;
+                $values[] = $value;
+                $cases[$cm[1]] = $value;
                 if ($line === 0) {
                     $line = $idx + 1;
                 }
@@ -132,10 +139,18 @@ class CriteriaDetector
         if (empty($values)) {
             return [];
         }
+
+        $imports = UseStatementResolver::imports($content);
+
         return [[
             'origin'     => 'enum',
             'enum_type'  => $enum,
+            // FQCN: в хосте несколько одноимённых TypeEnum в разных доменах, и ключ по
+            // короткому имени сливает их значения в одну кучу.
+            'enum_fqcn'  => UseStatementResolver::resolve($enum, $imports),
+            'backing'    => $backing,
             'values'     => array_values(array_unique($values)),
+            'cases'      => $cases,
             'confidence' => 'med',
             'line'       => $line,
         ]];

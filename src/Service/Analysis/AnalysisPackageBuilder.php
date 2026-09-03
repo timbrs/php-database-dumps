@@ -2,6 +2,7 @@
 
 namespace Timbrs\DatabaseDumps\Service\Analysis;
 
+use Timbrs\DatabaseDumps\Config\DumpConfig;
 use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
@@ -75,6 +76,12 @@ class AnalysisPackageBuilder
     /** @var bool Точный COUNT(*) по каждой таблице вместо оценки (--exact-counts) */
     private $exactCounts = false;
 
+    /** @var DumpConfig|null */
+    private $dumpConfig;
+
+    /** @var Dossier\DossierBuilder|null */
+    private $dossierBuilder;
+
     public function __construct(
         FileSystemInterface $fileSystem,
         ConnectionRegistryInterface $registry,
@@ -87,7 +94,9 @@ class AnalysisPackageBuilder
         CodeHintScanner $codeHintScanner,
         DbdumpConfigStore $configStore = null,
         RowCounter $rowCounter = null,
-        PgStatsReader $statsReader = null
+        PgStatsReader $statsReader = null,
+        DumpConfig $dumpConfig = null,
+        Dossier\DossierBuilder $dossierBuilder = null
     ) {
         $this->fileSystem = $fileSystem;
         $this->registry = $registry;
@@ -101,6 +110,8 @@ class AnalysisPackageBuilder
         $this->configStore = $configStore;
         $this->rowCounter = $rowCounter;
         $this->statsReader = $statsReader;
+        $this->dumpConfig = $dumpConfig;
+        $this->dossierBuilder = $dossierBuilder;
     }
 
     public function setExactCounts(bool $exact): void
@@ -171,6 +182,16 @@ class AnalysisPackageBuilder
             $this->fileSystem->write($p, $schemaJson === false ? '{}' : $schemaJson);
             $paths[] = $p;
             $schemaFiles[$schemaName] = $p;
+
+            // Досье: слепок + код + конфиг в одном файле на схему, с пометками ambiguous —
+            // именно с ними идут к агенту по коду.
+            if ($this->dossierBuilder !== null && $this->dumpConfig !== null) {
+                $dossier = $this->dossierBuilder->build($schemaName, $inventory, $this->dumpConfig);
+                $dossierJson = json_encode($dossier, $jsonFlags);
+                $dossierPath = $analysisDir . '/dossier.' . $schemaName . '.json';
+                $this->fileSystem->write($dossierPath, $dossierJson === false ? '{}' : $dossierJson);
+                $paths[] = $dossierPath;
+            }
         }
 
         $contract = $this->renderResource('output_schema.json', $dataDir);

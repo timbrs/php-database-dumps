@@ -118,8 +118,20 @@ class CodeHintScanner
     /** @var array<string, array{content: string, lines: array<int, string>}> кэш содержимого релевантных файлов */
     private $contentCache;
 
-    /** @var array<string, array<int, string>> enumValues[enumClass|primaryClass] = values[] */
+    /** @var array<string, array<int, string>> enumValues[enumFqcn|primaryClass] = values[] */
     private $enumValues;
+
+    /** @var array<string, array<string, string>> enumCases[enumFqcn] = [CASE_NAME => value] */
+    private $enumCases;
+
+    /** @var array<string, string> enumBacking[enumFqcn] = 'int'|'string' */
+    private $enumBacking;
+
+    /** @var array<string, array<int, string>> shortName => FQCN[] (одноимённые enum'ы разных доменов) */
+    private $enumByShortName;
+
+    /** @var CodeHints\EnumBinder */
+    private $enumBinder;
 
     /** @var array<int, array<string, mixed>> отложенные кандидаты связей: {source_class, cand} */
     private $pendingRel;
@@ -208,6 +220,10 @@ class CodeHintScanner
         $this->tableFiles = [];
         $this->contentCache = [];
         $this->enumValues = [];
+        $this->enumCases = [];
+        $this->enumBacking = [];
+        $this->enumByShortName = [];
+        $this->enumBinder = new CodeHints\EnumBinder();
         $this->pendingRel = [];
         $this->pendingCriteria = [];
         $this->migrationFiles = [];
@@ -463,14 +479,35 @@ class CodeHintScanner
             if (empty($cand['values'])) {
                 return;
             }
-            $key = ($origin === 'enum' && !empty($cand['enum_type']))
-                ? (string) $cand['enum_type']
-                : (string) $primaryClass;
+            // Ключ — FQCN: одноимённые enum'ы разных доменов не должны сливать значения.
+            $key = (string) $primaryClass;
+            if ($origin === 'enum' && !empty($cand['enum_fqcn'])) {
+                $key = (string) $cand['enum_fqcn'];
+            } elseif ($origin === 'enum' && !empty($cand['enum_type'])) {
+                $key = (string) $cand['enum_type'];
+            }
             if ($key === '') {
                 return;
             }
             $existing = isset($this->enumValues[$key]) ? $this->enumValues[$key] : [];
             $this->enumValues[$key] = array_values(array_unique(array_merge($existing, $cand['values'])));
+
+            if ($origin === 'enum') {
+                if (!empty($cand['cases']) && is_array($cand['cases'])) {
+                    $existingCases = isset($this->enumCases[$key]) ? $this->enumCases[$key] : [];
+                    $this->enumCases[$key] = array_merge($existingCases, $cand['cases']);
+                }
+                if (!empty($cand['backing'])) {
+                    $this->enumBacking[$key] = (string) $cand['backing'];
+                }
+                $short = CodeHints\UseStatementResolver::shortName($key);
+                if (!isset($this->enumByShortName[$short])) {
+                    $this->enumByShortName[$short] = [];
+                }
+                if (!in_array($key, $this->enumByShortName[$short], true)) {
+                    $this->enumByShortName[$short][] = $key;
+                }
+            }
             return;
         }
         $this->pendingCriteria[] = ['source_class' => $primaryClass, 'cand' => $cand];
@@ -692,10 +729,56 @@ class CodeHintScanner
                 continue;
             }
             $cols = $detector->detect($columns, $files);
-            // Подставить значения enum из глобальной карты.
+
+            // Три моста «enum ↔ колонка»: атрибут даёт сам детектор, а сеттеры, DQL, сырой SQL
+            // и конвенцию имён — EnumBinder. Без него 91 enum хоста остаётся вне карты, и
+            // «в enum есть, а в дампе нет» проверить нечем.
+            $parts = explode('.', (string) $key, 2);
+            $bindings = $this->enumBinder->bind(
+                $parts[0],
+                isset($parts[1]) ? $parts[1] : '',
+                $columns,
+                $files,
+                $this->enumMaps()
+            );
+            foreach ($bindings as $col => $binding) {
+                if (!isset($cols[$col])) {
+                    $cols[$col] = ['usages' => [], 'count' => 0];
+                }
+                // Явный атрибут/каст сильнее любого моста по коду: он объявлен, а не выведен.
+                $existing = isset($cols[$col]['enum']) ? $cols[$col]['enum'] : null;
+                if ($existing !== null && isset($existing['confidence']) && $existing['confidence'] === 'high') {
+                    $cols[$col]['enum'] = array_merge($binding, array_filter([
+                        'class' => isset($existing['fqcn']) ? $existing['fqcn'] : null,
+                        'bridge' => isset($existing['bridge']) ? $existing['bridge'] : null,
+                        'confidence' => 'high',
+                    ]));
+                    continue;
+                }
+                $cols[$col]['enum'] = $binding;
+            }
+            // Подставить значения enum из глобальной карты: сначала по FQCN (если детектор
+            // сумел его собрать), потом по короткому имени — но только когда оно однозначно.
             foreach ($cols as $col => &$data) {
-                if (isset($data['enum']['type']) && isset($this->enumValues[$data['enum']['type']])) {
-                    $data['enum']['values'] = $this->enumValues[$data['enum']['type']];
+                if (!isset($data['enum']['type'])) {
+                    continue;
+                }
+                $fqcn = $this->resolveEnumKey($data['enum']);
+                if ($fqcn === null) {
+                    if (isset($data['enum']['fqcn'])) {
+                        $data['enum']['ambiguous'] = true;
+                    }
+                    continue;
+                }
+                $data['enum']['fqcn'] = $fqcn;
+                if (isset($this->enumValues[$fqcn])) {
+                    $data['enum']['values'] = $this->enumValues[$fqcn];
+                }
+                if (isset($this->enumCases[$fqcn])) {
+                    $data['enum']['cases'] = $this->enumCases[$fqcn];
+                }
+                if (isset($this->enumBacking[$fqcn])) {
+                    $data['enum']['backing'] = $this->enumBacking[$fqcn];
                 }
             }
             unset($data);
@@ -703,6 +786,45 @@ class CodeHintScanner
                 $this->columns[$key] = $cols;
             }
         }
+    }
+
+    /**
+     * FQCN enum'а колонки: как записал детектор (fqcn из use-импортов файла) либо по короткому
+     * имени, если такое имя в проекте одно. Два одноимённых enum'а — null: лучше молчание,
+     * чем чужие case'ы (их разберёт EnumBinder по домену).
+     *
+     * @param array<string, mixed> $enum
+     * @return string|null
+     */
+    private function resolveEnumKey(array $enum)
+    {
+        if (!empty($enum['fqcn']) && isset($this->enumValues[$enum['fqcn']])) {
+            return (string) $enum['fqcn'];
+        }
+        $short = (string) $enum['type'];
+        if (isset($this->enumValues[$short])) {
+            return $short;
+        }
+        if (isset($this->enumByShortName[$short]) && count($this->enumByShortName[$short]) === 1) {
+            return $this->enumByShortName[$short][0];
+        }
+
+        return null;
+    }
+
+    /**
+     * Карты enum'ов проекта для внешних потребителей (EnumBinder, досье).
+     *
+     * @return array{values: array<string, array<int, string>>, cases: array<string, array<string, string>>, backing: array<string, string>, by_short_name: array<string, array<int, string>>}
+     */
+    public function enumMaps(): array
+    {
+        return [
+            'values' => $this->enumValues,
+            'cases' => $this->enumCases,
+            'backing' => $this->enumBacking,
+            'by_short_name' => $this->enumByShortName,
+        ];
     }
 
     /**
