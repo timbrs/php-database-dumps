@@ -84,8 +84,20 @@ class ValidateConfigCommand extends Command
             ->addOption('schema', 's', InputOption::VALUE_REQUIRED | InputOption::VALUE_IS_ARRAY, 'Проверить только эту схему (можно повторять)')
             ->addOption('format', null, InputOption::VALUE_REQUIRED, 'Формат вывода: text|json', 'text')
             ->addOption('out', null, InputOption::VALUE_REQUIRED, 'Записать отчёт в файл')
-            ->addOption('severity', null, InputOption::VALUE_REQUIRED, 'Порог вывода находок: error|warning|note', Finding::SEVERITY_NOTE)
-            ->addOption('fix', null, InputOption::VALUE_NONE, 'Применить механически однозначные правки');
+            ->addOption('severity', null, InputOption::VALUE_REQUIRED, 'Порог вывода находок: error|warning|note (только текстовый вывод; в JSON попадают все находки)', Finding::SEVERITY_NOTE)
+            ->addOption('fix', null, InputOption::VALUE_NONE, 'Применить механически однозначные правки')
+            ->setHelp(
+                "Узкое подмножество app:dbdump:check --stage=static: те же коды, тот же слепок.
+
+"
+                . "--severity влияет ТОЛЬКО на текстовый рендер. С --format=json файл всегда несёт
+"
+                . "каждую находку — фильтруйте по её собственному полю severity, а не ждите, что
+"
+                . "файл станет короче. Код возврата 1 — при находках уровня error, независимо от
+"
+                . "порога вывода."
+            );
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
