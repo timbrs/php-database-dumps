@@ -10,6 +10,7 @@ use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Exception\ImportFailedException;
 use Timbrs\DatabaseDumps\Platform\PlatformFactory;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
+use Timbrs\DatabaseDumps\Service\Db\SafeQueryPolicy;
 use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
 use Timbrs\DatabaseDumps\Service\Parser\SqlParser;
 use Timbrs\DatabaseDumps\Service\Security\ProductionGuard;
@@ -57,6 +58,9 @@ class DatabaseImporter
     /** @var DbdumpConfigStore|null */
     private $configStore;
 
+    /** @var SafeQueryPolicy|null */
+    private $policy;
+
     /** @var bool */
     private $ignoreSchemaMismatch = false;
 
@@ -72,7 +76,8 @@ class DatabaseImporter
         string $projectDir,
         TableDependencyResolver $dependencyResolver,
         SchemaValidator $schemaValidator = null,
-        DbdumpConfigStore $configStore = null
+        DbdumpConfigStore $configStore = null,
+        SafeQueryPolicy $policy = null
     ) {
         $this->registry = $registry;
         $this->dumpConfig = $dumpConfig;
@@ -86,6 +91,7 @@ class DatabaseImporter
         $this->dependencyResolver = $dependencyResolver;
         $this->schemaValidator = $schemaValidator;
         $this->configStore = $configStore;
+        $this->policy = $policy;
     }
 
     /**
@@ -116,8 +122,20 @@ class DatabaseImporter
 
         $connectionNames = $this->resolveConnectionNames($connectionFilter);
 
-        foreach ($connectionNames as $connName) {
-            $this->importForConnection($connName, $skipBefore, $skipAfter, $schemaFilter);
+        // Профиль сессии import: без statement_timeout — TRUNCATE и INSERT ждут столько, сколько
+        // надо; разведочный таймаут здесь уронил бы заливку большого словаря.
+        $previousProfile = $this->policy !== null ? $this->policy->getProfile() : null;
+        if ($this->policy !== null) {
+            $this->policy->setProfile(SafeQueryPolicy::PROFILE_IMPORT);
+        }
+        try {
+            foreach ($connectionNames as $connName) {
+                $this->importForConnection($connName, $skipBefore, $skipAfter, $schemaFilter);
+            }
+        } finally {
+            if ($this->policy !== null && $previousProfile !== null) {
+                $this->policy->setProfile($previousProfile);
+            }
         }
     }
 

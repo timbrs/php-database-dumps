@@ -18,6 +18,7 @@ class PatternDetectorTest extends TestCase
     protected function setUp(): void
     {
         $this->connection = $this->createMock(DatabaseConnectionInterface::class);
+        $this->connection->method('getPlatformName')->willReturn('postgresql');
         $registry = $this->createMock(ConnectionRegistryInterface::class);
         $registry->method('getConnection')->willReturn($this->connection);
         $registry->method('getPlatform')->willReturn(new PostgresPlatform());
@@ -362,5 +363,49 @@ class PatternDetectorTest extends TestCase
         $result = $this->detector->detect('public', 'users');
         // lname → column hint /lname/i → PATTERN_LASTNAME, несмотря на суффиксы отчеств
         $this->assertEquals(PatternDetector::PATTERN_LASTNAME, $result['lname']);
+    }
+
+    public function testSampleNeverSortsTheWholeTable(): void
+    {
+        $captured = [];
+        $this->connection->method('fetchAllAssociative')->willReturnCallback(function ($sql) use (&$captured) {
+            $captured[] = $sql;
+            return [['email' => 'a@b.c']];
+        });
+
+        $this->detector->detect('public', 'users');
+        $this->detector->detect('public', 'users', null, 100);
+        $this->detector->detect('public', 'users', null, 5000000);
+
+        // Размер неизвестен — голова; небольшая — BERNOULLI; большая — блочный SYSTEM.
+        $this->assertSame('SELECT * FROM "public"."users" LIMIT 200', $captured[0]);
+        $this->assertSame('SELECT * FROM "public"."users" TABLESAMPLE BERNOULLI (100) LIMIT 200', $captured[1]);
+        $this->assertSame('SELECT * FROM "public"."users" TABLESAMPLE SYSTEM (0.012) LIMIT 200', $captured[2]);
+        foreach ($captured as $sql) {
+            $this->assertStringNotContainsString('ORDER BY', $sql);
+        }
+    }
+
+    public function testEmptyBlockSampleFallsBackToTableHead(): void
+    {
+        $captured = [];
+        $this->connection->method('fetchAllAssociative')->willReturnCallback(function ($sql) use (&$captured) {
+            $captured[] = $sql;
+            return strpos($sql, 'TABLESAMPLE') !== false ? [] : [['email' => 'a@b.c']];
+        });
+
+        $this->detector->detect('public', 'users', null, 5000000);
+
+        $this->assertCount(2, $captured);
+        $this->assertStringContainsString('TABLESAMPLE', $captured[0]);
+        $this->assertSame('SELECT * FROM "public"."users" LIMIT 200', $captured[1]);
+    }
+
+    public function testPiiHintsAreSharedWithTheCodeGate(): void
+    {
+        $this->assertTrue(PatternDetector::hintsPii('last_name'));
+        $this->assertTrue(PatternDetector::hintsPii('mobile_phone'));
+        $this->assertTrue(PatternDetector::hintsPii('фио'));
+        $this->assertFalse(PatternDetector::hintsPii('status_id'));
     }
 }

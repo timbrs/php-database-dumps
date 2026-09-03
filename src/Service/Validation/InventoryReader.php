@@ -467,6 +467,11 @@ class InventoryReader
                         ? (int) $profile['distinct_count'] : null,
                     'distinct_capped' => isset($profile['distinct_capped']) ? (bool) $profile['distinct_capped'] : null,
                     'categorical' => isset($profile['categorical']) ? (bool) $profile['categorical'] : null,
+                    'n_distinct_source' => isset($profile['n_distinct_source']) && is_scalar($profile['n_distinct_source'])
+                        ? (string) $profile['n_distinct_source'] : null,
+                    'codes' => isset($profile['codes']) && is_array($profile['codes'])
+                        ? array_values(array_map('strval', $profile['codes'])) : null,
+                    'codes_complete' => isset($profile['codes_complete']) ? (bool) $profile['codes_complete'] : null,
                 ];
             }
         }
@@ -488,6 +493,8 @@ class InventoryReader
         return [
             'row_count' => isset($tableData['row_count']) && is_numeric($tableData['row_count'])
                 ? (int) $tableData['row_count'] : null,
+            // Оценка планировщика, а не COUNT(*): правила о «пусто»/«ровно N» должны это учитывать.
+            'row_count_estimated' => isset($tableData['row_count_estimated']) && (bool) $tableData['row_count_estimated'],
             'columns' => $columns,
             'profiles' => $profiles,
             'foreign_keys' => $foreignKeys,

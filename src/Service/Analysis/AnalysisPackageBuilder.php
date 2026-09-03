@@ -11,6 +11,9 @@ use Timbrs\DatabaseDumps\Service\ConfigGenerator\ColumnProfile;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ColumnStatisticsInspector;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ServiceTableFilter;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\TableInspector;
+use Timbrs\DatabaseDumps\Service\Db\PgStatsReader;
+use Timbrs\DatabaseDumps\Service\Db\RowCounter;
+use Timbrs\DatabaseDumps\Service\Db\RowEstimate;
 use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
 
 /**
@@ -63,6 +66,15 @@ class AnalysisPackageBuilder
     /** @var DbdumpConfigStore|null */
     private $configStore;
 
+    /** @var RowCounter|null */
+    private $rowCounter;
+
+    /** @var PgStatsReader|null */
+    private $statsReader;
+
+    /** @var bool Точный COUNT(*) по каждой таблице вместо оценки (--exact-counts) */
+    private $exactCounts = false;
+
     public function __construct(
         FileSystemInterface $fileSystem,
         ConnectionRegistryInterface $registry,
@@ -73,7 +85,9 @@ class AnalysisPackageBuilder
         LoggerInterface $logger,
         string $projectDir,
         CodeHintScanner $codeHintScanner,
-        DbdumpConfigStore $configStore = null
+        DbdumpConfigStore $configStore = null,
+        RowCounter $rowCounter = null,
+        PgStatsReader $statsReader = null
     ) {
         $this->fileSystem = $fileSystem;
         $this->registry = $registry;
@@ -85,6 +99,13 @@ class AnalysisPackageBuilder
         $this->projectDir = rtrim($projectDir, '/\\');
         $this->codeHintScanner = $codeHintScanner;
         $this->configStore = $configStore;
+        $this->rowCounter = $rowCounter;
+        $this->statsReader = $statsReader;
+    }
+
+    public function setExactCounts(bool $exact): void
+    {
+        $this->exactCounts = $exact;
     }
 
     /**
@@ -205,12 +226,13 @@ class AnalysisPackageBuilder
 
         $total = count($tables);
         $this->logger->info(sprintf(
-            'Сбор инвентаря БД: %d таблиц (подсчёт строк + профилирование колонок — на больших БД это долго)',
+            'Сбор инвентаря БД: %d таблиц (размер — по статистике планировщика, точный подсчёт только на небольших; профили колонок — из pg_stats, где есть)',
             $total
         ));
         $current = 0;
 
         $schemas = [];
+        $warnings = [];
         foreach ($tables as $tableInfo) {
             $current++;
             $schema = $tableInfo['table_schema'];
@@ -223,8 +245,17 @@ class AnalysisPackageBuilder
 
             $this->logger->info("[{$current}/{$total}] {$schema}.{$table} ... инвентаризация");
 
-            $rowCount = $this->inspector->countRows($schema, $table, $connectionName);
-            // rowCount → профайлер выбирает дешёвую нативную выборку на больших таблицах.
+            $estimate = $this->resolveRowCount($schema, $table, $connectionName);
+            $rowCount = $estimate->getValue();
+            if ($rowCount === null) {
+                // Статистики нет — и подменять её COUNT(*) на боевой базе нельзя: это находка, не задача.
+                $warnings[] = [
+                    'code' => 'P-1',
+                    'table' => $schema . '.' . $table,
+                    'message' => 'статистика планировщика отсутствует, размер таблицы неизвестен; точный подсчёт на ней не делается — выполните ANALYZE на стороне БД',
+                ];
+            }
+            // rowCount → профайлер выбирает способ выборки и переводит доли из pg_stats в счётчики.
             $profiles = $this->statisticsInspector->profileTable($schema, $table, $connectionName, $rowCount);
 
             if (!isset($schemas[$schema])) {
@@ -233,21 +264,88 @@ class AnalysisPackageBuilder
 
             $schemas[$schema]['tables'][$table] = [
                 'row_count' => $rowCount,
+                'row_count_estimated' => $estimate->isEstimated(),
+                'row_count_source' => $estimate->getSource(),
                 'columns' => $this->buildColumns($profiles),
                 'foreign_keys' => $this->buildForeignKeys($graph, $schema . '.' . $table),
                 'profiles' => $this->buildSafeProfiles($profiles),
             ];
         }
 
+        foreach ($this->missingColumnPrivileges($schemas, $connectionName) as $missing) {
+            $warnings[] = $missing;
+        }
+
         $this->logInventorySummary($schemas);
+        if ($warnings !== []) {
+            $byCode = [];
+            foreach ($warnings as $w) {
+                $byCode[$w['code']] = ($byCode[$w['code']] ?? 0) + 1;
+            }
+            $this->logger->warning(sprintf(
+                'Находки инвентаря: %d (P-1 без статистики: %d, P-2 без права SELECT на колонку: %d)',
+                count($warnings),
+                $byCode['P-1'] ?? 0,
+                $byCode['P-2'] ?? 0
+            ));
+        }
 
         return [
             'generated_at' => gmdate('Y-m-d\TH:i:s\Z'),
             'database_platform' => $platform,
             'connection' => $connectionName ?? 'default',
-            'note' => 'Значения данных (PII) не включены — только типы, кардинальность и категориальность.',
+            'note' => 'Значения данных (PII) не включены — только типы, кардинальность, категориальность и коды после шлюза.',
+            'warnings' => $warnings,
             'schemas' => $schemas,
         ];
+    }
+
+    /**
+     * Число строк: через RowCounter (оценка, точный подсчёт только на небольших), без него —
+     * прежний COUNT(*).
+     */
+    private function resolveRowCount(string $schema, string $table, ?string $connectionName): RowEstimate
+    {
+        if ($this->rowCounter !== null) {
+            return $this->rowCounter->count($schema, $table, $connectionName, $this->exactCounts);
+        }
+
+        return RowEstimate::exact($this->inspector->countRows($schema, $table, $connectionName));
+    }
+
+    /**
+     * P-2: колонки инвентаризованных таблиц без права SELECT. Без него SELECT * при выгрузке
+     * упадёт, а в pg_stats такой колонки нет — и без этой проверки «нет прав» неотличимо от
+     * «нет статистики».
+     *
+     * @param array<string, array{tables: array<string, mixed>}> $schemas
+     * @return array<int, array{code: string, table: string, column: string, message: string}>
+     */
+    private function missingColumnPrivileges(array $schemas, ?string $connectionName): array
+    {
+        if ($this->statsReader === null || !$this->statsReader->supports($connectionName)) {
+            return [];
+        }
+
+        $result = [];
+        foreach ($schemas as $schema => $schemaData) {
+            $privileges = $this->statsReader->readColumnPrivileges((string) $schema, $connectionName);
+            foreach (array_keys($schemaData['tables']) as $table) {
+                foreach ($privileges[$table] ?? [] as $column => $canSelect) {
+                    if ($canSelect) {
+                        continue;
+                    }
+                    $result[] = [
+                        'code' => 'P-2',
+                        'table' => $schema . '.' . $table,
+                        'column' => (string) $column,
+                        'message' => 'нет права SELECT на колонку: SELECT * при выгрузке упадёт, профиль колонки не собрать',
+                    ];
+                }
+            }
+        }
+
+        return $result;
     }
 
     /**
@@ -329,7 +427,11 @@ class AnalysisPackageBuilder
         'null_fraction',
         'distinct_count',
         'distinct_capped',
+        'n_distinct_source',
         'categorical',
+        // Единственные значения данных в инвентаре — коды после CodeValueGate (см. ColumnProfile).
+        'codes',
+        'codes_complete',
     ];
 
     /**

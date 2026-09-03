@@ -4,6 +4,7 @@ namespace Timbrs\DatabaseDumps\Service\Faker;
 
 use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
 use Timbrs\DatabaseDumps\Platform\PlatformFactory;
+use Timbrs\DatabaseDumps\Service\Db\SafeQueryPolicy;
 
 /**
  * Определяет паттерны персональных данных в колонках таблицы по выборке случайных строк.
@@ -15,8 +16,9 @@ use Timbrs\DatabaseDumps\Platform\PlatformFactory;
  * - Имена колонок (firstname/lastname/patronymic) могут быть определены БЕЗ наличия
  *   composite name column (важно для схем, где хранятся только компоненты).
  * - Gender map расширен: добавлены 1/0, true/false, Y/N, ISO 5218 1/2.
- * - Sample size: использован TABLESAMPLE для PG (если поддерживается),
- *   SAMPLE для Oracle — избегаем full table scan на больших таблицах.
+ * - Выборка строк не сортирует таблицу целиком: PG — TABLESAMPLE (BERNOULLI в пределах
+ *   max_scan_rows, SYSTEM на больших), Oracle на больших — SAMPLE, MySQL на больших — голова
+ *   таблицы; таблица неизвестного размера — голова.
  * - Маленькие таблицы (<10 строк): помечаем подозрительные колонки по имени
  *   (fail-safe для security — лучше лишние замены, чем пропуск PII).
  */
@@ -107,28 +109,65 @@ class PatternDetector
     /** @var int */
     private $sampleSize;
 
+    /** @var SafeQueryPolicy|null */
+    private $policy;
+
     /**
      * @param int $sampleSize
      */
-    public function __construct(ConnectionRegistryInterface $registry, $sampleSize = self::SAMPLE_SIZE)
+    public function __construct(ConnectionRegistryInterface $registry, $sampleSize = self::SAMPLE_SIZE, SafeQueryPolicy $policy = null)
     {
         $this->registry = $registry;
         $this->sampleSize = (int) $sampleSize;
+        $this->policy = $policy;
+    }
+
+    /**
+     * Намекает ли имя колонки на персональные данные (ФИО, телефон, e-mail, пол и их части).
+     * Единый список подсказок для всех, кто решает, можно ли показывать значения колонки.
+     */
+    public static function hintsPii(string $column): bool
+    {
+        foreach ([
+            self::COLUMN_HINTS_FIO,
+            self::COLUMN_HINTS_EMAIL,
+            self::COLUMN_HINTS_PHONE,
+            self::COLUMN_HINTS_FIRSTNAME,
+            self::COLUMN_HINTS_LASTNAME,
+            self::COLUMN_HINTS_PATRONYMIC,
+            self::COLUMN_HINTS_GENDER,
+        ] as $hints) {
+            foreach ($hints as $regex) {
+                if (preg_match($regex, $column) === 1) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /**
      * Анализирует колонки таблицы и возвращает обнаруженные паттерны ПД.
      *
+     * @param int|null $rowCount известное или оценённое число строк — выбирает способ выборки
      * @return array<string, string> column_name => pattern_type
      */
-    public function detect(string $schema, string $table, ?string $connectionName = null): array
+    public function detect(string $schema, string $table, ?string $connectionName = null, ?int $rowCount = null): array
     {
         $connection = $this->registry->getConnection($connectionName);
         $platform = $this->registry->getPlatform($connectionName);
 
-        $sql = $this->buildSampleSql($platform, $connection, $schema, $table);
+        $sql = $this->buildSampleSql($platform, $connection, $schema, $table, $rowCount);
 
         $rows = $connection->fetchAllAssociative($sql);
+
+        if (empty($rows) && strpos($sql, 'SAMPLE') !== false) {
+            // Блочная выборка могла не попасть ни в один блок — голова таблицы.
+            $rows = $connection->fetchAllAssociative(
+                'SELECT * FROM ' . $platform->getFullTableName($schema, $table) . ' ' . $platform->getLimitSql($this->sampleSize)
+            );
+        }
 
         if (empty($rows)) {
             return [];
@@ -162,22 +201,58 @@ class PatternDetector
     }
 
     /**
-     * Сформировать SQL для случайной выборки.
+     * SQL выборки строк без сортировки всей таблицы.
      *
-     * Postgres: TABLESAMPLE SYSTEM может быть быстрее на больших таблицах,
-     * но требует наличия аналитики таблицы. Для совместимости используем ORDER BY random()
-     * как и раньше, но это документированное ограничение.
+     * PostgreSQL: TABLESAMPLE BERNOULLI(p) в пределах max_scan_rows, SYSTEM(p) на больших;
+     * Oracle на больших — SAMPLE(p); MySQL на больших — голова таблицы. На небольших
+     * MySQL/Oracle — прежняя случайная выборка, там она дёшева. Размер неизвестен — голова:
+     * сортировать таблицу неизвестного размера на боевой базе нельзя.
+     *
+     * @param mixed $platform
+     * @param mixed $connection
      */
-    private function buildSampleSql($platform, $connection, string $schema, string $table): string
+    private function buildSampleSql($platform, $connection, string $schema, string $table, ?int $rowCount): string
     {
         $fullTable = $platform->getFullTableName($schema, $table);
-        $randomFunc = $platform->getRandomFunctionSql();
         $platformName = PlatformFactory::canonicalize($connection->getPlatformName());
+        $limitSql = $platform->getLimitSql($this->sampleSize);
 
-        if ($platformName === PlatformFactory::ORACLE) {
-            return "SELECT * FROM {$fullTable} ORDER BY {$randomFunc} FETCH FIRST " . $this->sampleSize . " ROWS ONLY";
+        if ($rowCount === null) {
+            return "SELECT * FROM {$fullTable} {$limitSql}";
         }
-        return "SELECT * FROM {$fullTable} ORDER BY {$randomFunc} LIMIT " . $this->sampleSize;
+
+        $maxScan = $this->policy !== null ? $this->policy->getMaxScanRows() : SafeQueryPolicy::DEFAULT_MAX_SCAN_ROWS;
+        $large = $rowCount > $maxScan;
+
+        if ($platformName === PlatformFactory::POSTGRESQL) {
+            $method = $large ? 'SYSTEM' : 'BERNOULLI';
+            $percent = $this->samplePercent($rowCount, $large ? 99.9 : 100.0);
+
+            return "SELECT * FROM {$fullTable} TABLESAMPLE {$method} ({$percent}) {$limitSql}";
+        }
+
+        if ($large) {
+            if ($platformName === PlatformFactory::ORACLE) {
+                return "SELECT * FROM {$fullTable} SAMPLE (" . $this->samplePercent($rowCount, 99.9) . ") {$limitSql}";
+            }
+
+            return "SELECT * FROM {$fullTable} {$limitSql}";
+        }
+
+        return "SELECT * FROM {$fullTable} ORDER BY " . $platform->getRandomFunctionSql() . " {$limitSql}";
+    }
+
+    /**
+     * Процент выборки: ~3×sampleSize строк из rowCount, зажатый в (0.01 .. $max), без научной
+     * нотации — уходит в SQL как литерал.
+     */
+    private function samplePercent(int $rowCount, float $max): string
+    {
+        $percent = 100.0 * 3 * $this->sampleSize / max(1, $rowCount);
+        $percent = max(0.01, min($max, $percent));
+        $s = rtrim(rtrim(sprintf('%.6f', $percent), '0'), '.');
+
+        return $s === '' ? '0' : $s;
     }
 
     /**
@@ -362,7 +437,7 @@ class PatternDetector
                     }
                     $comparedCount++;
                     $value = trim((string) $cellValue);
-                    $words = preg_split('/\s+/u', (string) $compValue);
+                    $words = preg_split('/\s+/u', (string) $compValue) ?: [];
                     if (in_array($value, $words, true)) {
                         $matchCount++;
                     }

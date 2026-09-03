@@ -5,9 +5,16 @@ namespace Timbrs\DatabaseDumps\Service\ConfigGenerator;
 use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
 use Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface;
 use Timbrs\DatabaseDumps\Platform\PlatformFactory;
+use Timbrs\DatabaseDumps\Service\Db\PgStatsReader;
+use Timbrs\DatabaseDumps\Service\Db\RowEstimate;
 
 /**
  * Инспекция БД: список таблиц, подсчёт строк, определение колонки сортировки.
+ *
+ * Строки считаются двумя способами. countRows() — точный COUNT(*), полный проход по таблице;
+ * на боевой базе он допустим только для небольших таблиц. estimateRows() — оценка из каталога
+ * (pg_class, information_schema.tables, all_tables), дёшево для любой таблицы. Кто из них
+ * уместен — решает RowCounter.
  *
  * Все запросы — параметризованные. Имена схем/таблиц для FROM-clause квотируются
  * через platform.getFullTableName (защита от инъекций через имена идентификаторов).
@@ -17,9 +24,13 @@ class TableInspector
     /** @var ConnectionRegistryInterface */
     private $registry;
 
-    public function __construct(ConnectionRegistryInterface $registry)
+    /** @var PgStatsReader|null */
+    private $statsReader;
+
+    public function __construct(ConnectionRegistryInterface $registry, PgStatsReader $statsReader = null)
     {
         $this->registry = $registry;
+        $this->statsReader = $statsReader;
     }
 
     /**
@@ -31,6 +42,9 @@ class TableInspector
         return $this->listTablesFor($connection);
     }
 
+    /**
+     * Точное число строк: COUNT(*) — полный проход по таблице.
+     */
     public function countRows(string $schema, string $table, ?string $connectionName = null): int
     {
         $connection = $this->registry->getConnection($connectionName);
@@ -44,6 +58,42 @@ class TableInspector
         $row = array_change_key_case($rows[0] ?? [], CASE_LOWER);
 
         return (int) ($row['cnt'] ?? 0);
+    }
+
+    /**
+     * Оценка числа строк из каталога — без чтения самой таблицы.
+     *
+     * PostgreSQL: pg_class.reltuples / pg_stat_user_tables.n_live_tup (одним батч-запросом на
+     * всё подключение); MySQL: information_schema.tables.table_rows; Oracle: all_tables.num_rows.
+     * Если статистики нет (таблица ни разу не анализировалась), размер неизвестен — и это
+     * ответ, а не повод посчитать точно.
+     */
+    public function estimateRows(string $schema, string $table, ?string $connectionName = null): RowEstimate
+    {
+        $connection = $this->registry->getConnection($connectionName);
+        $platformName = PlatformFactory::canonicalize($connection->getPlatformName());
+
+        if ($platformName === PlatformFactory::POSTGRESQL) {
+            $stats = $this->statsReader()->readTableStats($connectionName);
+
+            return PgStatsReader::estimateRows($stats[$schema . '.' . $table] ?? null);
+        }
+
+        if ($platformName === PlatformFactory::ORACLE) {
+            $rows = $connection->fetchAllAssociative(
+                "SELECT num_rows FROM all_tables WHERE owner = :owner AND table_name = :table",
+                ['owner' => strtoupper($schema), 'table' => strtoupper($table)]
+            );
+
+            return $this->estimateFromRow($rows, 'num_rows', RowEstimate::SOURCE_ALL_TABLES);
+        }
+
+        $rows = $connection->fetchAllAssociative(
+            "SELECT table_rows FROM information_schema.tables WHERE table_schema = :schema AND table_name = :table",
+            ['schema' => $schema, 'table' => $table]
+        );
+
+        return $this->estimateFromRow($rows, 'table_rows', RowEstimate::SOURCE_INFORMATION_SCHEMA);
     }
 
     /**
@@ -90,6 +140,28 @@ class TableInspector
         }
 
         return 'id DESC';
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $rows
+     */
+    private function estimateFromRow(array $rows, string $column, string $source): RowEstimate
+    {
+        $row = array_change_key_case($rows[0] ?? [], CASE_LOWER);
+        if (!isset($row[$column]) || !is_numeric($row[$column])) {
+            return RowEstimate::unknown();
+        }
+
+        return new RowEstimate((int) $row[$column], true, $source);
+    }
+
+    private function statsReader(): PgStatsReader
+    {
+        if ($this->statsReader === null) {
+            $this->statsReader = new PgStatsReader($this->registry);
+        }
+
+        return $this->statsReader;
     }
 
     /**

@@ -9,6 +9,7 @@ use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Exception\ExportFailedException;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
+use Timbrs\DatabaseDumps\Service\Db\SafeQueryPolicy;
 use Timbrs\DatabaseDumps\Service\Generator\SqlGenerator;
 use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
 use Timbrs\DatabaseDumps\Service\Security\ProductionGuard;
@@ -58,6 +59,9 @@ class DatabaseDumper
     /** @var DbdumpConfigStore|null */
     private $configStore;
 
+    /** @var SafeQueryPolicy|null */
+    private $policy;
+
     public function __construct(
         DataFetcher $dataFetcher,
         SqlGenerator $sqlGenerator,
@@ -68,7 +72,8 @@ class DatabaseDumper
         FakerInterface $faker,
         DumpConfig $dumpConfig,
         ProductionGuard $productionGuard = null,
-        DbdumpConfigStore $configStore = null
+        DbdumpConfigStore $configStore = null,
+        SafeQueryPolicy $policy = null
     ) {
         $this->dataFetcher = $dataFetcher;
         $this->sqlGenerator = $sqlGenerator;
@@ -80,6 +85,7 @@ class DatabaseDumper
         $this->dumpConfig = $dumpConfig;
         $this->productionGuard = $productionGuard;
         $this->configStore = $configStore;
+        $this->policy = $policy;
     }
 
     public function setAllowProdExport(bool $allow): void
@@ -93,7 +99,9 @@ class DatabaseDumper
     public function exportTable(TableConfig $config): void
     {
         $this->guardProd();
-        $this->doExportTable($config, null, null);
+        $this->withExportProfile(function () use ($config): void {
+            $this->doExportTable($config, null, null);
+        });
     }
 
     /**
@@ -108,7 +116,35 @@ class DatabaseDumper
         }
 
         $this->guardProd();
+        $this->withExportProfile(function () use ($tables): void {
+            $this->doExportAll($tables);
+        });
+    }
 
+    /**
+     * Профиль сессии export на время выгрузки: длинный statement_timeout вместо разведочного,
+     * без бюджета запросов. После — обратно, каким был.
+     */
+    private function withExportProfile(callable $export): void
+    {
+        if ($this->policy === null) {
+            $export();
+            return;
+        }
+        $previous = $this->policy->getProfile();
+        $this->policy->setProfile(SafeQueryPolicy::PROFILE_EXPORT);
+        try {
+            $export();
+        } finally {
+            $this->policy->setProfile($previous);
+        }
+    }
+
+    /**
+     * @param array<TableConfig> $tables
+     */
+    private function doExportAll(array $tables): void
+    {
         $tableKeys = [];
         foreach ($tables as $t) {
             $tableKeys[] = $t->getFullTableName();

@@ -62,4 +62,36 @@ class CriteriaSqlTesterTest extends TestCase
     {
         $this->assertSame('пустой WHERE', $this->tester()->test('users', 'users', '   '));
     }
+
+    public function testStatementTimeoutIsMarkedRatherThanTreatedAsDefect(): void
+    {
+        // Критерий верен, но без индекса не исполним за statement_timeout профиля analyze:
+        // чинить его как синтаксический нельзя — нужна пометка.
+        $this->connection->method('fetchFirstColumn')->willReturnCallback(function () {
+            $e = new \PDOException('SQLSTATE[57014]: Query canceled: 7 ERROR:  canceling statement due to statement timeout');
+            $e->errorInfo = ['57014', 7, 'canceling statement due to statement timeout'];
+            throw $e;
+        });
+
+        $result = $this->tester()->test('users', 'users', 'note LIKE \'%x%\'');
+
+        $this->assertNotNull($result);
+        $this->assertStringStartsWith(CriteriaSqlTester::TIMEOUT_PREFIX, (string) $result);
+        $this->assertTrue(CriteriaSqlTester::isTimeoutError($result));
+    }
+
+    public function testTimeoutIsRecognizedBySqlStateAloneAndThroughPreviousChain(): void
+    {
+        $pdo = new \PDOException('ERROR: some driver text without keywords');
+        $pdo->errorInfo = ['57014', 7, 'x'];
+        $wrapped = new \RuntimeException('An exception occurred while executing a query', 0, $pdo);
+
+        $this->assertTrue(CriteriaSqlTester::isTimeout($wrapped));
+        $this->assertTrue(CriteriaSqlTester::isTimeout(
+            new \RuntimeException('Query execution was interrupted, maximum statement execution time exceeded', 3024)
+        ));
+        $this->assertFalse(CriteriaSqlTester::isTimeout(new \RuntimeException('column "x" does not exist')));
+        $this->assertFalse(CriteriaSqlTester::isTimeoutError('column "x" does not exist'));
+        $this->assertFalse(CriteriaSqlTester::isTimeoutError(null));
+    }
 }

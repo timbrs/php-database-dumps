@@ -10,6 +10,7 @@ use Timbrs\DatabaseDumps\Platform\OraclePlatform;
 use Timbrs\DatabaseDumps\Platform\PlatformFactory;
 use Timbrs\DatabaseDumps\Platform\PostgresPlatform;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\TableInspector;
+use Timbrs\DatabaseDumps\Service\Db\RowEstimate;
 
 class TableInspectorTest extends TestCase
 {
@@ -280,5 +281,59 @@ class TableInspectorTest extends TestCase
         $orderColumn = $inspector->detectOrderColumn('hr', 'employees');
 
         $this->assertEquals('updated_at DESC', $orderColumn);
+    }
+
+    public function testEstimateRowsPostgresReadsCatalogOnceForAllTables(): void
+    {
+        $this->connection->method('getPlatformName')->willReturn(PlatformFactory::POSTGRESQL);
+        $this->connection
+            ->expects($this->once())
+            ->method('fetchAllAssociative')
+            ->with($this->stringContains('pg_class'))
+            ->willReturn([
+                [
+                    'table_schema' => 'public', 'table_name' => 'users', 'reltuples' => '1234.5', 'relpages' => '10',
+                    'n_live_tup' => '1200', 'last_analyze' => '2026-01-01', 'last_autoanalyze' => null, 'can_select' => 't',
+                ],
+            ]);
+
+        $inspector = new TableInspector($this->registry);
+        $users = $inspector->estimateRows('public', 'users');
+        $ghost = $inspector->estimateRows('public', 'ghost');
+
+        $this->assertSame(1235, $users->getValue());
+        $this->assertTrue($users->isEstimated());
+        $this->assertSame(RowEstimate::SOURCE_PG_CLASS, $users->getSource());
+        $this->assertFalse($ghost->isKnown());
+    }
+
+    public function testEstimateRowsMysqlUsesInformationSchema(): void
+    {
+        $this->connection->method('getPlatformName')->willReturn(PlatformFactory::MYSQL);
+        $this->connection
+            ->expects($this->once())
+            ->method('fetchAllAssociative')
+            ->with($this->stringContains('table_rows'), ['schema' => 'shop', 'table' => 'orders'])
+            ->willReturn([['table_rows' => '77']]);
+
+        $estimate = (new TableInspector($this->registry))->estimateRows('shop', 'orders');
+
+        $this->assertSame(77, $estimate->getValue());
+        $this->assertSame(RowEstimate::SOURCE_INFORMATION_SCHEMA, $estimate->getSource());
+    }
+
+    public function testEstimateRowsOracleWithoutStatisticsIsUnknown(): void
+    {
+        $this->connection->method('getPlatformName')->willReturn(PlatformFactory::ORACLE);
+        $this->connection
+            ->expects($this->once())
+            ->method('fetchAllAssociative')
+            ->with($this->stringContains('all_tables'), ['owner' => 'HR', 'table' => 'EMPLOYEES'])
+            ->willReturn([['NUM_ROWS' => null]]);
+
+        $estimate = (new TableInspector($this->registry))->estimateRows('hr', 'employees');
+
+        $this->assertFalse($estimate->isKnown());
+        $this->assertSame(RowEstimate::SOURCE_NONE, $estimate->getSource());
     }
 }

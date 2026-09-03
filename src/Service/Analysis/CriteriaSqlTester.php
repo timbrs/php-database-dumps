@@ -10,9 +10,21 @@ use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
  * запрос прошёл, иначе — короткую реальную ошибку СУБД (алиас t1., несуществующая колонка,
  * bind-параметр, синтаксис). Используется циклом исправления, чтобы дать агенту точный,
  * настоящий фидбэк по его же criteria (надёжнее статической эвристики).
+ *
+ * Таймаут сессии (statement_timeout профиля analyze) — отдельный случай: критерий синтаксически
+ * верен, но без индекса не исполним за отведённое время. Такая ошибка помечается префиксом
+ * TIMEOUT_PREFIX, чтобы её не «чинили» как синтаксическую.
  */
 class CriteriaSqlTester
 {
+    public const TIMEOUT_PREFIX = 'timeout: ';
+
+    /** SQLSTATE PostgreSQL query_canceled — statement_timeout. */
+    private const PG_QUERY_CANCELED = '57014';
+
+    /** MySQL ER_QUERY_TIMEOUT (max_execution_time) и MariaDB ER_STATEMENT_TIMEOUT (max_statement_time). */
+    private const MYSQL_TIMEOUT_CODES = [3024, 1969];
+
     /** @var ConnectionRegistryInterface */
     private $registry;
 
@@ -37,8 +49,54 @@ class CriteriaSqlTester
             $connection->fetchFirstColumn($sql);
             return null;
         } catch (\Throwable $e) {
-            return $this->shortError($e->getMessage());
+            $short = $this->shortError($e->getMessage());
+
+            return self::isTimeout($e) ? self::TIMEOUT_PREFIX . $short : $short;
         }
+    }
+
+    /**
+     * Ошибка из test() означает таймаут, а не дефект критерия.
+     */
+    public static function isTimeoutError(?string $error): bool
+    {
+        return $error !== null && strpos($error, self::TIMEOUT_PREFIX) === 0;
+    }
+
+    /**
+     * Исключение драйвера — таймаут запроса. Смотрит SQLSTATE (Doctrine, PDO), код ошибки
+     * MySQL/MariaDB и текст — по всей цепочке previous.
+     */
+    public static function isTimeout(\Throwable $e): bool
+    {
+        for ($current = $e; $current !== null; $current = $current->getPrevious()) {
+            $state = null;
+            if (method_exists($current, 'getSQLState')) {
+                $state = $current->getSQLState();
+            } elseif ($current instanceof \PDOException && isset($current->errorInfo[0])) {
+                $state = $current->errorInfo[0];
+            }
+            if ($state === self::PG_QUERY_CANCELED) {
+                return true;
+            }
+
+            $code = $current->getCode();
+            if ((string) $code === self::PG_QUERY_CANCELED) {
+                return true;
+            }
+            if (is_numeric($code) && in_array((int) $code, self::MYSQL_TIMEOUT_CODES, true)) {
+                return true;
+            }
+
+            if (preg_match(
+                '/statement timeout|canceling statement|max_execution_time|max_statement_time|maximum statement execution time/i',
+                $current->getMessage()
+            ) === 1) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

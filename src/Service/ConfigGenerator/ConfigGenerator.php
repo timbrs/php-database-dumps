@@ -11,6 +11,7 @@ use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisReportWriter;
+use Timbrs\DatabaseDumps\Service\Db\RowCounter;
 use Timbrs\DatabaseDumps\Service\Faker\LlmPatternDetector;
 use Timbrs\DatabaseDumps\Service\Faker\PatternDetector;
 use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
@@ -99,6 +100,9 @@ class ConfigGenerator
     /** @var DbdumpConfigStore|null */
     private $configStore;
 
+    /** @var RowCounter|null Оценка строк вместо COUNT(*) на больших таблицах */
+    private $rowCounter;
+
     public function __construct(
         TableInspector $inspector,
         ServiceTableFilter $filter,
@@ -116,9 +120,11 @@ class ConfigGenerator
         CriteriaSuggester $criteriaSuggester = null,
         AnalysisReportWriter $reportWriter = null,
         ?string $projectDir = null,
-        DbdumpConfigStore $configStore = null
+        DbdumpConfigStore $configStore = null,
+        RowCounter $rowCounter = null
     ) {
         $this->inspector = $inspector;
+        $this->rowCounter = $rowCounter;
         $this->filter = $filter;
         $this->fileSystem = $fileSystem;
         $this->logger = $logger;
@@ -420,7 +426,7 @@ class ConfigGenerator
                 }
             }
 
-            $count = $this->inspector->countRows($schema, $table, $connectionName);
+            $count = $this->resolveRowCount($schema, $table, $connectionName);
 
             if ($count === 0) {
                 $this->logger->info("{$prefix} ... SKIP (пустая)");
@@ -428,10 +434,16 @@ class ConfigGenerator
                 continue;
             }
 
+            if ($count === null) {
+                // Без статистики размер неизвестен, а считать точно на такой таблице нельзя —
+                // безопасный выбор: partial_export с порогом (находка P-1 в инвентаре).
+                $this->logger->warning("{$prefix} ... размер неизвестен (нет статистики планировщика) — partial_export с limit {$threshold}");
+            }
+
             $nonEmptyTables[] = ['schema' => $schema, 'table' => $table];
             $rowCounts[$schema . '.' . $table] = $count;
 
-            if ($count <= $threshold) {
+            if ($count !== null && $count <= $threshold) {
                 $this->logger->info("{$prefix} ... full_export ({$count} строк)");
                 if (!isset($fullExport[$schema])) {
                     $fullExport[$schema] = [];
@@ -440,7 +452,8 @@ class ConfigGenerator
                 $stats['full']++;
             } else {
                 $orderBy = $this->inspector->detectOrderColumn($schema, $table, $connectionName);
-                $this->logger->info("{$prefix} ... partial_export ({$count} строк, limit: {$threshold})");
+                $countLabel = $count === null ? '?' : (string) $count;
+                $this->logger->info("{$prefix} ... partial_export ({$countLabel} строк, limit: {$threshold})");
                 if (!isset($partialExport[$schema])) {
                     $partialExport[$schema] = [];
                 }
@@ -469,7 +482,7 @@ class ConfigGenerator
                 $schema = $tableInfo['schema'];
                 $table = $tableInfo['table'];
                 $this->logger->info("[{$fakerCurrent}/{$fakerTotal}] Анализ таблицы: {$schema}.{$table}");
-                $patterns = $this->detectPatterns($schema, $table, $connectionName);
+                $patterns = $this->detectPatterns($schema, $table, $connectionName, $rowCounts[$schema . '.' . $table] ?? null);
                 if (!empty($patterns)) {
                     if (!isset($fakerSection[$schema])) {
                         $fakerSection[$schema] = [];
@@ -509,7 +522,7 @@ class ConfigGenerator
      *
      * @param array<string, array<string, array<string, mixed>>> &$partialExport
      * @param array<string, array<string, array<string, string>>> $fakerSection
-     * @param array<string, int> $rowCounts
+     * @param array<string, int|null> $rowCounts
      */
     private function enrichWithAnalysis(
         array &$partialExport,
@@ -529,7 +542,8 @@ class ConfigGenerator
         foreach ($partialExport as $schema => $tables) {
             foreach ($tables as $table => $conf) {
                 $fullKey = $schema . '.' . $table;
-                $profiles = $this->statisticsInspector->profileTable($schema, $table, $connectionName);
+                // Размер известен с фазы подсчёта — профайлер по нему выбирает способ выборки.
+                $profiles = $this->statisticsInspector->profileTable($schema, $table, $connectionName, $rowCounts[$fullKey] ?? null);
 
                 $criteria = [];
                 $hasCascade = isset($partialExport[$schema][$table][TableConfig::KEY_CASCADE_FROM]);
@@ -587,12 +601,25 @@ class ConfigGenerator
      *
      * @return array<string, string> column => pattern_type
      */
-    private function detectPatterns(string $schema, string $table, ?string $connectionName): array
+    private function detectPatterns(string $schema, string $table, ?string $connectionName, ?int $rowCount = null): array
     {
         if ($this->aiEnabled && $this->llmDetector !== null && $this->llmDetector->isAvailable()) {
             return $this->llmDetector->detect($schema, $table, $connectionName);
         }
-        return $this->patternDetector->detect($schema, $table, $connectionName);
+        return $this->patternDetector->detect($schema, $table, $connectionName, $rowCount);
+    }
+
+    /**
+     * Число строк: через RowCounter (оценка, точный подсчёт только на небольших), без него —
+     * прежний COUNT(*). null — размер неизвестен (нет статистики).
+     */
+    private function resolveRowCount(string $schema, string $table, ?string $connectionName): ?int
+    {
+        if ($this->rowCounter !== null) {
+            return $this->rowCounter->count($schema, $table, $connectionName)->getValue();
+        }
+
+        return $this->inspector->countRows($schema, $table, $connectionName);
     }
 
     /**

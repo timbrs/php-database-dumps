@@ -786,6 +786,15 @@ database_dumps:
         timeout: 120
         verify_ssl: true
         # enabled: не задано — auto: включено, если задан url
+
+    # Бережный доступ к БД (см. раздел ниже). Времена — в миллисекундах, 0 — без ограничения.
+    db:
+        analyze_statement_timeout: 15000      # разведка: prepare-config, prepare-analysis, check-criteria
+        export_statement_timeout: 1800000     # выгрузка: фаза 2 читает таблицу целиком
+        lock_timeout: 2000                    # дольше блокировку не ждём — чужую миграцию не подвешиваем
+        idle_in_transaction_session_timeout: 60000
+        query_budget: 2000                    # предохранитель: запросов к БД на один прогон разведки
+        max_scan_rows: 50000                  # выше — таблицу целиком не сканируем (COUNT(*), DISTINCT, сортировка)
 ```
 
 **Токен сюда не кладётся.** Он живёт в `.env.local` (`DBDUMP_LLM_TOKEN`), поэтому файл
@@ -797,6 +806,45 @@ database_dumps:
 > При обновлении перенесите значения из старого файла в `config/packages/database_dumps.yaml`
 > под ключ `database_dumps:` и удалите старый — Symfony-бридж его больше не читает.
 > В Laravel формат не изменился: там по-прежнему публикуемый `config/database-dumps.php`.
+
+### Бережный доступ к БД (db)
+
+Разведка (`prepare-config`, `prepare-analysis`, `check-criteria`) работает и на боевой базе, поэтому
+пакет не читает данные там, где хватает статистики планировщика, и ограничивает всё остальное.
+В Laravel те же ключи — секция `db` в `config/database-dumps.php` (env `DBDUMP_DB_*`).
+
+- **Профили сессии.** При первом обращении к подключению в сессию уходят `SET statement_timeout`,
+  `lock_timeout`, `idle_in_transaction_session_timeout` (PostgreSQL; MySQL/MariaDB —
+  `max_execution_time` / `max_statement_time`; Oracle — без таймаутов). Профиль `analyze` — короткий
+  таймаут и бюджет запросов; `export` включает дампер (долгий таймаут, без бюджета); `import` —
+  импортёр (без ограничений). Команда `list` БД не открывает: `SET` применяется лениво.
+- **Размер таблиц** — из `pg_class.reltuples` / `pg_stat_user_tables.n_live_tup` (MySQL —
+  `information_schema.tables.table_rows`, Oracle — `all_tables.num_rows`), одним запросом на
+  подключение. Точный `COUNT(*)` — только если оценка не превышает `max_scan_rows`, либо с
+  `--exact-counts` (полный проход по каждой таблице — не для боевой БД). Таблица без статистики
+  получает находку **P-1** («размер неизвестен, выполните `ANALYZE` на стороне БД») и точно не
+  считается никогда — именно она может оказаться самой большой; `prepare-config` кладёт её в
+  `partial_export`.
+- **Профили колонок** на PostgreSQL берутся из `pg_stats` (`null_frac`, `n_distinct`, самые частые
+  значения) — таблица не читается вовсе. Выборка строк делается только для колонок, которых в
+  статистике нет (добавлены после последнего `ANALYZE`), и никогда не сортирует таблицу целиком:
+  `TABLESAMPLE BERNOULLI` в пределах `max_scan_rows`, `SYSTEM` — на больших; таблица неизвестного
+  размера — голова.
+- **Права.** Колонка без права `SELECT` — находка **P-2**: `SELECT *` при выгрузке упадёт, а в
+  `pg_stats` такой колонки нет, и без этой проверки «нет прав» неотличимо от «нет статистики».
+- **Коды.** Инвентарь для агента по-прежнему без значений данных; единственное исключение —
+  `codes` колонки: короткие ASCII-идентификаторы (`1`, `-4`, `RED`), не более 50 различных,
+  повторяющиеся, не из колонки с ПД-именем и не дата. Они нужны, чтобы сверить enum из кода с тем,
+  что реально лежит в базе. `codes_complete: false` — `most_common_vals` хранит только частые значения.
+- **Бюджет.** Профиль `analyze` считает запросы; при превышении `query_budget` прогон останавливается
+  с `QueryBudgetExceededException` — сузьте анализ до схемы или поднимите бюджет.
+- **Таймаут критерия.** `check-criteria` отличает критерий, упавший по `statement_timeout` (префикс
+  `timeout:`), от синтаксически неверного: первый нужно не чинить, а индексировать или сужать.
+
+Инвентарь получает `row_count_estimated`, `row_count_source` и список `warnings` (P-1/P-2).
+
+> pgbouncer в режиме transaction pooling не сохраняет сессионный `SET` между транзакциями —
+> задайте таймауты на стороне пула.
 
 <a id="структура-каталогов-symfony"></a>
 
@@ -869,6 +917,7 @@ php bin/console app:dbdump:prepare-config new --no-cascade --no-faker
 # Углублённый анализ
 php bin/console app:dbdump:prepare-config all --deep
 php bin/console app:dbdump:prepare-analysis          # собрать пакет для агента
+php bin/console app:dbdump:prepare-analysis --exact-counts   # точный COUNT(*) по каждой таблице (не для боевой БД)
 # или вручную: prepare-analysis → opencode run → apply-analysis
 
 # Проверить конфиг по слепку схемы, без подключения к БД
@@ -1695,7 +1744,25 @@ database_dumps:
         timeout: 120
         verify_ssl: true
         # enabled: unset — auto: on when url is set
+
+    # Gentle database access: per-profile session timeouts (analyze / export / import),
+    # a query budget for discovery and the row threshold above which a table is never
+    # scanned in full (COUNT(*), DISTINCT, sorting). Milliseconds; 0 — unlimited.
+    db:
+        analyze_statement_timeout: 15000
+        export_statement_timeout: 1800000
+        lock_timeout: 2000
+        idle_in_transaction_session_timeout: 60000
+        query_budget: 2000
+        max_scan_rows: 50000
 ```
+
+Row counts come from planner statistics (`pg_class.reltuples`, `information_schema.tables.table_rows`,
+`all_tables.num_rows`); an exact `COUNT(*)` runs only when the estimate fits in `max_scan_rows` or with
+`prepare-analysis --exact-counts`. On PostgreSQL column profiles are read from `pg_stats` and the table
+itself is not touched; row samples use `TABLESAMPLE`, never `ORDER BY RANDOM()`. Tables without
+statistics are reported as **P-1**, columns without `SELECT` privilege as **P-2**. The only data values
+that reach the inventory are `codes` — short ASCII identifiers of low-cardinality columns after a PII gate.
 
 **The token does not go here.** It lives in `.env.local` (`DBDUMP_LLM_TOKEN`), so the file is safe
 to commit. `DBDUMP_*` environment variables override values from this file. Per-environment

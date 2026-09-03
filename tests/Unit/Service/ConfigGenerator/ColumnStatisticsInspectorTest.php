@@ -378,9 +378,9 @@ class ColumnStatisticsInspectorTest extends TestCase
         $this->assertStringNotContainsString('ORDER BY', $sampleCalls[1]);
     }
 
-    public function testSmallTableStillUsesRandomOrder(): void
+    public function testSmallTablePostgresUsesBernoulliSampleNotSort(): void
     {
-        // rowCount <= LARGE_TABLE_ROWS → прежняя полноценная случайная выборка (регресс).
+        // rowCount <= max_scan_rows → построчный BERNOULLI: равномерно и без сортировки таблицы.
         $columnsMeta = [['column_name' => 'status', 'data_type' => 'varchar', 'is_nullable' => 'NO']];
         $captured = [];
         $this->connection->method('fetchAllAssociative')->willReturnCallback(
@@ -397,9 +397,129 @@ class ColumnStatisticsInspectorTest extends TestCase
         $inspector->profileTable('public', 'small', null, 100);
 
         $this->assertCount(1, $captured);
-        $this->assertStringContainsString('ORDER BY', $captured[0]);
-        $this->assertStringContainsString('RANDOM()', $captured[0]);
-        $this->assertStringNotContainsString('TABLESAMPLE', $captured[0]);
+        $this->assertStringContainsString('TABLESAMPLE BERNOULLI (100)', $captured[0]);
+        $this->assertStringNotContainsString('ORDER BY', $captured[0]);
+        $this->assertStringNotContainsString('RANDOM()', $captured[0]);
+    }
+
+    public function testUnknownSizePostgresReadsHeadWithoutSorting(): void
+    {
+        // Размер неизвестен — ни процента выборки, ни стоимости сортировки: голова таблицы.
+        $columnsMeta = [['column_name' => 'status', 'data_type' => 'varchar', 'is_nullable' => 'NO']];
+        $captured = [];
+        $this->connection->method('fetchAllAssociative')->willReturnCallback(
+            function ($sql) use (&$captured, $columnsMeta) {
+                if (strpos($sql, 'information_schema.columns') !== false) {
+                    return $columnsMeta;
+                }
+                $captured[] = $sql;
+                return [['status' => 'a']];
+            }
+        );
+
+        $inspector = new ColumnStatisticsInspector($this->registry);
+        $inspector->profileTable('public', 'unknown', null, null);
+
+        $this->assertCount(1, $captured);
+        $this->assertSame('SELECT * FROM "public"."unknown" LIMIT 200', $captured[0]);
+    }
+
+    public function testPgStatsProfileSkipsRowSampleEntirely(): void
+    {
+        // Все колонки есть в pg_stats → таблица не читается вовсе; профиль из статистики,
+        // доли переведены в счётчики по числу строк, коды — после шлюза.
+        $columnsMeta = [
+            ['column_name' => 'id', 'data_type' => 'integer', 'is_nullable' => 'NO'],
+            ['column_name' => 'status_id', 'data_type' => 'integer', 'is_nullable' => 'NO'],
+            ['column_name' => 'last_name', 'data_type' => 'character varying', 'is_nullable' => 'YES'],
+        ];
+        $dataQueries = [];
+        $this->connection->method('fetchAllAssociative')->willReturnCallback(
+            function ($sql) use (&$dataQueries, $columnsMeta) {
+                if (strpos($sql, 'information_schema.columns') !== false) {
+                    return $columnsMeta;
+                }
+                if (strpos($sql, 'FROM pg_stats') !== false) {
+                    return [
+                        ['tablename' => 'clients', 'attname' => 'id', 'null_frac' => 0, 'n_distinct' => -1, 'avg_width' => 4, 'mcv' => null, 'mcf' => null, 'hb' => '{1,500,1000}'],
+                        ['tablename' => 'clients', 'attname' => 'status_id', 'null_frac' => 0.1, 'n_distinct' => 3, 'avg_width' => 4, 'mcv' => '{1,2,-4}', 'mcf' => '{0.5,0.3,0.1}', 'hb' => null],
+                        ['tablename' => 'clients', 'attname' => 'last_name', 'null_frac' => 0, 'n_distinct' => 4, 'avg_width' => 12, 'mcv' => '{Иванов,Петров}', 'mcf' => '{0.6,0.4}', 'hb' => null],
+                    ];
+                }
+                $dataQueries[] = $sql;
+                return [];
+            }
+        );
+        $reader = new \Timbrs\DatabaseDumps\Service\Db\PgStatsReader($this->registry);
+
+        $inspector = new ColumnStatisticsInspector($this->registry, 200, null, $reader);
+        $profiles = $inspector->profileTable('public', 'clients', null, 1000);
+
+        $this->assertSame([], $dataQueries, 'таблица не должна читаться, когда вся статистика есть');
+
+        $status = $this->profileBy($profiles, 'status_id');
+        $this->assertNotNull($status);
+        $this->assertSame(ColumnProfile::SOURCE_PG_STATS, $status->getDistinctSource());
+        $this->assertSame(3, $status->getDistinctCount());
+        $this->assertTrue($status->isCategorical());
+        $this->assertEqualsWithDelta(0.1, $status->getNullFraction(), 0.001);
+        $this->assertSame([['value' => '1', 'count' => 500], ['value' => '2', 'count' => 300], ['value' => '-4', 'count' => 100]], $status->getTopValues());
+        $this->assertSame(['1', '2', '-4'], $status->getCodes());
+        $this->assertTrue($status->isCodesComplete());
+
+        $id = $this->profileBy($profiles, 'id');
+        $this->assertNotNull($id);
+        $this->assertSame(1000, $id->getDistinctCount()); // n_distinct = -1 → все строки различны
+        $this->assertTrue($id->isDistinctCapped());
+        $this->assertFalse($id->isCategorical());
+        $this->assertNull($id->getCodes());
+
+        $lastName = $this->profileBy($profiles, 'last_name');
+        $this->assertNotNull($lastName);
+        $this->assertTrue($lastName->isCategorical());
+        $this->assertNull($lastName->getCodes(), 'фамилии — не коды: имя колонки и кириллица');
+    }
+
+    public function testColumnsMissingFromPgStatsAreSampledOnce(): void
+    {
+        // Колонка добавлена после ANALYZE — её в pg_stats нет: одна безопасная выборка строк
+        // только ради неё, остальные — из статистики.
+        $columnsMeta = [
+            ['column_name' => 'status', 'data_type' => 'varchar', 'is_nullable' => 'NO'],
+            ['column_name' => 'fresh', 'data_type' => 'varchar', 'is_nullable' => 'YES'],
+        ];
+        $dataQueries = [];
+        $this->connection->method('fetchAllAssociative')->willReturnCallback(
+            function ($sql) use (&$dataQueries, $columnsMeta) {
+                if (strpos($sql, 'information_schema.columns') !== false) {
+                    return $columnsMeta;
+                }
+                if (strpos($sql, 'FROM pg_stats') !== false) {
+                    return [
+                        ['tablename' => 't', 'attname' => 'status', 'null_frac' => 0, 'n_distinct' => 2, 'avg_width' => 3, 'mcv' => '{a,b}', 'mcf' => '{0.7,0.3}', 'hb' => null],
+                    ];
+                }
+                $dataQueries[] = $sql;
+                return [['status' => 'a', 'fresh' => 'x'], ['status' => 'b', 'fresh' => 'x'], ['status' => 'a', 'fresh' => 'y']];
+            }
+        );
+        $reader = new \Timbrs\DatabaseDumps\Service\Db\PgStatsReader($this->registry);
+
+        $inspector = new ColumnStatisticsInspector($this->registry, 200, null, $reader);
+        $profiles = $inspector->profileTable('public', 't', null, 300);
+
+        $this->assertCount(1, $dataQueries);
+        $this->assertStringContainsString('TABLESAMPLE BERNOULLI', $dataQueries[0]);
+
+        $fresh = $this->profileBy($profiles, 'fresh');
+        $this->assertNotNull($fresh);
+        $this->assertSame(ColumnProfile::SOURCE_SAMPLE, $fresh->getDistinctSource());
+        $this->assertSame(2, $fresh->getDistinctCount());
+        $this->assertFalse($fresh->isCodesComplete(), 'по выборке коды полными не считаются');
+
+        $status = $this->profileBy($profiles, 'status');
+        $this->assertNotNull($status);
+        $this->assertSame(ColumnProfile::SOURCE_PG_STATS, $status->getDistinctSource());
     }
 
     public function testLargeTableOracleUsesSampleClause(): void

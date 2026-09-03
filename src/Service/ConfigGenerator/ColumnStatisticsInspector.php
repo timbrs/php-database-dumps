@@ -4,17 +4,26 @@ namespace Timbrs\DatabaseDumps\Service\ConfigGenerator;
 
 use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
 use Timbrs\DatabaseDumps\Platform\PlatformFactory;
+use Timbrs\DatabaseDumps\Service\Db\CodeValueGate;
+use Timbrs\DatabaseDumps\Service\Db\PgStatsReader;
+use Timbrs\DatabaseDumps\Service\Db\SafeQueryPolicy;
 
 /**
  * Детерминированное профилирование колонок (без ИИ).
  *
- * По случайной выборке строк вычисляет для каждой колонки: долю NULL,
- * кардинальность (с потолком), top-значения и признак категориальности
- * (низкое число различных значений). Категориальные колонки питают
- * авто-генерацию sample.criteria (CriteriaSuggester).
+ * Для каждой колонки: доля NULL, кардинальность (с потолком), top-значения, признак
+ * категориальности (мало различных значений) и коды после шлюза. Категориальные колонки
+ * питают авто-генерацию sample.criteria (CriteriaSuggester).
  *
- * Реализация: одна выборка строк (SELECT * ... LIMIT N), статистика считается
- * в PHP — это и дешевле (1 запрос на таблицу), и легко тестируется на моке.
+ * Два источника. На PostgreSQL с PgStatsReader профиль берётся из pg_stats — статистика
+ * планировщика уже содержит null_frac, n_distinct и самые частые значения, и таблицу ради них
+ * читать не нужно; выборка строк делается только для колонок, которых в статистике нет
+ * (добавлены после последнего ANALYZE) или если статистики нет вовсе. На остальных платформах
+ * и без читателя — как раньше: одна выборка строк, статистика в PHP.
+ *
+ * Выборка строк никогда не сортирует таблицу целиком: PostgreSQL — TABLESAMPLE (BERNOULLI на
+ * небольших, SYSTEM на больших), Oracle — SAMPLE, MySQL на больших — голова таблицы. Таблица
+ * неизвестного размера — голова: ни процента выборки, ни стоимости сортировки для неё не знаем.
  */
 class ColumnStatisticsInspector
 {
@@ -27,8 +36,8 @@ class ColumnStatisticsInspector
     public const DEFAULT_SAMPLE_SIZE = 200;
 
     /**
-     * Порог «большой таблицы»: выше него ORDER BY RANDOM()/RAND() отсортировал бы всю таблицу
-     * ради N строк (полный скан) — переключаемся на дешёвую нативную выборку по блокам.
+     * Порог «большой таблицы» без политики: выше него — только блочная выборка.
+     * С политикой порог задаёт SafeQueryPolicy::getMaxScanRows().
      */
     public const LARGE_TABLE_ROWS = 50000;
 
@@ -41,20 +50,32 @@ class ColumnStatisticsInspector
     /** @var int */
     private $sampleSize;
 
+    /** @var SafeQueryPolicy|null */
+    private $policy;
+
+    /** @var PgStatsReader|null */
+    private $statsReader;
+
     /**
      * @param int $sampleSize
      */
-    public function __construct(ConnectionRegistryInterface $registry, $sampleSize = self::DEFAULT_SAMPLE_SIZE)
-    {
+    public function __construct(
+        ConnectionRegistryInterface $registry,
+        $sampleSize = self::DEFAULT_SAMPLE_SIZE,
+        SafeQueryPolicy $policy = null,
+        PgStatsReader $statsReader = null
+    ) {
         $this->registry = $registry;
         $this->sampleSize = (int) $sampleSize;
+        $this->policy = $policy;
+        $this->statsReader = $statsReader;
     }
 
     /**
      * Профилировать все колонки таблицы.
      *
-     * @param int|null $rowCount известное число строк (из countRows) — включает дешёвую
-     *                           нативную выборку на больших таблицах; null → всегда ORDER BY RANDOM
+     * @param int|null $rowCount известное или оценённое число строк: выбирает способ выборки
+     *                           и переводит доли из pg_stats в счётчики; null → голова таблицы
      * @return array<int, ColumnProfile>
      */
     public function profileTable(string $schema, string $table, ?string $connectionName = null, ?int $rowCount = null): array
@@ -64,15 +85,112 @@ class ColumnStatisticsInspector
             return [];
         }
 
-        $rows = $this->fetchSampleRows($schema, $table, $connectionName, $rowCount);
-        $sampleCount = count($rows);
+        $stats = $this->columnStatsFor($schema, $table, $connectionName);
+        if ($rowCount === null && $stats !== []) {
+            $rowCount = $this->rowCountFromStats($schema, $table, $connectionName);
+        }
+
+        $fromStats = [];
+        $needSample = false;
+        foreach ($columnsMeta as $name => $meta) {
+            $stat = $this->findStat($stats, $name);
+            if ($stat !== null) {
+                $fromStats[$name] = $stat;
+            } else {
+                $needSample = true;
+            }
+        }
+
+        $rows = [];
+        $sampleCount = 0;
+        if ($needSample) {
+            $rows = $this->fetchSampleRows($schema, $table, $connectionName, $rowCount);
+            $sampleCount = count($rows);
+        }
 
         $profiles = [];
         foreach ($columnsMeta as $name => $meta) {
-            $profiles[] = $this->profileColumn($name, $meta, $rows, $sampleCount);
+            $profiles[] = isset($fromStats[$name])
+                ? $this->profileFromStats($name, $meta, $fromStats[$name], $rowCount)
+                : $this->profileColumn($name, $meta, $rows, $sampleCount);
         }
 
         return $profiles;
+    }
+
+    /**
+     * Профиль из статистики планировщика — таблица не читается.
+     *
+     * n_distinct > 0 — абсолютное число; < 0 — доля от числа строк; 0 — неизвестно.
+     * most_common_vals хранит только частые значения, поэтому codes_complete = false, если их
+     * меньше, чем различных значений.
+     *
+     * @param array{type: string, nullable: bool} $meta
+     * @param array<string, mixed> $stat строка pg_stats из PgStatsReader::readColumnStats()
+     */
+    private function profileFromStats(string $name, array $meta, array $stat, ?int $rows): ColumnProfile
+    {
+        $nullFraction = max(0.0, min(1.0, isset($stat['null_frac']) && is_numeric($stat['null_frac']) ? (float) $stat['null_frac'] : 0.0));
+        $nDistinct = isset($stat['n_distinct']) && is_numeric($stat['n_distinct']) ? (float) $stat['n_distinct'] : 0.0;
+
+        $distinctCapped = false;
+        if ($nDistinct > 0) {
+            $distinct = (int) round($nDistinct);
+        } elseif ($nDistinct < 0) {
+            if ($rows !== null) {
+                $distinct = (int) round(-$nDistinct * $rows);
+            } else {
+                // Доля без числа строк — известно лишь, что значений много.
+                $distinct = self::MAX_CATEGORICAL_DISTINCT;
+                $distinctCapped = true;
+            }
+        } else {
+            $distinct = 0;
+        }
+        $distinctCapped = $distinctCapped || $distinct >= self::MAX_CATEGORICAL_DISTINCT;
+
+        $nonNull = $rows !== null ? (int) round($rows * (1.0 - $nullFraction)) : null;
+
+        $topValues = [];
+        $mcv = isset($stat['most_common_vals']) && is_array($stat['most_common_vals']) ? $stat['most_common_vals'] : [];
+        $mcf = isset($stat['most_common_freqs']) && is_array($stat['most_common_freqs']) ? $stat['most_common_freqs'] : [];
+        foreach ($mcv as $i => $value) {
+            if ($value === null || count($topValues) >= self::TOP_VALUES_LIMIT) {
+                continue;
+            }
+            $freq = isset($mcf[$i]) ? (float) $mcf[$i] : 0.0;
+            $topValues[] = [
+                'value' => (string) $value,
+                'count' => $rows !== null ? (int) round($freq * $rows) : 0,
+            ];
+        }
+
+        $categorical = $distinct >= 2
+            && !$distinctCapped
+            && ($nonNull === null || $distinct < $nonNull);
+
+        $codes = null;
+        $codesComplete = null;
+        if ($mcv !== []) {
+            $codes = CodeValueGate::filter($name, $meta['type'], $distinct, $nonNull, $mcv);
+            if ($codes !== null) {
+                $codesComplete = count($codes) >= $distinct;
+            }
+        }
+
+        return new ColumnProfile(
+            $name,
+            $meta['type'],
+            $meta['nullable'],
+            $nullFraction,
+            $distinct,
+            $distinctCapped,
+            $topValues,
+            $categorical,
+            $codes,
+            ColumnProfile::SOURCE_PG_STATS,
+            $codesComplete
+        );
     }
 
     /**
@@ -122,6 +240,17 @@ class ColumnStatisticsInspector
             && !$distinctCapped
             && $distinct < $nonNull;
 
+        // Коды по выборке: выборка видит все значения своих строк, но не всей таблицы —
+        // полными их считать нельзя.
+        $codes = null;
+        $codesComplete = null;
+        if ($counts !== []) {
+            $codes = CodeValueGate::filter($name, $meta['type'], $distinct, $nonNull, array_map('strval', array_keys($counts)));
+            if ($codes !== null) {
+                $codesComplete = false;
+            }
+        }
+
         return new ColumnProfile(
             $name,
             $meta['type'],
@@ -130,7 +259,10 @@ class ColumnStatisticsInspector
             $distinct,
             $distinctCapped,
             $topValues,
-            $categorical
+            $categorical,
+            $codes,
+            ColumnProfile::SOURCE_SAMPLE,
+            $codesComplete
         );
     }
 
@@ -147,6 +279,50 @@ class ColumnStatisticsInspector
         foreach ($row as $key => $value) {
             if (strtolower((string) $key) === $lower) {
                 return $value;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Статистика колонок таблицы из pg_stats; [] — не PostgreSQL, нет читателя или ANALYZE
+     * не проводился.
+     *
+     * @return array<string, array<string, mixed>> column => stats
+     */
+    private function columnStatsFor(string $schema, string $table, ?string $connectionName): array
+    {
+        if ($this->statsReader === null || !$this->statsReader->supports($connectionName)) {
+            return [];
+        }
+        $all = $this->statsReader->readColumnStats($schema, $connectionName);
+
+        return $all[$table] ?? [];
+    }
+
+    private function rowCountFromStats(string $schema, string $table, ?string $connectionName): ?int
+    {
+        if ($this->statsReader === null) {
+            return null;
+        }
+        $stats = $this->statsReader->readTableStats($connectionName);
+
+        return PgStatsReader::estimateRows($stats[$schema . '.' . $table] ?? null)->getValue();
+    }
+
+    /**
+     * @param array<string, array<string, mixed>> $stats
+     * @return array<string, mixed>|null
+     */
+    private function findStat(array $stats, string $column): ?array
+    {
+        if (isset($stats[$column])) {
+            return $stats[$column];
+        }
+        $lower = strtolower($column);
+        foreach ($stats as $name => $stat) {
+            if (strtolower((string) $name) === $lower) {
+                return $stat;
             }
         }
         return null;
@@ -203,20 +379,17 @@ class ColumnStatisticsInspector
     }
 
     /**
-     * Выбрать ~sampleSize строк для профилирования.
+     * Выбрать ~sampleSize строк для профилирования, не сортируя таблицу целиком.
      *
-     * На больших таблицах (rowCount > LARGE_TABLE_ROWS) НЕ используем ORDER BY RANDOM() —
-     * он отсортировал бы всю таблицу ради N строк (полный скан, главная причина медленной
-     * инвентаризации). Вместо этого — дешёвая нативная выборка по блокам (PG TABLESAMPLE,
-     * Oracle SAMPLE); MySQL нативного построчного сэмпла по проценту не имеет → берём «голову»
-     * таблицы (мгновенно). Пустой нативный сэмпл (TABLESAMPLE может не попасть ни в один блок)
-     * → fallback на «голову». На небольших/неизвестного размера таблицах — прежняя полноценная
-     * случайная выборка (там ORDER BY RANDOM дёшев).
+     * PostgreSQL: TABLESAMPLE BERNOULLI(p) на таблицах в пределах max_scan_rows (построчная,
+     * равномерная), SYSTEM(p) на больших (блочная, быстрая); пустой сэмпл (блочная выборка
+     * может не попасть ни в один блок) → голова таблицы. Oracle на больших — SAMPLE(p); MySQL
+     * нативного сэмпла по проценту не имеет → голова. На небольших таблицах MySQL/Oracle —
+     * прежняя случайная выборка, там она дёшева. Таблица неизвестного размера — голова.
      *
-     * @param int|null $rowCount известное число строк (null → всегда ORDER BY RANDOM)
      * @return array<int, array<string, mixed>>
      */
-    private function fetchSampleRows(string $schema, string $table, ?string $connectionName, ?int $rowCount = null): array
+    private function fetchSampleRows(string $schema, string $table, ?string $connectionName, ?int $rowCount): array
     {
         $connection = $this->registry->getConnection($connectionName);
         $platform = $this->registry->getPlatform($connectionName);
@@ -224,58 +397,53 @@ class ColumnStatisticsInspector
 
         $fullTable = $platform->getFullTableName($schema, $table);
         $limitSql = $platform->getLimitSql($this->sampleSize);
+        $head = "SELECT * FROM {$fullTable} {$limitSql}";
 
-        if ($rowCount !== null && $rowCount > self::LARGE_TABLE_ROWS) {
-            $sampleSql = $this->buildNativeSampleSql($platformName, $fullTable, $this->samplePercent($rowCount), $limitSql);
-            if ($sampleSql !== null) {
-                $rows = $connection->fetchAllAssociative($sampleSql);
+        if ($rowCount === null) {
+            return $connection->fetchAllAssociative($head);
+        }
+
+        $maxScan = $this->policy !== null ? $this->policy->getMaxScanRows() : self::LARGE_TABLE_ROWS;
+        $large = $rowCount > $maxScan;
+
+        if ($platformName === PlatformFactory::POSTGRESQL) {
+            $method = $large ? 'SYSTEM' : 'BERNOULLI';
+            $p = $this->formatPercent($this->samplePercent($rowCount, $large ? 99.9 : 100.0));
+            $rows = $connection->fetchAllAssociative("SELECT * FROM {$fullTable} TABLESAMPLE {$method} ({$p}) {$limitSql}");
+
+            return !empty($rows) ? $rows : $connection->fetchAllAssociative($head);
+        }
+
+        if ($large) {
+            if ($platformName === PlatformFactory::ORACLE) {
+                $p = $this->formatPercent($this->samplePercent($rowCount, 99.9));
+                $rows = $connection->fetchAllAssociative("SELECT * FROM {$fullTable} SAMPLE ({$p}) {$limitSql}");
                 if (!empty($rows)) {
                     return $rows;
                 }
             }
-            // MySQL (нет TABLESAMPLE) или пустой сэмпл → «голова» таблицы: мгновенно, без сортировки.
-            return $connection->fetchAllAssociative("SELECT * FROM {$fullTable} {$limitSql}");
+
+            return $connection->fetchAllAssociative($head);
         }
 
-        // Небольшая/неизвестного размера таблица — полноценная случайная выборка (дёшева на малых).
         $randomFunc = $platform->getRandomFunctionSql();
 
         return $connection->fetchAllAssociative("SELECT * FROM {$fullTable} ORDER BY {$randomFunc} {$limitSql}");
     }
 
     /**
-     * SQL нативной блочной выборки по проценту (PG/Oracle). null — платформа без такого
-     * механизма (MySQL): вызывающий возьмёт «голову» таблицы.
-     *
-     * @return string|null
+     * Процент выборки: ~SAMPLE_OVERSHOOT×sampleSize строк из rowCount, зажатый в (0.01 .. $max) —
+     * 100 недопустим для Oracle SAMPLE и PG SYSTEM, BERNOULLI принимает и 100.
      */
-    private function buildNativeSampleSql(string $platformName, string $fullTable, float $percent, string $limitSql)
-    {
-        $p = $this->formatPercent($percent);
-        if ($platformName === PlatformFactory::POSTGRESQL) {
-            // SYSTEM — блочная выборка (быстрая); LIMIT останавливает добор строк.
-            return "SELECT * FROM {$fullTable} TABLESAMPLE SYSTEM ({$p}) {$limitSql}";
-        }
-        if ($platformName === PlatformFactory::ORACLE) {
-            // SAMPLE(p) — блочная выборка Oracle; FETCH FIRST ограничивает результат.
-            return "SELECT * FROM {$fullTable} SAMPLE ({$p}) {$limitSql}";
-        }
-        return null;
-    }
-
-    /**
-     * Процент нативной выборки: ~SAMPLE_OVERSHOOT×sampleSize строк из rowCount, зажатый в
-     * (0.01 .. 99.9) — 100 недопустим для Oracle SAMPLE, а ниже 0.01 незачем.
-     */
-    private function samplePercent(int $rowCount): float
+    private function samplePercent(int $rowCount, float $max): float
     {
         $target = self::SAMPLE_OVERSHOOT * $this->sampleSize;
         $percent = 100.0 * $target / max(1, $rowCount);
         if ($percent < 0.01) {
             $percent = 0.01;
         }
-        if ($percent > 99.9) {
-            $percent = 99.9;
+        if ($percent > $max) {
+            $percent = $max;
         }
         return $percent;
     }

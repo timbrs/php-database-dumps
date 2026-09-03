@@ -74,6 +74,19 @@ services:
         arguments:
             $path: '%database_dumps.config_path%'
 
+    # Бережный доступ к БД: таймауты сессии по профилю (analyze/export/import), бюджет
+    # запросов разведки, порог сканирования. Один разделяемый экземпляр: профиль переключают
+    # дампер и импортёр, реестр подключений применяет SET при первом getConnection().
+    Timbrs\DatabaseDumps\Service\Db\SafeQueryPolicy:
+        arguments:
+            $settings: '%database_dumps.db%'
+
+    # Статистика планировщика PostgreSQL вместо COUNT(*)/DISTINCT по данным.
+    Timbrs\DatabaseDumps\Service\Db\PgStatsReader: ~
+
+    # Оценка строк, точный подсчёт только на небольших таблицах.
+    Timbrs\DatabaseDumps\Service\Db\RowCounter: ~
+
     # ConnectionRegistry
     Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface:
         class: Timbrs\DatabaseDumps\Service\ConnectionRegistry
@@ -82,6 +95,8 @@ services:
             $defaultConnection: '@doctrine.dbal.default_connection'
             $dumpConfig: '@Timbrs\DatabaseDumps\Config\DumpConfig'
             $container: '@service_container'
+            $policy: '@Timbrs\DatabaseDumps\Service\Db\SafeQueryPolicy'
+            $logger: '@Timbrs\DatabaseDumps\Contract\LoggerInterface'
 
     # Services — явно перечисляем, чтобы избежать неоднозначных биндингов
     Timbrs\DatabaseDumps\Service\Parser\StatementSplitter: ~

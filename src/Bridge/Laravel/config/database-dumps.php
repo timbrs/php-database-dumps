@@ -44,4 +44,23 @@ return [
         'verify_ssl' => env('DBDUMP_LLM_VERIFY_SSL', true),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Бережный доступ к БД
+    |--------------------------------------------------------------------------
+    |
+    | Таймауты сессии по профилю (analyze — разведка, export — выгрузка, import —
+    | заливка без ограничений), бюджет запросов разведки и порог, выше которого
+    | таблицу не сканируют целиком (COUNT(*), DISTINCT, ORDER BY RAND()).
+    | Времена — в миллисекундах; 0 — без ограничения.
+    */
+    'db' => [
+        'analyze_statement_timeout' => (int) env('DBDUMP_DB_ANALYZE_STATEMENT_TIMEOUT', 15000),
+        'export_statement_timeout' => (int) env('DBDUMP_DB_EXPORT_STATEMENT_TIMEOUT', 1800000),
+        'lock_timeout' => (int) env('DBDUMP_DB_LOCK_TIMEOUT', 2000),
+        'idle_in_transaction_session_timeout' => (int) env('DBDUMP_DB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT', 60000),
+        'query_budget' => (int) env('DBDUMP_DB_QUERY_BUDGET', 2000),
+        'max_scan_rows' => (int) env('DBDUMP_DB_MAX_SCAN_ROWS', 50000),
+    ],
+
 ];

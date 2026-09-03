@@ -147,13 +147,29 @@ class AnalysisPackageBuilderTest extends TestCase
         $inventory = $this->builder()->buildInventory();
         $profile = $inventory['schemas']['public']['tables']['clients']['profiles'][0];
 
-        $allowed = ['column', 'data_type', 'nullable', 'null_fraction', 'distinct_count', 'distinct_capped', 'categorical'];
+        // codes / codes_complete — единственные значения данных, и только после CodeValueGate.
+        $allowed = [
+            'column', 'data_type', 'nullable', 'null_fraction', 'distinct_count', 'distinct_capped',
+            'n_distinct_source', 'categorical', 'codes', 'codes_complete',
+        ];
         foreach (array_keys($profile) as $key) {
             $this->assertContains($key, $allowed, "Профиль содержит небезопасный ключ: {$key}");
         }
         // Значения данных отсутствуют.
         $this->assertArrayNotHasKey('top_values', $profile);
         $this->assertArrayNotHasKey('values', $profile);
+        $this->assertArrayNotHasKey('codes', $profile, 'профиль без кодов не должен нести ключ codes');
+    }
+
+    public function testInventoryCarriesRowCountProvenanceAndWarnings(): void
+    {
+        // Без RowCounter — прежний точный COUNT(*): источник count, оценка не помечена.
+        $inventory = $this->builder()->buildInventory();
+        $clients = $inventory['schemas']['public']['tables']['clients'];
+
+        $this->assertFalse($clients['row_count_estimated']);
+        $this->assertSame('count', $clients['row_count_source']);
+        $this->assertSame([], $inventory['warnings']);
     }
 
     /**

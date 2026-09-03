@@ -54,7 +54,13 @@ class PrepareAnalysisCommand extends Command
         $this
             ->setName('app:dbdump:prepare-analysis')
             ->setDescription('Собрать пакет для анализа кода внешним агентом (инвентарь схемы + контракт вывода)')
-            ->addOption('connection', 'c', InputOption::VALUE_REQUIRED, 'Имя подключения (по умолчанию — дефолтное)');
+            ->addOption('connection', 'c', InputOption::VALUE_REQUIRED, 'Имя подключения (по умолчанию — дефолтное)')
+            ->addOption(
+                'exact-counts',
+                null,
+                InputOption::VALUE_NONE,
+                'Точный COUNT(*) по каждой таблице вместо оценки планировщика (полный проход по каждой таблице — не для боевой БД)'
+            );
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -68,6 +74,8 @@ class PrepareAnalysisCommand extends Command
 
         $connectionName = $input->getOption('connection');
         $connectionName = is_string($connectionName) && $connectionName !== '' ? $connectionName : null;
+
+        $this->builder->setExactCounts((bool) $input->getOption('exact-counts'));
 
         try {
             $result = $this->builder->build($connectionName);

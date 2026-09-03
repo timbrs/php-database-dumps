@@ -46,6 +46,9 @@ use Timbrs\DatabaseDumps\Service\ConfigGenerator\ServiceTableFilter;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\TableInspector;
 use Timbrs\DatabaseDumps\Service\ConnectionRegistry;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\PrimaryKeyInspector;
+use Timbrs\DatabaseDumps\Service\Db\PgStatsReader;
+use Timbrs\DatabaseDumps\Service\Db\RowCounter;
+use Timbrs\DatabaseDumps\Service\Db\SafeQueryPolicy;
 use Timbrs\DatabaseDumps\Service\Dumper\CascadeWhereResolver;
 use Timbrs\DatabaseDumps\Service\Dumper\DatabaseDumper;
 use Timbrs\DatabaseDumps\Service\Dumper\DataFetcher;
@@ -129,8 +132,24 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
             return PlatformFactory::create($connection->getPlatformName(), $app->make(LoggerInterface::class));
         });
 
+        // Бережный доступ к БД: один разделяемый экземпляр — профиль переключают дампер и импортёр.
+        $this->app->singleton(SafeQueryPolicy::class, function ($app) {
+            $settings = $app['config']->get('database-dumps.db', []);
+            return new SafeQueryPolicy(is_array($settings) ? $settings : []);
+        });
+        $this->app->singleton(PgStatsReader::class, function ($app) {
+            return new PgStatsReader($app->make(ConnectionRegistryInterface::class));
+        });
+        $this->app->singleton(RowCounter::class, function ($app) {
+            return new RowCounter($app->make(TableInspector::class), $app->make(SafeQueryPolicy::class));
+        });
+
         $this->app->singleton(ConnectionRegistryInterface::class, function ($app) {
-            $registry = new ConnectionRegistry('default');
+            $registry = new ConnectionRegistry(
+                'default',
+                $app->make(SafeQueryPolicy::class),
+                $app->make(LoggerInterface::class)
+            );
             $registry->register('default', new LaravelDatabaseAdapter($app['db']->connection()));
 
             /** @var DumpConfig $dumpConfig */
@@ -208,7 +227,12 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
         });
 
         $this->app->singleton(ServiceTableFilter::class);
-        $this->app->singleton(TableInspector::class);
+        $this->app->singleton(TableInspector::class, function ($app) {
+            return new TableInspector(
+                $app->make(ConnectionRegistryInterface::class),
+                $app->make(PgStatsReader::class)
+            );
+        });
         $this->app->singleton(ForeignKeyInspector::class);
         $this->app->singleton(TopologicalSorter::class);
         $this->app->singleton(TableDependencyResolver::class);
@@ -227,7 +251,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
             $dumpConfig = $app->make(DumpConfig::class);
             return new PatternDetector(
                 $app->make(ConnectionRegistryInterface::class),
-                $dumpConfig->getSampleSize()
+                $dumpConfig->getSampleSize(),
+                $app->make(SafeQueryPolicy::class)
             );
         });
 
@@ -282,7 +307,9 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
             $dumpConfig = $app->make(DumpConfig::class);
             return new ColumnStatisticsInspector(
                 $app->make(ConnectionRegistryInterface::class),
-                $dumpConfig->getSampleSize()
+                $dumpConfig->getSampleSize(),
+                $app->make(SafeQueryPolicy::class),
+                $app->make(PgStatsReader::class)
             );
         });
         $this->app->singleton(CriteriaSuggester::class);
@@ -306,7 +333,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(CriteriaSuggester::class),
                 $app->make(AnalysisReportWriter::class),
                 $app['config']->get('database-dumps.project_dir'),
-                $app->make(DbdumpConfigStore::class)
+                $app->make(DbdumpConfigStore::class),
+                $app->make(RowCounter::class)
             );
         });
 
@@ -343,7 +371,9 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(LoggerInterface::class),
                 $app['config']->get('database-dumps.project_dir'),
                 $app->make(CodeHintScanner::class),
-                $app->make(DbdumpConfigStore::class)
+                $app->make(DbdumpConfigStore::class),
+                $app->make(RowCounter::class),
+                $app->make(PgStatsReader::class)
             );
         });
         $this->app->singleton(AnalysisIngestor::class, function ($app) {
@@ -447,7 +477,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(FakerInterface::class),
                 $app->make(DumpConfig::class),
                 $app->make(ProductionGuard::class),
-                $app->make(DbdumpConfigStore::class)
+                $app->make(DbdumpConfigStore::class),
+                $app->make(SafeQueryPolicy::class)
             );
         });
 
@@ -464,7 +495,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app['config']->get('database-dumps.project_dir'),
                 $app->make(TableDependencyResolver::class),
                 $app->make(SchemaValidator::class),
-                $app->make(DbdumpConfigStore::class)
+                $app->make(DbdumpConfigStore::class),
+                $app->make(SafeQueryPolicy::class)
             );
         });
     }

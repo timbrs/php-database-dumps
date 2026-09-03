@@ -6,6 +6,7 @@ use Symfony\Component\Config\Definition\Builder\TreeBuilder;
 use Symfony\Component\Config\Definition\ConfigurationInterface;
 use Timbrs\DatabaseDumps\Config\AiConfig;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
+use Timbrs\DatabaseDumps\Service\Db\SafeQueryPolicy;
 
 /**
  * Конфигурация bundle — корневой ключ "database_dumps:" в config/packages/database_dumps.yaml.
@@ -51,6 +52,27 @@ class Configuration implements ConfigurationInterface
                         ->integerNode('timeout')->defaultValue(AiConfig::DEFAULT_TIMEOUT)->min(1)->end()
                         // Отключать проверку TLS только для внутренних эндпоинтов с корпоративным CA.
                         ->booleanNode('verify_ssl')->defaultTrue()->end()
+                    ->end()
+                ->end()
+
+                // Бережный доступ к БД (SafeQueryPolicy): таймауты сессии по профилю,
+                // бюджет запросов разведки и порог, выше которого таблицу не сканируют целиком.
+                // Времена — в миллисекундах; 0 — без ограничения.
+                ->arrayNode('db')
+                    ->addDefaultsIfNotSet()
+                    ->children()
+                        ->integerNode(SafeQueryPolicy::KEY_ANALYZE_STATEMENT_TIMEOUT)
+                            ->defaultValue(SafeQueryPolicy::DEFAULT_ANALYZE_STATEMENT_TIMEOUT_MS)->min(0)->end()
+                        ->integerNode(SafeQueryPolicy::KEY_EXPORT_STATEMENT_TIMEOUT)
+                            ->defaultValue(SafeQueryPolicy::DEFAULT_EXPORT_STATEMENT_TIMEOUT_MS)->min(0)->end()
+                        ->integerNode(SafeQueryPolicy::KEY_LOCK_TIMEOUT)
+                            ->defaultValue(SafeQueryPolicy::DEFAULT_LOCK_TIMEOUT_MS)->min(0)->end()
+                        ->integerNode(SafeQueryPolicy::KEY_IDLE_IN_TRANSACTION_TIMEOUT)
+                            ->defaultValue(SafeQueryPolicy::DEFAULT_IDLE_IN_TRANSACTION_TIMEOUT_MS)->min(0)->end()
+                        ->integerNode(SafeQueryPolicy::KEY_QUERY_BUDGET)
+                            ->defaultValue(SafeQueryPolicy::DEFAULT_QUERY_BUDGET)->min(0)->end()
+                        ->integerNode(SafeQueryPolicy::KEY_MAX_SCAN_ROWS)
+                            ->defaultValue(SafeQueryPolicy::DEFAULT_MAX_SCAN_ROWS)->min(0)->end()
                     ->end()
                 ->end()
             ->end();

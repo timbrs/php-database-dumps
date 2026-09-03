@@ -6,13 +6,17 @@ use Psr\Container\ContainerInterface;
 use Timbrs\DatabaseDumps\Adapter\DoctrineDbalAdapter;
 use Timbrs\DatabaseDumps\Config\DumpConfig;
 use Timbrs\DatabaseDumps\Contract\ConnectionRegistryInterface;
+use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\ConnectionRegistry;
+use Timbrs\DatabaseDumps\Service\Db\SafeQueryPolicy;
 
 /**
  * Фабрика ConnectionRegistry для Symfony.
  *
  * Создаёт реестр подключений, резолвя Doctrine DBAL connections по именам из DumpConfig.
  * Если ожидаемое подключение отсутствует в контейнере — поднимается понятное исключение.
+ * Политика (таймауты сессии, бюджет запросов) применяется реестром лениво — при первом
+ * getConnection(), не здесь.
  */
 class ConnectionRegistryFactory
 {
@@ -22,9 +26,11 @@ class ConnectionRegistryFactory
     public static function create(
         $defaultConnection,
         DumpConfig $dumpConfig,
-        ContainerInterface $container
+        ContainerInterface $container,
+        SafeQueryPolicy $policy = null,
+        LoggerInterface $logger = null
     ): ConnectionRegistryInterface {
-        $registry = new ConnectionRegistry('default');
+        $registry = new ConnectionRegistry('default', $policy, $logger);
         $registry->register('default', new DoctrineDbalAdapter($defaultConnection));
 
         foreach (array_keys($dumpConfig->getConnectionConfigs()) as $connName) {
