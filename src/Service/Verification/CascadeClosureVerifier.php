@@ -4,24 +4,30 @@ namespace Timbrs\DatabaseDumps\Service\Verification;
 
 use Timbrs\DatabaseDumps\Config\TableConfig;
 use Timbrs\DatabaseDumps\Service\Validation\Finding;
+use Timbrs\DatabaseDumps\Service\Verification\Sink\CountingSetSink;
 
 /**
- * Проверка замкнутости каскадов ПО ФАКТУ ВЫГРУЗКИ.
+ * Проверка замкнутости связей ПО ФАКТУ ВЫГРУЗКИ.
  *
  * Валидатор проверяет правила, check-criteria — исполнимость критериев в БД.
  * Ни то, ни другое не отвечает на вопрос «а что реально легло в дамп»: если
  * cascade-условие по какой-то причине не доехало до запроса, ребёнок наберётся
  * просто по limit, файлы будут на месте, и обе проверки останутся зелёными.
  *
- * Здесь для каждого ребра cascade_from берутся выгруженные значения fk_column
- * ребёнка и parent_column родителя, и считается доля сирот — строк, чей родитель
- * в дамп не попал. При исправном каскаде она равна нулю по построению, поэтому
- * любое ненулевое значение означает, что ограничение не сработало.
+ * Рёбра берутся из двух источников: cascade_from конфига и внешние ключи БД из слепка
+ * схемы. Сегодня в базе без констрейнтов второй список пуст, но появись FK — связь
+ * проверяется без правки конфига, и сирота по FK-ребру всегда ошибка: импорт с
+ * констрейнтом её не примет.
+ *
+ * Для каждого ребра берутся выгруженные значения fk_column ребёнка и parent_column
+ * родителя, и считается доля сирот — строк, чей родитель в дамп не попал. При исправном
+ * каскаде она равна нулю по построению, поэтому любое ненулевое значение означает, что
+ * ограничение не сработало.
  *
  * Читаются только две колонки на ребро: содержимое остальных (в том числе ПД)
  * не покидает файл.
  */
-class CascadeClosureVerifier
+class CascadeClosureVerifier implements DumpVerifierInterface
 {
     /** Сироты: строки ребёнка ссылаются на родителя, которого нет в выгрузке. */
     public const CODE_ORPHANS = 'V-1';
@@ -29,17 +35,32 @@ class CascadeClosureVerifier
     /** Таблица есть в конфиге, файла дампа нет. */
     public const CODE_NO_DUMP = 'V-2';
 
-    /** Родитель каскада не выгружен — связь проверить нечем. */
+    /** Родитель связи не выгружен — связь проверить нечем. */
     public const CODE_NO_PARENT_DUMP = 'V-3';
 
-    /** Колонка каскада отсутствует в дампе. */
+    /** Колонка связи отсутствует в дампе. */
     public const CODE_COLUMN_MISSING = 'V-4';
 
-    /** Больше этого числа значений родителя в память не берём. */
+    public const ORIGIN_CASCADE = 'cascade_from';
+    public const ORIGIN_DB_FK = 'db_fk';
+
+    /** Больше этого числа различных значений в множество не берём. */
     private const MAX_PARENT_VALUES = 2000000;
 
     /** @var DumpValueReader */
     private $reader;
+
+    /** @var array<int, array<string, mixed>> */
+    private $edges = [];
+
+    /** @var array<int, string> индекс ребра => причина пропуска */
+    private $skipped = [];
+
+    /** @var array<int, array{child: CountingSetSink, parent: CountingSetSink, child_path: string, parent_path: string}> */
+    private $planned = [];
+
+    /** @var array<string, int> */
+    private $stats = ['edges' => 0, 'checked' => 0, 'skipped' => 0, 'orphan_rows' => 0];
 
     public function __construct(DumpValueReader $reader)
     {
@@ -47,6 +68,8 @@ class CascadeClosureVerifier
     }
 
     /**
+     * Самостоятельный прогон без остальных проверок (обратная совместимость).
+     *
      * @param array<int, TableConfig> $tables Разрешённые конфиги таблиц (TableConfigResolver::resolveAll)
      * @param string $dumpsRoot Абсолютный путь к каталогу dumps
      *
@@ -54,244 +77,271 @@ class CascadeClosureVerifier
      */
     public function verify(array $tables, string $dumpsRoot): array
     {
-        $index = [];
-        foreach ($tables as $config) {
-            $index[$config->getFullTableName()] = $config;
-        }
-
-        $findings = [];
-        $edges = 0;
-        $checked = 0;
-        $skipped = 0;
-        $orphanRows = 0;
-        $missingDumpReported = [];
-
-        foreach ($tables as $config) {
-            $cascade = $config->getCascadeFrom();
-            if (empty($cascade)) {
-                continue;
-            }
-
-            $childPath = $this->dumpPath($dumpsRoot, $config);
-            if (!is_file($childPath)) {
-                $key = $config->getFullTableName();
-                if (!isset($missingDumpReported[$key])) {
-                    $missingDumpReported[$key] = true;
-                    $findings[] = Finding::warning(
-                        self::CODE_NO_DUMP,
-                        sprintf('%s есть в конфиге, но файла дампа нет — таблица не выгружалась', $key),
-                        $config->getSchema(),
-                        $config->getTable()
-                    );
-                }
-                $skipped += count($cascade);
-                $edges += count($cascade);
-                continue;
-            }
-
-            foreach ($cascade as $i => $entry) {
-                ++$edges;
-                $result = $this->verifyEdge($config, $entry, $i, $childPath, $dumpsRoot, $index);
-                if ($result['finding'] !== null) {
-                    $findings[] = $result['finding'];
-                }
-                if ($result['checked']) {
-                    ++$checked;
-                    $orphanRows += $result['orphans'];
-                } else {
-                    ++$skipped;
-                }
-            }
-        }
+        $input = new DumpVerificationInput($dumpsRoot, $tables);
+        $store = new DumpColumnStore($this->reader);
+        $this->plan($input, $store);
+        $store->load();
+        $findings = $this->check($input, $store);
 
         return [
             'findings' => $findings,
-            'edges' => $edges,
-            'checked' => $checked,
-            'skipped' => $skipped,
-            'orphan_rows' => $orphanRows,
+            'edges' => $this->stats['edges'],
+            'checked' => $this->stats['checked'],
+            'skipped' => $this->stats['skipped'],
+            'orphan_rows' => $this->stats['orphan_rows'],
         ];
     }
 
-    /**
-     * @param array{parent: string, fk_column: string, parent_column: string} $entry
-     * @param array<string, TableConfig> $index
-     *
-     * @return array{finding: Finding|null, checked: bool, orphans: int}
-     */
-    private function verifyEdge(
-        TableConfig $config,
-        array $entry,
-        int $position,
-        string $childPath,
-        string $dumpsRoot,
-        array $index
-    ): array {
-        // Полноту ключей гарантирует TableConfig::validateCascadeFrom — до сюда
-        // неполная запись не доходит.
-        $parentKey = $entry['parent'];
-        $fkColumn = $entry['fk_column'];
-        $parentColumn = $entry['parent_column'];
-        $schema = $config->getSchema();
-        $table = $config->getTable();
+    public function plan(DumpVerificationInput $input, DumpColumnStore $store): void
+    {
+        $this->edges = $this->collectEdges($input);
+        $this->skipped = [];
+        $this->planned = [];
+        $this->stats = ['edges' => count($this->edges), 'checked' => 0, 'skipped' => 0, 'orphan_rows' => 0];
 
-        $parentConfig = isset($index[$parentKey]) ? $index[$parentKey] : null;
-        if ($parentConfig === null) {
-            // Мёртвого родителя ловит валидатор (G-1) — здесь просто нечего сверять.
-            return ['finding' => null, 'checked' => false, 'orphans' => 0];
-        }
-
-        // У родителя в full_export выгружены все строки: замкнутость выполняется
-        // по построению, а набор id может быть в миллионы значений.
-        if ($parentConfig->isFullExport()) {
-            return ['finding' => null, 'checked' => false, 'orphans' => 0];
-        }
-
-        $parentPath = $this->dumpPath($dumpsRoot, $parentConfig);
-        if (!is_file($parentPath)) {
-            return [
-                'finding' => Finding::warning(
-                    self::CODE_NO_PARENT_DUMP,
-                    sprintf(
-                        'cascade_from[%d]: родитель %s не выгружен, связь %s.%s.%s проверить нечем',
-                        $position,
-                        $parentKey,
-                        $schema,
-                        $table,
-                        $fkColumn
-                    ),
-                    $schema,
-                    $table,
-                    $fkColumn
-                ),
-                'checked' => false,
-                'orphans' => 0,
-            ];
-        }
-
-        $child = $this->reader->readColumn($childPath, $fkColumn);
-        if (!$child['found']) {
-            return [
-                'finding' => Finding::error(
-                    self::CODE_COLUMN_MISSING,
-                    sprintf(
-                        'cascade_from[%d]: колонки "%s" нет в выгрузке %s.%s — каскад от %s не мог сработать',
-                        $position,
-                        $fkColumn,
-                        $schema,
-                        $table,
-                        $parentKey
-                    ),
-                    $schema,
-                    $table,
-                    $fkColumn
-                ),
-                'checked' => false,
-                'orphans' => 0,
-            ];
-        }
-
-        $parent = $this->reader->readColumn($parentPath, $parentColumn);
-        if (!$parent['found']) {
-            return [
-                'finding' => Finding::error(
-                    self::CODE_COLUMN_MISSING,
-                    sprintf(
-                        'cascade_from[%d]: колонки "%s" нет в выгрузке родителя %s — сверять %s.%s.%s не с чем',
-                        $position,
-                        $parentColumn,
-                        $parentKey,
-                        $schema,
-                        $table,
-                        $fkColumn
-                    ),
-                    $schema,
-                    $table,
-                    $fkColumn
-                ),
-                'checked' => false,
-                'orphans' => 0,
-            ];
-        }
-
-        if (count($parent['values']) > self::MAX_PARENT_VALUES) {
-            return ['finding' => null, 'checked' => false, 'orphans' => 0];
-        }
-
-        $allowed = [];
-        foreach ($parent['values'] as $value) {
-            if ($value !== null) {
-                $allowed[$value] = true;
-            }
-        }
-
-        $total = 0;
-        $nulls = 0;
-        $orphans = 0;
-        $examples = [];
-        foreach ($child['values'] as $value) {
-            ++$total;
-            if ($value === null) {
-                ++$nulls;
+        foreach ($this->edges as $n => $edge) {
+            /** @var TableConfig $child */
+            $child = $edge['config'];
+            $childPath = $input->pathFor($child);
+            if (!is_file($childPath)) {
+                $this->skipped[$n] = 'no_dump';
                 continue;
             }
-            if (!isset($allowed[$value])) {
-                ++$orphans;
-                if (count($examples) < 3 && !in_array($value, $examples, true)) {
-                    $examples[] = $value;
+
+            $parentConfig = $input->tableByKey($edge['parent']);
+            if ($parentConfig === null) {
+                $this->skipped[$n] = 'parent_not_in_config';
+                continue;
+            }
+            // У родителя в full_export выгружены все строки: замкнутость выполняется
+            // по построению, а набор id может быть в миллионы значений.
+            if ($parentConfig->isFullExport()) {
+                $this->skipped[$n] = 'parent_full';
+                continue;
+            }
+            $parentPath = $input->pathFor($parentConfig);
+            if (!is_file($parentPath)) {
+                $this->skipped[$n] = 'parent_no_dump';
+                continue;
+            }
+
+            $childSink = new CountingSetSink(self::MAX_PARENT_VALUES);
+            $parentSink = new CountingSetSink(self::MAX_PARENT_VALUES);
+            $store->request($childPath, $edge['fk_column'], $childSink);
+            $store->request($parentPath, $edge['parent_column'], $parentSink);
+            $this->planned[$n] = [
+                'child' => $childSink,
+                'parent' => $parentSink,
+                'child_path' => $childPath,
+                'parent_path' => $parentPath,
+            ];
+        }
+    }
+
+    public function check(DumpVerificationInput $input, DumpColumnStore $store): array
+    {
+        $findings = [];
+        $noDumpReported = [];
+
+        foreach ($this->edges as $n => $edge) {
+            /** @var TableConfig $child */
+            $child = $edge['config'];
+            $schema = $child->getSchema();
+            $table = $child->getTable();
+            $label = $this->edgeLabel($edge);
+
+            if (isset($this->skipped[$n])) {
+                $this->stats['skipped']++;
+                switch ($this->skipped[$n]) {
+                    case 'no_dump':
+                        $key = $child->getFullTableName();
+                        if (!isset($noDumpReported[$key])) {
+                            $noDumpReported[$key] = true;
+                            $findings[] = Finding::warning(
+                                self::CODE_NO_DUMP,
+                                sprintf('%s есть в конфиге, но файла дампа нет — таблица не выгружалась', $key),
+                                $schema,
+                                $table
+                            );
+                        }
+                        break;
+                    case 'parent_no_dump':
+                        $findings[] = Finding::warning(
+                            self::CODE_NO_PARENT_DUMP,
+                            sprintf('%s: родитель %s не выгружен, связь %s.%s.%s проверить нечем', $label, $edge['parent'], $schema, $table, $edge['fk_column']),
+                            $schema,
+                            $table,
+                            $edge['fk_column']
+                        );
+                        break;
+                    case 'parent_not_in_config':
+                        // Мёртвого родителя в cascade_from ловит валидатор (G-1). Родитель по FK,
+                        // которого нет в конфиге, — таблица, на которую ссылаются, но не выгружают.
+                        if ($edge['origin'] === self::ORIGIN_DB_FK) {
+                            $findings[] = Finding::warning(
+                                self::CODE_NO_PARENT_DUMP,
+                                sprintf('%s: таблица %s не выгружается вовсе, а %s.%s.%s ссылается на неё внешним ключом', $label, $edge['parent'], $schema, $table, $edge['fk_column']),
+                                $schema,
+                                $table,
+                                $edge['fk_column']
+                            );
+                        }
+                        break;
+                    default:
+                        break;
+                }
+                continue;
+            }
+
+            $plan = $this->planned[$n];
+            if (!$store->found($plan['child_path'], $edge['fk_column'])) {
+                $this->stats['skipped']++;
+                $findings[] = Finding::error(
+                    self::CODE_COLUMN_MISSING,
+                    sprintf('%s: колонки "%s" нет в выгрузке %s.%s — связь с %s не могла сработать', $label, $edge['fk_column'], $schema, $table, $edge['parent']),
+                    $schema,
+                    $table,
+                    $edge['fk_column']
+                );
+                continue;
+            }
+            if (!$store->found($plan['parent_path'], $edge['parent_column'])) {
+                $this->stats['skipped']++;
+                $findings[] = Finding::error(
+                    self::CODE_COLUMN_MISSING,
+                    sprintf('%s: колонки "%s" нет в выгрузке родителя %s — сверять %s.%s.%s не с чем', $label, $edge['parent_column'], $edge['parent'], $schema, $table, $edge['fk_column']),
+                    $schema,
+                    $table,
+                    $edge['fk_column']
+                );
+                continue;
+            }
+
+            /** @var CountingSetSink $childSink */
+            $childSink = $plan['child'];
+            /** @var CountingSetSink $parentSink */
+            $parentSink = $plan['parent'];
+            if ($parentSink->isCapped() || $childSink->isCapped()) {
+                $this->stats['skipped']++;
+                continue;
+            }
+
+            $orphans = 0;
+            $orphanValues = 0;
+            foreach ($childSink->counts() as $value => $count) {
+                if (!$parentSink->has((string) $value)) {
+                    $orphans += $count;
+                    $orphanValues++;
                 }
             }
-        }
+            $this->stats['checked']++;
+            $this->stats['orphan_rows'] += $orphans;
 
-        if ($orphans === 0) {
-            return ['finding' => null, 'checked' => true, 'orphans' => 0];
-        }
+            if ($orphans === 0) {
+                continue;
+            }
 
-        $linked = $total - $nulls;
-        $rate = $linked > 0 ? round($orphans * 100 / $linked, 1) : 100.0;
+            $linked = $childSink->nonNull();
+            $rate = $linked > 0 ? round($orphans * 100 / $linked, 1) : 100.0;
 
-        return [
-            'finding' => Finding::error(
+            $findings[] = Finding::error(
                 self::CODE_ORPHANS,
                 sprintf(
-                    'cascade_from[%d] от %s: %d из %d связанных строк ссылаются на родителя, '
-                    . 'которого нет в выгрузке (%s%%). Каскад не ограничил выборку. '
-                    . 'Значения без родителя, например: %s',
-                    $position,
-                    $parentKey,
+                    '%s: %d из %d связанных строк ссылаются на родителя %s, которого нет в выгрузке (%s%%; %d разных значений). %s',
+                    $label,
                     $orphans,
                     $linked,
+                    $edge['parent'],
                     $rate,
-                    implode(', ', $examples)
+                    $orphanValues,
+                    $edge['origin'] === self::ORIGIN_DB_FK
+                        ? 'Импорт в базу с этим внешним ключом такой дамп не примет.'
+                        : 'Каскад не ограничил выборку.'
                 ),
                 $schema,
                 $table,
-                $fkColumn,
+                $edge['fk_column'],
                 false,
                 [
-                    'parent' => $parentKey,
-                    'fk_column' => $fkColumn,
-                    'parent_column' => $parentColumn,
-                    'child_rows' => $total,
-                    'child_nulls' => $nulls,
+                    'origin' => $edge['origin'],
+                    'parent' => $edge['parent'],
+                    'fk_column' => $edge['fk_column'],
+                    'parent_column' => $edge['parent_column'],
+                    'child_rows' => $childSink->total(),
+                    'child_nulls' => $childSink->nulls(),
                     'orphans' => $orphans,
+                    'orphan_values' => $orphanValues,
                     'orphan_rate' => $rate,
-                    'parent_rows' => count($parent['values']),
+                    'parent_rows' => $parentSink->total(),
                 ]
-            ),
-            'checked' => true,
-            'orphans' => $orphans,
-        ];
-    }
-
-    private function dumpPath(string $dumpsRoot, TableConfig $config): string
-    {
-        $connection = $config->getConnectionName();
-        $prefix = rtrim($dumpsRoot, '/\\');
-        if ($connection !== null) {
-            $prefix .= '/' . $connection;
+            );
         }
 
-        return $prefix . '/' . $config->getSchema() . '/' . $config->getTable() . '.sql';
+        return $findings;
+    }
+
+    public function stats(): array
+    {
+        return $this->stats;
+    }
+
+    /**
+     * Рёбра из cascade_from и внешних ключей слепка; FK, уже описанный в cascade_from
+     * (тот же родитель и та же колонка), второй раз не берётся.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function collectEdges(DumpVerificationInput $input): array
+    {
+        $edges = [];
+        $inventory = $input->getInventory();
+
+        foreach ($input->getTables() as $config) {
+            $seen = [];
+            foreach ($config->getCascadeFrom() ?? [] as $i => $entry) {
+                // Полноту ключей гарантирует TableConfig::validateCascadeFrom — до сюда
+                // неполная запись не доходит.
+                $edges[] = [
+                    'config' => $config,
+                    'parent' => $entry['parent'],
+                    'fk_column' => $entry['fk_column'],
+                    'parent_column' => $entry['parent_column'],
+                    'origin' => self::ORIGIN_CASCADE,
+                    'position' => $i,
+                ];
+                $seen[$entry['parent'] . '|' . $entry['fk_column']] = true;
+            }
+
+            if ($inventory === null) {
+                continue;
+            }
+            foreach ($inventory->foreignKeys($config->getSchema(), $config->getTable()) as $fk) {
+                if (isset($seen[$fk['references_table'] . '|' . $fk['column']])) {
+                    continue;
+                }
+                $edges[] = [
+                    'config' => $config,
+                    'parent' => $fk['references_table'],
+                    'fk_column' => $fk['column'],
+                    'parent_column' => $fk['references_column'],
+                    'origin' => self::ORIGIN_DB_FK,
+                    'position' => null,
+                ];
+            }
+        }
+
+        return $edges;
+    }
+
+    /**
+     * @param array<string, mixed> $edge
+     */
+    private function edgeLabel(array $edge): string
+    {
+        if ($edge['origin'] === self::ORIGIN_DB_FK) {
+            return sprintf('FK в БД (%s → %s.%s)', $edge['fk_column'], $edge['parent'], $edge['parent_column']);
+        }
+
+        return sprintf('cascade_from[%d] от %s', (int) $edge['position'], $edge['parent']);
     }
 }

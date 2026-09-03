@@ -724,6 +724,47 @@ php artisan dbdump:validate --format=json --out=docker/database/analysis/finding
 
 Проверяется только основное подключение; секция `connections:` в аудит не входит.
 
+## Проверка выгруженных дампов (verify-dump) и отчёт импорта
+
+`verify-dump` смотрит на то, что реально легло в `{data_dir}/dumps/`, — `validate` и
+`check-criteria` туда не заглядывают. К БД не подключается; каждый файл читается один раз
+для всех проверок, наружу уходят только счётчики и имена колонок — значений данных в отчёте
+нет.
+
+```bash
+php bin/console app:dbdump:verify-dump
+php bin/console app:dbdump:verify-dump --format=json --out=docker/database/analysis/verify.json
+php bin/console app:dbdump:verify-dump -s persons --inventory=docker/database/analysis/schema_inventory.json
+```
+
+Опции: `-s|--schema`, `-c|--connection`, `--inventory` (слепок схемы, по умолчанию
+`{data_dir}/analysis/schema_inventory.json`; без слепка проверки по нему пропускаются с
+пометкой в отчёте), `--format=text|json`, `--out=PATH`. **Код возврата — `1` при ошибках.**
+
+| код | уровень | что нашли |
+|---|---|---|
+| `V-1` | error | строки ребёнка ссылаются на родителя, которого нет в выгрузке, — каскад не ограничил выборку; для ребра по FK из БД: импорт с констрейнтом такой дамп не примет |
+| `V-2` | warning | таблица есть в конфиге, файла дампа нет |
+| `V-3` | warning | родитель связи не выгружен (или FK ссылается на таблицу вне конфига) — сверять нечем |
+| `V-4` | error | колонки связи нет в дампе |
+| `V-5` | warning | покрытие значений: кодов/категорий колонки в дампе меньше, чем в слепке; в подсказке — какие коды отсутствуют (`codes` из `pg_stats` — только частые значения, поэтому не error) |
+| `V-7` | error / warning | колонка без `faker`, а значения выглядят как e-mail, телефон или ФИО (error); имя колонки говорит о ПД, а значений для проверки по содержимому мало (warning) |
+| `V-8` | error / warning | строк больше `limit` или суммы квот `sample.criteria` (error); `full_export` расходится со слепком (с допуском 10 %, если размер там — оценка) или дамп пуст при непустой таблице (warning) |
+
+Рёбра для `V-1` — объединение `cascade_from` и внешних ключей из слепка (`foreign_keys`):
+сегодня в базе без констрейнтов второй список пуст, но появись FK — связь проверяется без
+правки конфига.
+
+`import` возвращает отчёт с теми же правилами игры: **ошибки в нём дают код возврата `1`,
+даже если транзакция прошла**; `--out=PATH` пишет отчёт в JSON.
+
+| код | уровень | что нашли |
+|---|---|---|
+| `I-1` | error | таблица пропущена: колонки дампа расходятся со схемой БД (с `--ignore-schema-mismatch` — warning, таблица залита) |
+| `I-2` | error | после заливки в таблице не столько строк, сколько в файле дампа |
+| `I-3` | warning | sequence отстаёт от максимума колонки (PostgreSQL) — первый INSERT приложения упрётся в дубликат ключа |
+| `I-4` | error | внешний ключ нарушен — в дампе строки без родителя; отложенные констрейнты проверяются `SET CONSTRAINTS ALL IMMEDIATE` внутри транзакции |
+
 ## Настройка Symfony
 
 ### Регистрация бандла
@@ -927,6 +968,13 @@ php bin/console app:dbdump:validate --fix
 
 # Проверить sample.criteria на живой БД и починить падающие через opencode
 php bin/console app:dbdump:check-criteria
+
+# Проверить, что реально легло в dumps/: связи, покрытие значений, ПД без faker, число строк
+php bin/console app:dbdump:verify-dump
+php bin/console app:dbdump:verify-dump --format=json --out=docker/database/analysis/verify.json
+
+# Импорт с отчётом (I-1…I-4) в файл
+php bin/console app:dbdump:import --out=docker/database/analysis/import.json
 ```
 
 ## Настройка Laravel
@@ -1843,6 +1891,47 @@ php bin/console app:dbdump:prepare-config schema=billing
 php bin/console app:dbdump:prepare-config table=public.users
 php bin/console app:dbdump:prepare-config new --no-cascade --no-faker
 ```
+
+## Verifying exported dumps (verify-dump) and the import report
+
+`verify-dump` inspects what actually landed in `{data_dir}/dumps/` — neither `validate` nor
+`check-criteria` looks there. It never connects to the database: every dump file is read once
+for all checks, and only counters and column names leave the file — no data values appear in
+the report.
+
+```bash
+php bin/console app:dbdump:verify-dump
+php bin/console app:dbdump:verify-dump --format=json --out=docker/database/analysis/verify.json
+php bin/console app:dbdump:verify-dump -s persons --inventory=docker/database/analysis/schema_inventory.json
+```
+
+Options: `-s|--schema`, `-c|--connection`, `--inventory` (schema inventory, default
+`{data_dir}/analysis/schema_inventory.json`; without it inventory-based checks are skipped and
+the report says so), `--format=text|json`, `--out=PATH`. **Exit code is `1` on errors.**
+
+| code | level | finding |
+|---|---|---|
+| `V-1` | error | child rows reference a parent that is not in the export — the cascade did not restrict the selection; for an edge coming from a DB foreign key the import would reject such a dump |
+| `V-2` | warning | table is configured, dump file is missing |
+| `V-3` | warning | the parent of a relation was not exported (or a FK points to a table outside the config) — nothing to compare with |
+| `V-4` | error | relation column is missing from the dump |
+| `V-5` | warning | value coverage: fewer codes/categories in the dump than in the inventory; the suggestion names the missing codes (`codes` from `pg_stats` are only the frequent values, hence not an error) |
+| `V-7` | error / warning | a column without `faker` whose values look like e-mails, phones or full names (error); a PII-named column with too few values to judge by content (warning) |
+| `V-8` | error / warning | more rows than `limit` or the sum of `sample.criteria` quotas (error); `full_export` disagrees with the inventory (10 % tolerance when the size there is an estimate) or the dump is empty while the table is not (warning) |
+
+Edges for `V-1` are the union of `cascade_from` and the inventory `foreign_keys`: in a
+constraint-less database the second list is empty today, but once FKs appear the relation is
+checked without touching the config.
+
+`import` returns a report with the same rules: **errors in it produce exit code `1` even when the
+transaction succeeded**; `--out=PATH` writes the report as JSON.
+
+| code | level | finding |
+|---|---|---|
+| `I-1` | error | table skipped: dump columns differ from the DB schema (`--ignore-schema-mismatch` downgrades it to a warning and loads the table) |
+| `I-2` | error | after loading, the table holds a different number of rows than the dump file |
+| `I-3` | warning | a sequence lags behind the column maximum (PostgreSQL) — the application's first INSERT will hit a duplicate key |
+| `I-4` | error | foreign key violated — rows without a parent; deferred constraints are forced with `SET CONSTRAINTS ALL IMMEDIATE` inside the transaction |
 
 ## Laravel Setup
 

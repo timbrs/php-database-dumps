@@ -4,8 +4,12 @@ namespace Timbrs\DatabaseDumps\Tests\Unit\Service\Verification;
 
 use PHPUnit\Framework\TestCase;
 use Timbrs\DatabaseDumps\Config\TableConfig;
+use Timbrs\DatabaseDumps\Service\Validation\InventoryReader;
 use Timbrs\DatabaseDumps\Service\Verification\CascadeClosureVerifier;
 use Timbrs\DatabaseDumps\Service\Verification\DumpValueReader;
+use Timbrs\DatabaseDumps\Service\Verification\DumpVerificationInput;
+use Timbrs\DatabaseDumps\Service\Verification\DumpVerificationRunner;
+use Timbrs\DatabaseDumps\Tests\Support\InMemoryFileSystem;
 
 class CascadeClosureVerifierTest extends TestCase
 {
@@ -132,6 +136,94 @@ class CascadeClosureVerifierTest extends TestCase
 
         self::assertSame([], $result['findings']);
         self::assertSame(1, $result['skipped']);
+    }
+
+    public function testForeignKeyFromInventoryIsCheckedWithoutCascadeFrom(): void
+    {
+        $this->dump('persons', 'core_id', ['10', '11', '12']);
+        $this->dump('persons_additional', 'person_id', ['1', '2', '99']);
+        $childWithoutCascade = new TableConfig('persons', 'persons_additional', 100);
+
+        $result = $this->runWithInventory([$this->parent(), $childWithoutCascade], $this->inventoryWithFk('persons.persons'));
+
+        self::assertCount(1, $result['findings']);
+        $finding = $result['findings'][0];
+        self::assertSame(CascadeClosureVerifier::CODE_ORPHANS, $finding->getCode());
+        self::assertSame('error', $finding->getSeverity());
+        self::assertSame(CascadeClosureVerifier::ORIGIN_DB_FK, $finding->getSuggestion()['origin']);
+        self::assertStringContainsString('внешним ключом', $finding->getMessage());
+        self::assertSame(1, $result['stats']['CascadeClosureVerifier']['edges']);
+    }
+
+    public function testForeignKeyAlreadyDescribedInCascadeFromIsOneEdge(): void
+    {
+        $this->dump('persons', 'core_id', ['10', '11', '12']);
+        $this->dump('persons_additional', 'person_id', ['1', '2', '3']);
+
+        $result = $this->runWithInventory([$this->parent(), $this->child()], $this->inventoryWithFk('persons.persons'));
+
+        self::assertSame([], $result['findings']);
+        self::assertSame(1, $result['stats']['CascadeClosureVerifier']['edges']);
+        self::assertSame(1, $result['stats']['CascadeClosureVerifier']['checked']);
+    }
+
+    public function testForeignKeyToTableOutsideConfigIsAWarning(): void
+    {
+        $this->dump('persons_additional', 'person_id', ['1']);
+        $childWithoutCascade = new TableConfig('persons', 'persons_additional', 100);
+
+        $result = $this->runWithInventory([$childWithoutCascade], $this->inventoryWithFk('persons.persons'));
+
+        self::assertCount(1, $result['findings']);
+        self::assertSame(CascadeClosureVerifier::CODE_NO_PARENT_DUMP, $result['findings'][0]->getCode());
+        self::assertSame('warning', $result['findings'][0]->getSeverity());
+    }
+
+    /**
+     * @param array<int, TableConfig> $tables
+     *
+     * @return array{findings: array<int, \Timbrs\DatabaseDumps\Service\Validation\Finding>, stats: array<string, array<string, int>>}
+     */
+    private function runWithInventory(array $tables, InventoryReader $inventory): array
+    {
+        $runner = new DumpVerificationRunner(new DumpValueReader(), [$this->verifier]);
+
+        return $runner->run(new DumpVerificationInput($this->root, $tables, $inventory));
+    }
+
+    private function inventoryWithFk(string $parent): InventoryReader
+    {
+        $path = '/proj/database/analysis/schema_inventory.json';
+        $json = json_encode([
+            'generated_at' => '2026-01-15T00:00:00Z',
+            'database_platform' => 'postgresql',
+            'connection' => 'default',
+            'schemas' => [
+                'persons' => [
+                    'tables' => [
+                        'persons' => [
+                            'row_count' => 3,
+                            'columns' => [['name' => 'id', 'type' => 'bigint', 'nullable' => false]],
+                            'foreign_keys' => [],
+                            'profiles' => [],
+                        ],
+                        'persons_additional' => [
+                            'row_count' => 3,
+                            'columns' => [
+                                ['name' => 'id', 'type' => 'bigint', 'nullable' => false],
+                                ['name' => 'person_id', 'type' => 'bigint', 'nullable' => true],
+                            ],
+                            'foreign_keys' => [
+                                ['column' => 'person_id', 'references_table' => $parent, 'references_column' => 'id'],
+                            ],
+                            'profiles' => [],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        return new InventoryReader(new InMemoryFileSystem([$path => (string) $json]), $path);
     }
 
     private function parent(): TableConfig

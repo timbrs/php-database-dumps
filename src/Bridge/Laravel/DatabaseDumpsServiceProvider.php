@@ -72,6 +72,7 @@ use Timbrs\DatabaseDumps\Service\Importer\TransactionManager;
 use Timbrs\DatabaseDumps\Service\Parser\SqlParser;
 use Timbrs\DatabaseDumps\Service\Parser\StatementSplitter;
 use Timbrs\DatabaseDumps\Service\Security\ProductionGuard;
+use Timbrs\DatabaseDumps\Service\Verification\DumpValueReader;
 use Timbrs\DatabaseDumps\Util\EnvFileWriter;
 use Timbrs\DatabaseDumps\Service\Validation\AuditFixer;
 use Timbrs\DatabaseDumps\Service\Validation\ConfigAuditor;
@@ -496,7 +497,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(TableDependencyResolver::class),
                 $app->make(SchemaValidator::class),
                 $app->make(DbdumpConfigStore::class),
-                $app->make(SafeQueryPolicy::class)
+                $app->make(SafeQueryPolicy::class),
+                new DumpValueReader()
             );
         });
     }

@@ -188,6 +188,16 @@ class InventoryReader
     }
 
     /**
+     * Число строк в слепке — оценка планировщика (pg_class/pg_stat), а не точный COUNT(*).
+     * Сверять с ним дамп можно только с допуском.
+     */
+    public function rowCountEstimated(string $schema, string $table): bool
+    {
+        $entry = $this->tableEntry($schema, $table);
+        return $entry !== null && $entry['row_count_estimated'];
+    }
+
+    /**
      * Профиль колонки: distinct_count / null_fraction / categorical / data_type.
      *
      * @return array<string, mixed>|null
@@ -226,7 +236,7 @@ class InventoryReader
     }
 
     /**
-     * @return array{row_count: int|null, columns: array<string, string>, profiles: array<string, array<string, mixed>>, foreign_keys: array<int, array{column: string, references_table: string, references_column: string}>}|null
+     * @return array{row_count: int|null, columns: array<string, string>, profiles: array<string, array<string, mixed>>, foreign_keys: array<int, array{column: string, references_table: string, references_column: string}>, row_count_estimated: bool}|null
      */
     private function tableEntry(string $schema, string $table): ?array
     {
@@ -234,7 +244,7 @@ class InventoryReader
         if ($tables === null || !isset($tables[$table])) {
             return null;
         }
-        /** @var array{row_count: int|null, columns: array<string, string>, profiles: array<string, array<string, mixed>>, foreign_keys: array<int, array{column: string, references_table: string, references_column: string}>} $entry */
+        /** @var array{row_count: int|null, columns: array<string, string>, profiles: array<string, array<string, mixed>>, foreign_keys: array<int, array{column: string, references_table: string, references_column: string}>, row_count_estimated: bool} $entry */
         $entry = $tables[$table];
         return $entry;
     }
@@ -435,7 +445,7 @@ class InventoryReader
      * висит в памяти целиком.
      *
      * @param array<string, mixed> $tableData
-     * @return array{row_count: int|null, columns: array<string, string>, profiles: array<string, array<string, mixed>>, foreign_keys: array<int, array{column: string, references_table: string, references_column: string}>}
+     * @return array{row_count: int|null, columns: array<string, string>, profiles: array<string, array<string, mixed>>, foreign_keys: array<int, array{column: string, references_table: string, references_column: string}>, row_count_estimated: bool}
      */
     private function projectTable(array $tableData): array
     {

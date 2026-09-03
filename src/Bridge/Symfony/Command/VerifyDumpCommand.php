@@ -8,28 +8,43 @@ use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
 use Timbrs\DatabaseDumps\Config\DumpConfig;
+use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Service\Dumper\TableConfigResolver;
 use Timbrs\DatabaseDumps\Service\Validation\Finding;
-use Timbrs\DatabaseDumps\Service\Verification\CascadeClosureVerifier;
+use Timbrs\DatabaseDumps\Service\Validation\InventoryReader;
+use Timbrs\DatabaseDumps\Service\Verification\DumpVerificationInput;
+use Timbrs\DatabaseDumps\Service\Verification\DumpVerificationRunner;
 
 /**
  * verify-dump: проверить УЖЕ ВЫГРУЖЕННЫЕ файлы, а не правила.
  *
  * validate сверяет конфиг со слепком схемы, check-criteria проверяет, что критерии
  * исполняются в БД. Ни один из них не смотрит в dumps/. Эта команда закрывает
- * стадию «что реально легло в дамп»: пока в ней одна проверка — замкнутость
- * каскадов, см. CascadeClosureVerifier.
+ * стадию «что реально легло в дамп»:
  *
- * К базе не подключается: читает только файлы дампа, и только те колонки,
- * которые участвуют в cascade_from.
+ *   V-1..V-4  замкнутость связей — cascade_from и внешние ключи БД (CascadeClosureVerifier)
+ *   V-5       покрытие значений: все ли коды/категории из БД попали в дамп (ValueCoverageVerifier)
+ *   V-7       персональные данные в колонках без faker (PiiLeakVerifier)
+ *   V-8       число строк против limit/квот/слепка (RowCountVerifier)
+ *
+ * К базе не подключается: читает файлы дампа (каждый один раз) и слепок схемы.
+ * Значения данных в отчёт не попадают.
  */
 class VerifyDumpCommand extends Command
 {
+    private const DEFAULT_INVENTORY = 'analysis/schema_inventory.json';
+
     /** @var TableConfigResolver */
     private $resolver;
 
-    /** @var CascadeClosureVerifier */
-    private $verifier;
+    /** @var DumpVerificationRunner */
+    private $runner;
+
+    /** @var DumpConfig */
+    private $dumpConfig;
+
+    /** @var FileSystemInterface */
+    private $fileSystem;
 
     /** @var string */
     private $projectDir;
@@ -39,12 +54,16 @@ class VerifyDumpCommand extends Command
 
     public function __construct(
         TableConfigResolver $resolver,
-        CascadeClosureVerifier $verifier,
+        DumpVerificationRunner $runner,
+        DumpConfig $dumpConfig,
+        FileSystemInterface $fileSystem,
         string $projectDir,
         string $dataDir
     ) {
         $this->resolver = $resolver;
-        $this->verifier = $verifier;
+        $this->runner = $runner;
+        $this->dumpConfig = $dumpConfig;
+        $this->fileSystem = $fileSystem;
         $this->projectDir = $projectDir;
         $this->dataDir = $dataDir;
         parent::__construct();
@@ -54,9 +73,10 @@ class VerifyDumpCommand extends Command
     {
         $this
             ->setName('app:dbdump:verify-dump')
-            ->setDescription('Проверить выгруженные дампы: замкнутость каскадов (сироты без родителя)')
+            ->setDescription('Проверить выгруженные дампы: замкнутость связей, покрытие значений, ПД без faker, число строк')
             ->addOption('schema', 's', InputOption::VALUE_REQUIRED, 'Проверить только эту схему')
             ->addOption('connection', 'c', InputOption::VALUE_REQUIRED, 'Имя подключения')
+            ->addOption('inventory', null, InputOption::VALUE_REQUIRED, 'Слепок схемы (по умолчанию {data_dir}/' . self::DEFAULT_INVENTORY . '); без него V-5, V-8 по слепку и FK-рёбра пропускаются')
             ->addOption('format', null, InputOption::VALUE_REQUIRED, 'text | json', 'text')
             ->addOption('out', null, InputOption::VALUE_REQUIRED, 'Записать отчёт в файл');
     }
@@ -69,7 +89,8 @@ class VerifyDumpCommand extends Command
         $connectionFilter = $input->getOption('connection');
         $format = (string) $input->getOption('format');
 
-        $dumpsRoot = rtrim($this->projectDir, '/\\') . '/' . trim($this->dataDir, '/\\') . '/' . DumpConfig::DUMPS_DIR;
+        $dataRoot = rtrim($this->projectDir, '/\\') . '/' . trim($this->dataDir, '/\\');
+        $dumpsRoot = $dataRoot . '/' . DumpConfig::DUMPS_DIR;
 
         if (!is_dir($dumpsRoot)) {
             $io->error('Каталог дампов не найден: ' . $dumpsRoot . '. Сначала выполните app:dbdump:export.');
@@ -82,8 +103,24 @@ class VerifyDumpCommand extends Command
             $connectionFilter !== null ? (string) $connectionFilter : null
         );
 
-        $result = $this->verifier->verify($tables, $dumpsRoot);
-        $payload = $this->buildPayload($result, $dumpsRoot, $schemaFilter);
+        $inventoryOption = $input->getOption('inventory');
+        $inventoryPath = $inventoryOption !== null && $inventoryOption !== ''
+            ? $this->absolutize((string) $inventoryOption)
+            : $dataRoot . '/' . self::DEFAULT_INVENTORY;
+        $inventory = null;
+        $inventoryNote = null;
+        if ($this->fileSystem->exists($inventoryPath)) {
+            try {
+                $inventory = new InventoryReader($this->fileSystem, $inventoryPath);
+            } catch (\Throwable $e) {
+                $inventoryNote = 'слепок не прочитан: ' . $e->getMessage();
+            }
+        } else {
+            $inventoryNote = 'слепок не найден: ' . $inventoryPath . ' — выполните app:dbdump:prepare-analysis';
+        }
+
+        $result = $this->runner->run(new DumpVerificationInput($dumpsRoot, $tables, $inventory, $this->dumpConfig));
+        $payload = $this->buildPayload($result, $dumpsRoot, $schemaFilter, $inventory !== null ? $inventoryPath : null, $inventoryNote);
 
         $rendered = $format === 'json'
             ? (string) json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
@@ -114,17 +151,17 @@ class VerifyDumpCommand extends Command
             return $payload['summary']['error'] > 0 ? Command::FAILURE : Command::SUCCESS;
         }
 
-        $this->renderText($io, $payload, $result);
+        $this->renderText($io, $payload, $result['findings'], $inventoryNote);
 
         return $payload['summary']['error'] > 0 ? Command::FAILURE : Command::SUCCESS;
     }
 
     /**
-     * @param array{findings: array<int, Finding>, edges: int, checked: int, skipped: int, orphan_rows: int} $result
+     * @param array{findings: array<int, Finding>, stats: array<string, array<string, int>>} $result
      *
      * @return array<string, mixed>
      */
-    private function buildPayload(array $result, string $dumpsRoot, ?string $schemaFilter): array
+    private function buildPayload(array $result, string $dumpsRoot, ?string $schemaFilter, ?string $inventoryPath, ?string $inventoryNote): array
     {
         $bySeverity = [Finding::SEVERITY_ERROR => 0, Finding::SEVERITY_WARNING => 0, Finding::SEVERITY_NOTE => 0];
         $byCode = [];
@@ -136,11 +173,16 @@ class VerifyDumpCommand extends Command
             $byCode[$code] = isset($byCode[$code]) ? $byCode[$code] + 1 : 1;
             $findings[] = $finding->toArray();
         }
+        ksort($byCode);
+
+        $cascade = $result['stats']['CascadeClosureVerifier'] ?? [];
 
         return [
             'generated_at' => gmdate('Y-m-d\TH:i:s\Z'),
             'dumps_root' => $dumpsRoot,
             'schema_filter' => $schemaFilter,
+            'inventory' => $inventoryPath,
+            'inventory_note' => $inventoryNote,
             'summary' => [
                 'total' => count($result['findings']),
                 'error' => $bySeverity[Finding::SEVERITY_ERROR],
@@ -148,11 +190,13 @@ class VerifyDumpCommand extends Command
                 'note' => $bySeverity[Finding::SEVERITY_NOTE],
                 'by_code' => $byCode,
             ],
+            // Старые ключи сохранены: по ним читают отчёт /dumpcheck и ранние скрипты.
             'verification' => [
-                'edges' => $result['edges'],
-                'checked' => $result['checked'],
-                'skipped' => $result['skipped'],
-                'orphan_rows' => $result['orphan_rows'],
+                'edges' => $cascade['edges'] ?? 0,
+                'checked' => $cascade['checked'] ?? 0,
+                'skipped' => $cascade['skipped'] ?? 0,
+                'orphan_rows' => $cascade['orphan_rows'] ?? 0,
+                'verifiers' => $result['stats'],
             ],
             'findings' => $findings,
         ];
@@ -160,38 +204,58 @@ class VerifyDumpCommand extends Command
 
     /**
      * @param array<string, mixed> $payload
-     * @param array{findings: array<int, Finding>, edges: int, checked: int, skipped: int, orphan_rows: int} $result
+     * @param array<int, Finding> $findings
      */
-    private function renderText(SymfonyStyle $io, array $payload, array $result): void
+    private function renderText(SymfonyStyle $io, array $payload, array $findings, ?string $inventoryNote): void
     {
         $io->title('Проверка выгруженных дампов');
-        $io->text(sprintf(
-            'Рёбер cascade_from: %d — проверено %d, пропущено %d (родитель в full_export, не выгружен или отсутствует в конфиге).',
-            $payload['verification']['edges'],
-            $payload['verification']['checked'],
-            $payload['verification']['skipped']
-        ));
 
-        if (empty($result['findings'])) {
-            $io->success(sprintf(
-                'Замкнутость каскадов подтверждена на %d рёбрах: строк без родителя нет.',
-                $payload['verification']['checked']
-            ));
+        $stats = $payload['verification']['verifiers'];
+        $lines = [];
+        $cascade = $stats['CascadeClosureVerifier'] ?? null;
+        if ($cascade !== null) {
+            $lines[] = sprintf(
+                'Связи (cascade_from + FK БД): рёбер %d — проверено %d, пропущено %d, строк без родителя %d.',
+                $cascade['edges'],
+                $cascade['checked'],
+                $cascade['skipped'],
+                $cascade['orphan_rows']
+            );
+        }
+        $coverage = $stats['ValueCoverageVerifier'] ?? null;
+        if ($coverage !== null) {
+            $lines[] = sprintf('Покрытие значений: колонок проверено %d, пробелов %d.', $coverage['columns_checked'], $coverage['gaps']);
+        }
+        $pii = $stats['PiiLeakVerifier'] ?? null;
+        if ($pii !== null) {
+            $lines[] = sprintf('Персональные данные: колонок без faker проверено %d, утечек %d.', $pii['columns_checked'], $pii['leaks']);
+        }
+        $rows = $stats['RowCountVerifier'] ?? null;
+        if ($rows !== null) {
+            $lines[] = sprintf('Строки: файлов %d, строк всего %d, файлов нет %d.', $rows['tables'], $rows['rows_total'], $rows['missing']);
+        }
+        if ($inventoryNote !== null) {
+            $lines[] = 'Без слепка: ' . $inventoryNote . '. Покрытие и сверка со слепком пропущены.';
+        }
+        $io->text($lines);
+
+        if ($findings === []) {
+            $io->success('Дампы проверены: строк без родителя нет, покрытие и ПД в порядке.');
 
             return;
         }
 
-        $rows = [];
-        foreach ($result['findings'] as $finding) {
-            $rows[] = [$finding->getCode(), $finding->getSeverity(), $finding->getTarget(), $finding->getMessage()];
+        $tableRows = [];
+        foreach ($findings as $finding) {
+            $tableRows[] = [$finding->getCode(), $finding->getSeverity(), $finding->getTarget(), $finding->getMessage()];
         }
-        $io->table(['код', 'уровень', 'таблица', 'что не так'], $rows);
+        $io->table(['код', 'уровень', 'таблица', 'что не так'], $tableRows);
 
         if ($payload['summary']['error'] > 0) {
             $io->error(sprintf(
-                'Ошибок: %d, строк без родителя: %d. Такой дамп импортировать нельзя — связи в нём нет.',
+                'Ошибок: %d, предупреждений: %d. Такой дамп отдавать нельзя — исправьте конфиг и повторите экспорт.',
                 $payload['summary']['error'],
-                $payload['verification']['orphan_rows']
+                $payload['summary']['warning']
             ));
 
             return;

@@ -188,7 +188,7 @@ class PatternDetector
                 continue;
             }
 
-            $pattern = $this->detectColumnPattern($column, $values);
+            $pattern = self::detectColumnPattern($column, $values);
             if ($pattern !== null) {
                 $detected[$column] = $pattern;
             }
@@ -260,34 +260,92 @@ class PatternDetector
      */
     private function detectByColumnName(string $column): ?string
     {
-        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_FIO)) {
+        if (self::columnMatchesAny($column, self::COLUMN_HINTS_FIO)) {
             return self::PATTERN_FIO;
         }
-        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_EMAIL)) {
+        if (self::columnMatchesAny($column, self::COLUMN_HINTS_EMAIL)) {
             return self::PATTERN_EMAIL;
         }
-        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_PHONE)) {
+        if (self::columnMatchesAny($column, self::COLUMN_HINTS_PHONE)) {
             return self::PATTERN_PHONE;
         }
-        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_FIRSTNAME)) {
+        if (self::columnMatchesAny($column, self::COLUMN_HINTS_FIRSTNAME)) {
             return self::PATTERN_FIRSTNAME;
         }
-        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_LASTNAME)) {
+        if (self::columnMatchesAny($column, self::COLUMN_HINTS_LASTNAME)) {
             return self::PATTERN_LASTNAME;
         }
-        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_PATRONYMIC)) {
+        if (self::columnMatchesAny($column, self::COLUMN_HINTS_PATRONYMIC)) {
             return self::PATTERN_PATRONYMIC;
         }
-        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_GENDER)) {
+        if (self::columnMatchesAny($column, self::COLUMN_HINTS_GENDER)) {
             return self::PATTERN_GENDER;
         }
         return null;
     }
 
     /**
+     * Строгий вариант hintsPii для проверки готового дампа: без «пол» (значения-коды) и без
+     * голого «name» — так называются и справочники, и товары, и ничего личного в них нет.
+     */
+    public static function hintsPiiStrict(string $column): bool
+    {
+        if (preg_match('/^name$/i', $column) === 1) {
+            return false;
+        }
+        foreach ([
+            self::COLUMN_HINTS_FIO,
+            self::COLUMN_HINTS_EMAIL,
+            self::COLUMN_HINTS_PHONE,
+            self::COLUMN_HINTS_FIRSTNAME,
+            self::COLUMN_HINTS_LASTNAME,
+            self::COLUMN_HINTS_PATRONYMIC,
+        ] as $hints) {
+            if (self::columnMatchesAny($column, $hints)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Паттерн ПД по готовым значениям — те же регулярные выражения и порог, что при разведке
+     * таблицы, но без обращения к БД: так проверяется содержимое выгруженного дампа.
+     *
+     * @param array<int, string|null> $values
+     */
+    public static function detectPatternInValues(string $column, array $values): ?string
+    {
+        $normalized = [];
+        foreach ($values as $value) {
+            if ($value === null || $value === '') {
+                continue;
+            }
+            $normalized[] = self::normalizeValue((string) $value);
+        }
+        if (count($normalized) < self::MIN_VALUES_FOR_REGEX) {
+            return null;
+        }
+
+        return self::detectColumnPattern($column, $normalized);
+    }
+
+    /**
+     * Неразрывные пробелы и повторы пробелов — в один пробел, чтобы FIO regex срабатывал.
+     */
+    private static function normalizeValue(string $value): string
+    {
+        $s = str_replace(["\xc2\xa0"], ' ', $value);
+        $s = preg_replace('/\s+/u', ' ', $s);
+
+        return $s !== null ? $s : '';
+    }
+
+    /**
      * @param array<int, string> $regexes
      */
-    private function columnMatchesAny(string $column, array $regexes): bool
+    private static function columnMatchesAny(string $column, array $regexes): bool
     {
         foreach ($regexes as $regex) {
             if (preg_match($regex, $column)) {
@@ -312,11 +370,7 @@ class PatternDetector
             if ($v === null || $v === '') {
                 continue;
             }
-            $s = (string) $v;
-            // Нормализуем non-breaking spaces, чтобы FIO regex срабатывал
-            $s = str_replace(["\xc2\xa0"], ' ', $s);
-            $s = preg_replace('/\s+/u', ' ', $s);
-            $values[] = $s !== null ? $s : '';
+            $values[] = self::normalizeValue((string) $v);
         }
         return $values;
     }
@@ -326,7 +380,7 @@ class PatternDetector
      *
      * @param array<int, string> $values
      */
-    private function detectColumnPattern(string $column, array $values): ?string
+    private static function detectColumnPattern(string $column, array $values): ?string
     {
         $total = count($values);
         if ($total === 0) {
@@ -352,7 +406,7 @@ class PatternDetector
             },
         ];
 
-        $hasNameHint = $this->columnMatchesAny($column, self::COLUMN_HINTS_FIO);
+        $hasNameHint = self::columnMatchesAny($column, self::COLUMN_HINTS_FIO);
 
         foreach ($tests as $patternName => $test) {
             $matches = 0;
@@ -479,7 +533,7 @@ class PatternDetector
             if (isset($detected[$column])) {
                 continue;
             }
-            if (!$this->columnMatchesAny($column, self::COLUMN_HINTS_GENDER)) {
+            if (!self::columnMatchesAny($column, self::COLUMN_HINTS_GENDER)) {
                 continue;
             }
 
@@ -540,13 +594,13 @@ class PatternDetector
 
     private function classifyByColumnNameOnly(string $column): ?string
     {
-        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_PATRONYMIC)) {
+        if (self::columnMatchesAny($column, self::COLUMN_HINTS_PATRONYMIC)) {
             return self::PATTERN_PATRONYMIC;
         }
-        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_LASTNAME)) {
+        if (self::columnMatchesAny($column, self::COLUMN_HINTS_LASTNAME)) {
             return self::PATTERN_LASTNAME;
         }
-        if ($this->columnMatchesAny($column, self::COLUMN_HINTS_FIRSTNAME)) {
+        if (self::columnMatchesAny($column, self::COLUMN_HINTS_FIRSTNAME)) {
             return self::PATTERN_FIRSTNAME;
         }
         return null;

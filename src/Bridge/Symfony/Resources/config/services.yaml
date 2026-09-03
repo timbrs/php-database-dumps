@@ -189,10 +189,25 @@ services:
         arguments:
             $projectDir: '%kernel.project_dir%'
 
-    # Verification — проверка того, что уже выгружено. К БД не подключается, читает dumps/.
+    # Verification — проверка того, что уже выгружено. К БД не подключается, читает dumps/
+    # (каждый файл один раз на все проверки — DumpVerificationRunner).
     Timbrs\DatabaseDumps\Service\Verification\DumpValueReader: ~
 
     Timbrs\DatabaseDumps\Service\Verification\CascadeClosureVerifier: ~
+
+    Timbrs\DatabaseDumps\Service\Verification\ValueCoverageVerifier: ~
+
+    Timbrs\DatabaseDumps\Service\Verification\PiiLeakVerifier: ~
+
+    Timbrs\DatabaseDumps\Service\Verification\RowCountVerifier: ~
+
+    Timbrs\DatabaseDumps\Service\Verification\DumpVerificationRunner:
+        arguments:
+            $verifiers:
+                - '@Timbrs\DatabaseDumps\Service\Verification\CascadeClosureVerifier'
+                - '@Timbrs\DatabaseDumps\Service\Verification\ValueCoverageVerifier'
+                - '@Timbrs\DatabaseDumps\Service\Verification\PiiLeakVerifier'
+                - '@Timbrs\DatabaseDumps\Service\Verification\RowCountVerifier'
 
     # Commands — ЛЕНИВАЯ регистрация: имя команды указано в теге, поэтому Symfony знает его
     # БЕЗ создания объекта команды (и без инстанцирования графа зависимостей, включая DumpConfig).

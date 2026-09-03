@@ -100,4 +100,54 @@ SQL
 
         (new DumpValueReader())->readColumn($this->dir . '/absent.sql', 'id');
     }
+
+    public function testScanProjectsSeveralColumnsInOnePass(): void
+    {
+        $rows = [];
+        $headers = [];
+        $result = (new DumpValueReader())->scan(
+            $this->path,
+            ['person_id', 'note', 'absent'],
+            function (array $row) use (&$rows): void {
+                $rows[] = $row;
+            },
+            function (array $columns) use (&$headers): void {
+                $headers[] = $columns;
+            }
+        );
+
+        self::assertSame(['person_id' => true, 'note' => true, 'absent' => false], $result['found']);
+        self::assertSame(6, $result['rows']);
+        self::assertSame(['id', 'person_id', 'note'], $result['columns']);
+        self::assertCount(2, $headers);
+        self::assertCount(6, $rows);
+        // Только запрошенные колонки: id в проекции нет, порядок — по шапке INSERT.
+        self::assertSame(['person_id', 'note'], array_keys($rows[0]));
+        self::assertSame('10', $rows[0]['person_id']);
+        self::assertSame('с запятой, и скобкой ( внутри', $rows[1]['note']);
+        self::assertNull($rows[2]['person_id']);
+        self::assertSame(['person_id' => '14', 'note' => 'вторая пачка'], $rows[5]);
+    }
+
+    public function testScanAllColumnsUsesHeaderNames(): void
+    {
+        $rows = [];
+        $result = (new DumpValueReader())->scan($this->path, [DumpValueReader::ALL_COLUMNS], function (array $row) use (&$rows): void {
+            $rows[] = $row;
+        });
+
+        self::assertSame([], $result['found']);
+        self::assertSame(['id' => '5', 'person_id' => '13', 'note' => null], $rows[4]);
+    }
+
+    public function testScanWithoutColumnsOnlyCountsRows(): void
+    {
+        $visited = 0;
+        $result = (new DumpValueReader())->scan($this->path, [], function () use (&$visited): void {
+            $visited++;
+        });
+
+        self::assertSame(6, $result['rows']);
+        self::assertSame(0, $visited);
+    }
 }
