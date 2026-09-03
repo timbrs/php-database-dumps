@@ -44,7 +44,7 @@ class DocsCommand extends Command
     {
         $this
             ->setName('app:dbdump:docs')
-            ->setDescription('Сгенерировать документацию инструмента (WORKFLOW.md, COMMANDS.md, FINDINGS.md) в {data_dir}/analysis/docs')
+            ->setDescription('Сгенерировать документацию инструмента (WORKFLOW.md, DOSSIER.md, FINDINGS.md, COMMANDS.md) в {data_dir}/analysis/docs')
             ->addOption('out', null, InputOption::VALUE_REQUIRED, 'Каталог для файлов (по умолчанию {data_dir}/' . self::DOCS_DIR . ')')
             ->addOption('stdout', null, InputOption::VALUE_NONE, 'Напечатать вместо записи');
     }
