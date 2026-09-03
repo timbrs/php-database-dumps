@@ -1462,6 +1462,24 @@ composer phpstan
 composer cs-fix
 ```
 
+### Полный цикл на живой БД
+
+`tests/Integration/FullCycleTest.php` прогоняет цепочку целиком: сид → слепок → досье →
+решения → `apply` → `check` (static/live/plan) → `export` → `check --stage=dump`. Юнит-тесты
+проверяют каждое звено с моками, а расходятся звенья как раз на стыках — на форме слепка, на том,
+что решение адресует таблицу так же, как её называет конфиг, на порядке выгрузки. Без живой базы
+такой стык не проверить.
+
+Без `DBDUMP_TEST_DSN` тест пропускается — в закрытом контуре базы в CI нет:
+
+```bash
+DBDUMP_TEST_DSN='pgsql:host=127.0.0.1;port=5432;dbname=app' DBDUMP_TEST_USER=app DBDUMP_TEST_PASSWORD=app vendor/bin/phpunit tests/Integration
+```
+
+Тест работает в своей схеме (`dbdump_it`), которую сам создаёт и сносит в `tearDown` — чужие
+таблицы не трогает. Подойдёт любой Postgres, в том числе поднятый локальным стендом хост-проекта
+(`docker-compose.local.yml`, сервис `postgres`).
+
 ## Локальная разработка
 
 Чтобы подключить пакет из локальной папки (без Packagist), добавьте в `composer.json` вашего проекта:
