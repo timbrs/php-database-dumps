@@ -256,11 +256,8 @@ class ColumnExistenceRule implements RuleInterface
             }
         }
 
-        $stratifyBy = isset($sample[TableConfig::SAMPLE_KEY_STRATIFY_BY])
-            ? $sample[TableConfig::SAMPLE_KEY_STRATIFY_BY]
-            : null;
-        if (is_string($stratifyBy) && $stratifyBy !== '') {
-            $known = $this->lowerSet($columns);
+        $known = $this->lowerSet($columns);
+        foreach (TableConfig::stratifyColumns($sample) as $stratifyBy) {
             if (!isset($known[strtolower($stratifyBy)])) {
                 $findings[] = Finding::error(
                     'L-5',

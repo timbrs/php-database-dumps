@@ -231,11 +231,20 @@ class CascadeWhereResolver
 
         $connection = $this->registry->getConnection($connectionName);
         $quoted = [];
-        foreach ($values as $value) {
+        // У версионных родителей ссылочная колонка повторяется у каждой версии — в IN
+        // достаточно уникальных значений.
+        foreach (array_unique($values, SORT_REGULAR) as $value) {
             $quoted[] = $connection->quote($value);
         }
 
-        return "({$quotedFkColumn} IN (" . implode(', ', $quoted) . ") OR {$quotedFkColumn} IS NULL)";
+        // Длинный список режется на несколько IN через OR: планировщики переваривают
+        // такую форму заметно лучше одного IN на десятки тысяч значений.
+        $inLists = [];
+        foreach (array_chunk($quoted, SampleQueryBuilder::IN_CHUNK) as $chunk) {
+            $inLists[] = "{$quotedFkColumn} IN (" . implode(', ', $chunk) . ')';
+        }
+
+        return '(' . implode(' OR ', $inLists) . " OR {$quotedFkColumn} IS NULL)";
     }
 
     private function combineWhere(?string $parentWhere, ?string $parentCascadeWhere): string

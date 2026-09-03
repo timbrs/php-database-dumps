@@ -297,9 +297,10 @@ class DataFetcherTest extends TestCase
         $this->assertSame('SELECT * FROM "public"."clients" WHERE "id" IN (\'1\')', $fetcher->getLastQuery());
     }
 
-    public function testSampleBypassesCascadeResolver(): void
+    public function testSampleReceivesCascadeWhereAndReferencedColumns(): void
     {
-        // При наличии sample cascade-резолвер НЕ вызывается (sample строит SQL сам).
+        // sample и cascade_from совместимы: каскад вычисляется до выборки по критериям и
+        // уходит в базовое условие корзин; колонки, на которые ссылаются дети, — в фазу 1.
         $sample = [
             TableConfig::SAMPLE_KEY_CRITERIA => [
                 ['name' => 'red', 'where' => "status = 'red'", 'limit' => 10],
@@ -311,13 +312,26 @@ class DataFetcherTest extends TestCase
         $config = new TableConfig('public', 'clients', null, null, null, null, $cascadeFrom, null, $sample);
 
         $cascadeResolver = $this->createMock(CascadeWhereResolver::class);
-        $cascadeResolver->expects($this->never())->method('resolve');
+        $cascadeResolver->expects($this->once())->method('resolve')->willReturn('("user_id" IN (\'7\') OR "user_id" IS NULL)');
 
         $sampleBuilder = $this->createMock(SampleQueryBuilder::class);
-        $sampleBuilder->method('build')->willReturn('SELECT * FROM "public"."clients" WHERE "id" IN (\'1\')');
+        $sampleBuilder->expects($this->once())
+            ->method('build')
+            ->with($config, '("user_id" IN (\'7\') OR "user_id" IS NULL)', ['core_id'], 25)
+            ->willReturn('SELECT * FROM "public"."clients" WHERE "id" IN (\'1\')');
 
-        $dumpConfig = new DumpConfig([], []);
+        $dumpConfig = new DumpConfig([], [
+            'public' => [
+                'clients' => ['limit' => 100],
+                'orders' => [
+                    'limit' => 100,
+                    'cascade_from' => [['parent' => 'public.clients', 'fk_column' => 'client_id', 'parent_column' => 'core_id']],
+                ],
+            ],
+        ], [], null, ['sample' => ['per_value' => 25]]);
         $fetcher = new DataFetcher($this->registryWithPostgres(), $cascadeResolver, $dumpConfig, $sampleBuilder);
+
+        $this->assertSame(['core_id'], $fetcher->referencedColumns($config));
 
         $this->connection->method('fetchAllAssociative')->willReturn([]);
         $fetcher->fetch($config);

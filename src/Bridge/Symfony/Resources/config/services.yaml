@@ -173,6 +173,10 @@ services:
 
     # Sample-выборка по именованным критериям
     Timbrs\DatabaseDumps\Service\Dumper\SelectedPkRegistry: ~
+
+    # Ход выборки по критериям (корзины, строки, усечения) — один на прогон экспорта,
+    # сбрасывается в analysis/sample-report.json.
+    Timbrs\DatabaseDumps\Service\Dumper\SampleReportCollector: ~
     Timbrs\DatabaseDumps\Service\Dumper\SampleQueryBuilder: ~
 
     Timbrs\DatabaseDumps\Service\Dumper\CascadeWhereResolver:

@@ -53,6 +53,7 @@ use Timbrs\DatabaseDumps\Service\Dumper\CascadeWhereResolver;
 use Timbrs\DatabaseDumps\Service\Dumper\DatabaseDumper;
 use Timbrs\DatabaseDumps\Service\Dumper\DataFetcher;
 use Timbrs\DatabaseDumps\Service\Dumper\SampleQueryBuilder;
+use Timbrs\DatabaseDumps\Service\Dumper\SampleReportCollector;
 use Timbrs\DatabaseDumps\Service\Dumper\SelectedPkRegistry;
 use Timbrs\DatabaseDumps\Service\Dumper\TableConfigResolver;
 use Timbrs\DatabaseDumps\Service\Faker\LlmPatternDetector;
@@ -208,13 +209,18 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
 
         // Реестр выбранных PK — один общий инстанс на запрос (cascade-консистентность).
         $this->app->singleton(SelectedPkRegistry::class);
+        $this->app->singleton(SampleReportCollector::class);
         $this->app->singleton(PrimaryKeyInspector::class);
         $this->app->singleton(SampleQueryBuilder::class, function ($app) {
             return new SampleQueryBuilder(
                 $app->make(ConnectionRegistryInterface::class),
                 $app->make(PrimaryKeyInspector::class),
                 $app->make(SelectedPkRegistry::class),
-                $app->make(LoggerInterface::class)
+                $app->make(LoggerInterface::class),
+                $app->make(PgStatsReader::class),
+                $app->make(SafeQueryPolicy::class),
+                $app->make(TableInspector::class),
+                $app->make(SampleReportCollector::class)
             );
         });
 
@@ -479,7 +485,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(DumpConfig::class),
                 $app->make(ProductionGuard::class),
                 $app->make(DbdumpConfigStore::class),
-                $app->make(SafeQueryPolicy::class)
+                $app->make(SafeQueryPolicy::class),
+                $app->make(SampleReportCollector::class)
             );
         });
 

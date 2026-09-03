@@ -23,8 +23,8 @@ use Timbrs\DatabaseDumps\Service\Validation\Finding;
  *        остаточный случай: ребро пришлось разорвать ради цикла либо родителя нет в графе;
  *  G-5 — родитель с sample выгружается раньше: связность держится на SelectedPkRegistry
  *        и на ребре cascade_from, а не на удачном порядке имён;
- *  G-6 — у таблицы одновременно sample и cascade_from: DataFetcher вернёт результат
- *        SampleQueryBuilder до вычисления cascade-WHERE, связь с родителем молча отключится.
+ *  G-6 — у таблицы одновременно sample и cascade_from: каскад входит в базовое условие
+ *        каждой корзины, и пустая корзина значит «родитель не дал связанных строк этого вида».
  */
 class CascadeGraphRule implements RuleInterface
 {
@@ -70,13 +70,13 @@ class CascadeGraphRule implements RuleInterface
             if ($childConfig !== null && $childConfig->hasSample()) {
                 $findings[] = Finding::note(
                     'G-6',
-                    'у таблицы заданы и sample, и cascade_from — DataFetcher вернёт выборку по критериям '
-                    . 'до вычисления cascade-WHERE, связь с родителем не применится',
+                    'у таблицы заданы и sample, и cascade_from — каскад входит в базовое условие каждой '
+                    . 'корзины: виды данных набираются только среди строк, связанных с выгруженным родителем',
                     $childSchema,
                     $childTable,
                     null,
                     false,
-                    ['hint' => 'оставить что-то одно: либо sample, либо cascade_from']
+                    ['hint' => 'пустая корзина в sample-report.json после экспорта — родитель не дал строк этого вида']
                 );
             }
 

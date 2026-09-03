@@ -516,9 +516,9 @@ class ConfigGenerator
      * Профилирование partial-таблиц, авто-генерация sample.criteria и накопление
      * данных для отчёта.
      *
-     * sample добавляется только таблицам БЕЗ cascade_from (они top-level сущности):
-     * у детей выборка управляется каскадом, а DataFetcher при наличии sample
-     * игнорирует cascade — смешивать нельзя.
+     * sample добавляется и детям с cascade_from: каскад входит в базовое условие каждой
+     * корзины, так что «все виды» набираются среди связанных с родителем строк.
+     * Пользовательский sample не перезаписывается.
      *
      * @param array<string, array<string, array<string, mixed>>> &$partialExport
      * @param array<string, array<string, array<string, string>>> $fakerSection
@@ -546,10 +546,9 @@ class ConfigGenerator
                 $profiles = $this->statisticsInspector->profileTable($schema, $table, $connectionName, $rowCounts[$fullKey] ?? null);
 
                 $criteria = [];
-                $hasCascade = isset($partialExport[$schema][$table][TableConfig::KEY_CASCADE_FROM]);
                 $hasUserSample = isset($partialExport[$schema][$table][TableConfig::KEY_SAMPLE]);
 
-                if ($this->criteriaSuggester !== null && !$hasCascade && !$hasUserSample) {
+                if ($this->criteriaSuggester !== null && !$hasUserSample) {
                     $criteria = $this->criteriaSuggester->suggest($profiles, $connectionName);
                     if (!empty($criteria)) {
                         $partialExport[$schema][$table][TableConfig::KEY_SAMPLE] =

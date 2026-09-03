@@ -106,10 +106,7 @@ class DictionaryRule implements RuleInterface
             }
         }
 
-        $stratifyBy = isset($sample[TableConfig::SAMPLE_KEY_STRATIFY_BY])
-            ? $sample[TableConfig::SAMPLE_KEY_STRATIFY_BY]
-            : null;
-        if (is_string($stratifyBy) && $stratifyBy !== '') {
+        foreach (TableConfig::stratifyColumns($sample) as $stratifyBy) {
             $perValue = isset($sample[TableConfig::SAMPLE_KEY_PER_VALUE])
                 ? (int) $sample[TableConfig::SAMPLE_KEY_PER_VALUE]
                 : TableConfig::DEFAULT_PER_VALUE;

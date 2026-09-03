@@ -106,14 +106,26 @@
           }
         },
         "stratify_by": {
-          "type": "string",
-          "pattern": "^[A-Za-z_][A-Za-z0-9_$]*$",
-          "description": "Колонка для разворачивания в по-корзине-на-DISTINCT-значение"
+          "description": "Колонка (или список колонок) для разворачивания в по-корзине-на-DISTINCT-значение; для списка корзины строятся по каждой колонке независимо",
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_$]*$"
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_$]*$"
+              }
+            }
+          ]
         },
         "per_value": {
           "type": "integer",
           "minimum": 1,
-          "description": "Квота строк для stratify_by"
+          "description": "Квота строк на корзину stratify_by (по умолчанию 100 или settings.sample.per_value; при упоре в limit ужимается, но не ниже 5)"
         }
       },
       "additionalProperties": false

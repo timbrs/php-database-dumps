@@ -29,8 +29,12 @@ class TableConfig
     public const CRITERION_KEY_WHERE = 'where';
     public const CRITERION_KEY_LIMIT = 'limit';
 
-    /** Дефолтная квота для stratify_by, если per_value не задан. */
-    public const DEFAULT_PER_VALUE = 10;
+    /**
+     * Дефолтная квота корзины stratify_by, если per_value не задан ни в таблице, ни в
+     * settings.sample.per_value. «Сто красных, сто зелёных»: при упоре в limit квота
+     * ужимается под него (SampleQueryBuilder), а не отрезаются последние корзины.
+     */
+    public const DEFAULT_PER_VALUE = 100;
 
     /**
      * Разрешённые символы в schema/table/column-идентификаторах.
@@ -186,6 +190,28 @@ class TableConfig
     public function hasSample(): bool
     {
         return $this->sample !== null;
+    }
+
+    /**
+     * Колонки stratify_by секции sample: одна строка или список — всегда списком.
+     *
+     * @param array<string, mixed>|null $sample
+     * @return array<int, string>
+     */
+    public static function stratifyColumns(?array $sample): array
+    {
+        if ($sample === null || !isset($sample[self::SAMPLE_KEY_STRATIFY_BY])) {
+            return [];
+        }
+        $raw = $sample[self::SAMPLE_KEY_STRATIFY_BY];
+        $columns = [];
+        foreach (is_array($raw) ? $raw : [$raw] as $column) {
+            if (is_string($column) && $column !== '') {
+                $columns[] = $column;
+            }
+        }
+
+        return $columns;
     }
 
     /**
@@ -384,7 +410,7 @@ class TableConfig
      *   sample:
      *     criteria:
      *       - { name: <ident>, where: <clause>, limit: <int> }
-     *     stratify_by: <ident>      # необязательно
+     *     stratify_by: <ident> | [<ident>, …]   # необязательно; список — корзины по каждой колонке
      *     per_value:  <int>         # необязательно (квота для stratify_by)
      *
      * Каждый criteria[].where проходит ту же проверку, что и общий where
@@ -418,10 +444,22 @@ class TableConfig
 
         if ($hasStratify) {
             $stratifyBy = $sample[self::SAMPLE_KEY_STRATIFY_BY];
-            if (!is_string($stratifyBy) || $stratifyBy === '') {
-                throw new \InvalidArgumentException('sample.stratify_by must be a non-empty string');
+            if (is_array($stratifyBy)) {
+                if ($stratifyBy === []) {
+                    throw new \InvalidArgumentException('sample.stratify_by must be a non-empty string or a non-empty list of column names');
+                }
+                foreach ($stratifyBy as $i => $column) {
+                    if (!is_string($column) || $column === '') {
+                        throw new \InvalidArgumentException("sample.stratify_by[{$i}] must be a non-empty string");
+                    }
+                    $this->validateIdentifier("sample.stratify_by[{$i}]", $column);
+                }
+            } else {
+                if (!is_string($stratifyBy) || $stratifyBy === '') {
+                    throw new \InvalidArgumentException('sample.stratify_by must be a non-empty string or a non-empty list of column names');
+                }
+                $this->validateIdentifier('sample.stratify_by', $stratifyBy);
             }
-            $this->validateIdentifier('sample.stratify_by', $stratifyBy);
         }
 
         if (isset($sample[self::SAMPLE_KEY_PER_VALUE])) {

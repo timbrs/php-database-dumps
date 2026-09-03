@@ -9,6 +9,7 @@ use Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface;
 use Timbrs\DatabaseDumps\Platform\PostgresPlatform;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\PrimaryKeyInspector;
 use Timbrs\DatabaseDumps\Service\Dumper\SampleQueryBuilder;
+use Timbrs\DatabaseDumps\Service\Dumper\SampleReportCollector;
 use Timbrs\DatabaseDumps\Service\Dumper\SelectedPkRegistry;
 
 class SampleQueryBuilderTest extends TestCase
@@ -152,8 +153,8 @@ class SampleQueryBuilderTest extends TestCase
 
         $phase2 = $this->builder()->build($config);
 
-        // DISTINCT-запрос с потолком корзин
-        $this->assertStringContainsString('SELECT DISTINCT "status" FROM "public"."clients" LIMIT ' . SampleQueryBuilder::MAX_STRATIFY_BUCKETS, $this->capturedSql[0]);
+        // DISTINCT-запрос с потолком корзин + 1: лишнее значение выдаёт усечение
+        $this->assertStringContainsString('SELECT DISTINCT "status" FROM "public"."clients" ORDER BY "status" LIMIT ' . (SampleQueryBuilder::MAX_STRATIFY_BUCKETS + 1), $this->capturedSql[0]);
         // По корзине на значение
         $this->assertStringContainsString('WHERE ("status" = \'active\') LIMIT 10', $this->capturedSql[1]);
         $this->assertStringContainsString('WHERE ("status" = \'closed\') LIMIT 10', $this->capturedSql[2]);
@@ -437,5 +438,219 @@ class SampleQueryBuilderTest extends TestCase
         $this->assertCount(1, $this->capturedSql);
         $this->assertStringContainsString('WHERE (1 = 1) LIMIT 100', $this->capturedSql[0]);
         $this->assertStringContainsString("IN ('11', '12')", $phase2);
+    }
+
+    public function testCascadeWhereEntersDistinctAndEveryBucket(): void
+    {
+        $this->pkInspector->method('getPrimaryKeyColumns')->willReturn(['id']);
+        $this->connection->method('fetchFirstColumn')->willReturnCallback(function ($sql) {
+            $this->capturedSql[] = $sql;
+            if (strpos($sql, 'DISTINCT') !== false) {
+                return ['active'];
+            }
+            return [1];
+        });
+
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [['name' => 'red', 'where' => "status = 'red'", 'limit' => 10]],
+            TableConfig::SAMPLE_KEY_STRATIFY_BY => 'status',
+        ];
+        $config = new TableConfig('public', 'clients', null, 'is_active = true', null, null, null, null, $sample);
+
+        $this->builder()->build($config, '("client_id" IN (\'7\') OR "client_id" IS NULL)');
+
+        // Каскад — в базовом условии DISTINCT и каждой корзины, вместе с where таблицы.
+        $base = '((is_active = true) AND (("client_id" IN (\'7\') OR "client_id" IS NULL)))';
+        $this->assertStringContainsString('SELECT DISTINCT "status" FROM "public"."clients" WHERE ' . $base . ' ORDER BY "status"', $this->capturedSql[0]);
+        $this->assertStringContainsString('WHERE ' . $base . ' AND (status = \'red\') LIMIT 10', $this->capturedSql[1]);
+        $this->assertStringContainsString('WHERE ' . $base . ' AND ("status" = \'active\')', $this->capturedSql[2]);
+    }
+
+    public function testReferencedColumnsAreSelectedAndRegisteredUnique(): void
+    {
+        $this->pkInspector->method('getPrimaryKeyColumns')->willReturn(['id']);
+        $this->connection->method('fetchAllAssociative')->willReturnCallback(function ($sql) {
+            $this->capturedSql[] = $sql;
+            // SCD2: одна сущность core_id=10 в двух версиях.
+            return [
+                ['id' => 1, 'core_id' => 10],
+                ['id' => 2, 'core_id' => 10],
+                ['id' => 3, 'core_id' => 11],
+            ];
+        });
+
+        $sample = [TableConfig::SAMPLE_KEY_CRITERIA => [['name' => 'any', 'where' => 'id > 0', 'limit' => 10]]];
+        $config = new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+
+        $phase2 = $this->builder()->build($config, null, ['core_id', 'ID']);
+
+        $this->assertStringContainsString('SELECT "id", "core_id" FROM "public"."clients"', $this->capturedSql[0]);
+        $this->assertStringContainsString("IN ('1', '2', '3')", $phase2);
+        $this->assertSame([1, 2, 3], $this->selectedPk->getColumnValues('public', 'clients', 'id'));
+        $this->assertSame([10, 11], $this->selectedPk->getColumnValues('public', 'clients', 'core_id'));
+    }
+
+    public function testCapMergesBucketsRoundRobinInsteadOfCuttingTheLast(): void
+    {
+        $this->pkInspector->method('getPrimaryKeyColumns')->willReturn(['id']);
+        $this->connection->method('fetchFirstColumn')->willReturnCallback(function ($sql) {
+            if (strpos($sql, "'red'") !== false) {
+                return [1, 2, 3, 4];
+            }
+            return [5, 6, 7, 8];
+        });
+
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [
+                ['name' => 'red', 'where' => "status = 'red'", 'limit' => 10],
+                ['name' => 'green', 'where' => "status = 'green'", 'limit' => 10],
+            ],
+        ];
+        $config = new TableConfig('public', 'clients', 4, null, null, null, null, null, $sample);
+
+        $phase2 = $this->builder()->build($config);
+
+        // По строке из каждой корзины по кругу: зелёные не потеряны целиком.
+        $this->assertStringContainsString("IN ('1', '5', '2', '6')", $phase2);
+    }
+
+    public function testStratifyQuotaShrinksUnderLimit(): void
+    {
+        $this->pkInspector->method('getPrimaryKeyColumns')->willReturn(['id']);
+        $this->connection->method('fetchFirstColumn')->willReturnCallback(function ($sql) {
+            $this->capturedSql[] = $sql;
+            if (strpos($sql, 'DISTINCT') !== false) {
+                return ['a', 'b', 'c', 'd'];
+            }
+            return [1];
+        });
+
+        // 4 корзины × 100 по умолчанию > limit 20 → квота корзины 5.
+        $sample = [TableConfig::SAMPLE_KEY_STRATIFY_BY => 'status'];
+        $config = new TableConfig('public', 'clients', 20, null, null, null, null, null, $sample);
+
+        $this->builder()->build($config);
+
+        $this->assertStringContainsString('("status" = \'a\') LIMIT 5', $this->capturedSql[1]);
+        $this->assertStringContainsString('("status" = \'d\') LIMIT 5', $this->capturedSql[4]);
+    }
+
+    public function testSettingsPerValueOverridesTheDefault(): void
+    {
+        $this->pkInspector->method('getPrimaryKeyColumns')->willReturn(['id']);
+        $this->connection->method('fetchFirstColumn')->willReturnCallback(function ($sql) {
+            $this->capturedSql[] = $sql;
+            return strpos($sql, 'DISTINCT') !== false ? ['a'] : [1];
+        });
+
+        $sample = [TableConfig::SAMPLE_KEY_STRATIFY_BY => 'status'];
+        $config = new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+
+        $this->builder()->build($config, null, [], 25);
+
+        $this->assertStringContainsString('("status" = \'a\') LIMIT 25', $this->capturedSql[1]);
+    }
+
+    public function testStratifyListBuildsBucketsPerColumn(): void
+    {
+        $this->pkInspector->method('getPrimaryKeyColumns')->willReturn(['id']);
+        $this->connection->method('fetchFirstColumn')->willReturnCallback(function ($sql) {
+            $this->capturedSql[] = $sql;
+            if (strpos($sql, 'DISTINCT "status"') !== false) {
+                return ['a'];
+            }
+            if (strpos($sql, 'DISTINCT "kind"') !== false) {
+                return ['x', 'y'];
+            }
+            return [1];
+        });
+
+        $sample = [TableConfig::SAMPLE_KEY_STRATIFY_BY => ['status', 'kind']];
+        $config = new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+
+        $this->builder()->build($config);
+
+        $buckets = array_values(array_filter($this->capturedSql, function ($s) {
+            return strpos($s, 'DISTINCT') === false;
+        }));
+        $this->assertCount(3, $buckets);
+        $this->assertStringContainsString('("status" = \'a\')', $buckets[0]);
+        $this->assertStringContainsString('("kind" = \'x\')', $buckets[1]);
+        $this->assertStringContainsString('("kind" = \'y\')', $buckets[2]);
+    }
+
+    public function testReportRecordsBucketsTruncationAndEmptyBuckets(): void
+    {
+        $this->pkInspector->method('getPrimaryKeyColumns')->willReturn(['id']);
+        $this->connection->method('fetchFirstColumn')->willReturnCallback(function ($sql) {
+            if (strpos($sql, 'DISTINCT') !== false) {
+                // На одно больше потолка → усечение.
+                return range(1, SampleQueryBuilder::MAX_STRATIFY_BUCKETS + 1);
+            }
+            if (strpos($sql, "'red'") !== false) {
+                return [];
+            }
+            // Каждая корзина — своя строка: 50 корзин дают 50 строк против limit 30.
+            static $next = 0;
+            return [++$next];
+        });
+
+        $sample = [
+            TableConfig::SAMPLE_KEY_CRITERIA => [['name' => 'red', 'where' => "status = 'red'", 'limit' => 10]],
+            TableConfig::SAMPLE_KEY_STRATIFY_BY => 'phone',
+        ];
+        $config = new TableConfig('public', 'clients', 30, null, null, null, null, null, $sample);
+        $report = new SampleReportCollector();
+        $builder = new SampleQueryBuilder($this->registry, $this->pkInspector, $this->selectedPk, null, null, null, null, $report);
+
+        $builder->build($config);
+
+        $table = $report->toArray()['tables']['public.clients'];
+        $this->assertSame('red', $table['buckets'][0]['name']);
+        $this->assertSame(0, $table['buckets'][0]['rows']);
+        $this->assertSame('phone#0', $table['buckets'][1]['name']);
+        // Колонка похожа на ПД — значение корзины в отчёт не попадает.
+        $this->assertArrayNotHasKey('value', $table['buckets'][1]);
+        $this->assertTrue($table['stratify'][0]['truncated']);
+        $this->assertSame(SampleQueryBuilder::MAX_STRATIFY_BUCKETS, $table['stratify'][0]['values']);
+        $this->assertSame('distinct', $table['stratify'][0]['source']);
+        // 50 корзин × 100 > limit 30 → квота ужата до минимума.
+        $this->assertSame(SampleQueryBuilder::MIN_PER_VALUE, $table['stratify'][0]['per_value']);
+        $this->assertSame(30, $table['cap']);
+        $this->assertTrue($table['truncated_by_cap']);
+        $this->assertSame(1, $report->toArray()['summary']['empty_buckets']);
+    }
+
+    public function testCodeLikeBucketValuesAreNamedInTheReport(): void
+    {
+        $this->pkInspector->method('getPrimaryKeyColumns')->willReturn(['id']);
+        $this->connection->method('fetchFirstColumn')->willReturnCallback(function ($sql) {
+            return strpos($sql, 'DISTINCT') !== false ? ['ACTIVE', 'Иванов'] : [1];
+        });
+
+        $sample = [TableConfig::SAMPLE_KEY_STRATIFY_BY => 'status'];
+        $config = new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+        $report = new SampleReportCollector();
+        $builder = new SampleQueryBuilder($this->registry, $this->pkInspector, $this->selectedPk, null, null, null, null, $report);
+
+        $builder->build($config);
+
+        $buckets = $report->toArray()['tables']['public.clients']['buckets'];
+        $this->assertSame('ACTIVE', $buckets[0]['value']);
+        $this->assertArrayNotHasKey('value', $buckets[1]);
+    }
+
+    public function testLongInListIsChunked(): void
+    {
+        $this->pkInspector->method('getPrimaryKeyColumns')->willReturn(['id']);
+        $this->connection->method('fetchFirstColumn')->willReturn(range(1, SampleQueryBuilder::IN_CHUNK + 1));
+
+        $sample = [TableConfig::SAMPLE_KEY_CRITERIA => [['name' => 'any', 'where' => 'id > 0', 'limit' => 5000]]];
+        $config = new TableConfig('public', 'clients', null, null, null, null, null, null, $sample);
+
+        $phase2 = $this->builder()->build($config);
+
+        $this->assertSame(2, substr_count($phase2, '"id" IN ('));
+        $this->assertStringContainsString(') OR "id" IN (', $phase2);
     }
 }

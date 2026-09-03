@@ -62,6 +62,9 @@ class DatabaseDumper
     /** @var SafeQueryPolicy|null */
     private $policy;
 
+    /** @var SampleReportCollector|null */
+    private $sampleReport;
+
     public function __construct(
         DataFetcher $dataFetcher,
         SqlGenerator $sqlGenerator,
@@ -73,7 +76,8 @@ class DatabaseDumper
         DumpConfig $dumpConfig,
         ProductionGuard $productionGuard = null,
         DbdumpConfigStore $configStore = null,
-        SafeQueryPolicy $policy = null
+        SafeQueryPolicy $policy = null,
+        SampleReportCollector $sampleReport = null
     ) {
         $this->dataFetcher = $dataFetcher;
         $this->sqlGenerator = $sqlGenerator;
@@ -86,6 +90,7 @@ class DatabaseDumper
         $this->productionGuard = $productionGuard;
         $this->configStore = $configStore;
         $this->policy = $policy;
+        $this->sampleReport = $sampleReport;
     }
 
     public function setAllowProdExport(bool $allow): void
@@ -202,12 +207,45 @@ class DatabaseDumper
             }
         }
 
+        if ($this->sampleReport !== null) {
+            $this->sampleReport->clear();
+        }
+
         $total = count($ordered);
         $current = 0;
         foreach ($ordered as $config) {
             $current++;
             $this->doExportTable($config, $current, $total);
         }
+
+        $this->writeSampleReport();
+    }
+
+    /**
+     * Ход выборки по критериям — {data_dir}/analysis/sample-report.json: корзины, строки,
+     * усечения. По нему видно, какой вид данных в дамп не попал, без единого значения ПД.
+     */
+    private function writeSampleReport(): void
+    {
+        $report = $this->sampleReport;
+        if ($report === null || $report->isEmpty()) {
+            return;
+        }
+        $dir = $this->projectDir . '/' . $this->dataDir() . '/analysis';
+        $this->ensureDirectoryExists($dir);
+        $payload = $report->toArray();
+        $json = json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $path = $dir . '/sample-report.json';
+        $this->fileSystem->write($path, ($json === false ? '{}' : $json) . "\n");
+
+        $summary = $payload['summary'];
+        $this->logger->info(sprintf(
+            'sample-report.json: таблиц %d, пустых корзин %d, усечено потолком %d — %s',
+            $summary['tables'],
+            $summary['empty_buckets'],
+            $summary['truncated_by_cap'],
+            $path
+        ));
     }
 
     private function guardProd(): void

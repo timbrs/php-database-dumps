@@ -17,8 +17,9 @@ use Timbrs\DatabaseDumps\Service\Validation\Finding;
  *  Q-3 — непригодны ВСЕ критерии таблицы: SampleQueryBuilder пропустит каждый и молча
  *        свалится на плоский срез по limit — сегментов выборки не будет;
  *  Q-4 — повторяющиеся имена критериев внутри таблицы;
- *  Q-5 — сумма квот (плюс худший случай stratify_by × per_value) больше limit: лишние
- *        строки обрежет array_slice в SampleQueryBuilder, и обрежет молча.
+ *  Q-5 — сумма квот (плюс худший случай stratify_by × per_value) больше limit: корзины
+ *        сольются round-robin и каждая отдаст лишь часть строк — квоты обещают больше,
+ *        чем дамп вместит.
  */
 class CriteriaRule implements RuleInterface
 {
@@ -213,17 +214,14 @@ class CriteriaRule implements RuleInterface
             }
         }
 
-        $stratifyBy = isset($sample[TableConfig::SAMPLE_KEY_STRATIFY_BY])
-            ? $sample[TableConfig::SAMPLE_KEY_STRATIFY_BY]
-            : null;
         $buckets = 0;
-        if (is_string($stratifyBy) && $stratifyBy !== '') {
-            $perValue = isset($sample[TableConfig::SAMPLE_KEY_PER_VALUE])
-                ? (int) $sample[TableConfig::SAMPLE_KEY_PER_VALUE]
-                : TableConfig::DEFAULT_PER_VALUE;
-            $buckets = $this->bucketCount($context, $schema, $table, $stratifyBy);
-            $quota += $buckets * $perValue;
+        $perValue = isset($sample[TableConfig::SAMPLE_KEY_PER_VALUE])
+            ? (int) $sample[TableConfig::SAMPLE_KEY_PER_VALUE]
+            : TableConfig::DEFAULT_PER_VALUE;
+        foreach (TableConfig::stratifyColumns($sample) as $stratifyBy) {
+            $buckets += $this->bucketCount($context, $schema, $table, $stratifyBy);
         }
+        $quota += $buckets * $perValue;
 
         if ($quota <= $limit) {
             return [];
@@ -232,8 +230,8 @@ class CriteriaRule implements RuleInterface
         return [Finding::warning(
             'Q-5',
             sprintf(
-                'сумма квот выборки (%d%s) больше limit (%d) — объединённую выборку молча обрежет array_slice, '
-                . 'последние сегменты в дамп не попадут',
+                'сумма квот выборки (%d%s) больше limit (%d) — корзины сольются round-robin, '
+                . 'каждая отдаст лишь часть своих строк (квота stratify_by ужмётся до ⌊limit/корзин⌋)',
                 $quota,
                 $buckets > 0 ? sprintf(', включая %d корзин stratify_by', $buckets) : '',
                 $limit
