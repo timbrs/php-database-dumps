@@ -200,8 +200,15 @@ class DatabaseImporter
             return $names;
         }
 
+        // Основное подключение внутри пакета — это `null`, а зовут его везде «default»
+        // (`$connectionName ?? 'default'` в логах, отчётах и реестре). Снаружи об этом знать
+        // неоткуда: и документация, и ранбуки пишут `--import-connection=default`, а импорт шёл
+        // искать дампы в подкаталог `dumps/default`, которого не бывает. Имя из `connections:`
+        // при этом сильнее: если подключение с таким именем и вправду настроено, берётся оно.
         if ($connectionFilter !== null) {
-            return [$connectionFilter];
+            $isConfigured = array_key_exists($connectionFilter, $this->dumpConfig->getConnectionConfigs());
+
+            return [$connectionFilter === 'default' && !$isConfigured ? null : $connectionFilter];
         }
 
         return [null];

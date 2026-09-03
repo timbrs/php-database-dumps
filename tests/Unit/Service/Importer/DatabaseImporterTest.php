@@ -89,6 +89,43 @@ class DatabaseImporterTest extends TestCase
         );
     }
 
+    /**
+     * `default` — имя основного подключения во всём пакете: так оно значится в реестре, в логах
+     * и в отчётах (`$connectionName ?? 'default'`). Внутри импортёра то же подключение — `null`,
+     * и пока эти два имени не сходились, документированный `--import-connection=default` уходил
+     * искать дампы в подкаталог `dumps/default`, которого не бывает, и стадия импорта падала.
+     */
+    public function testDefaultConnectionNameMeansTheMainConnection(): void
+    {
+        self::assertSame('/project/docker/database/dumps', $this->dumpsPathFor('default'));
+    }
+
+    /** Обычное именованное подключение по-прежнему читает свой подкаталог. */
+    public function testNamedConnectionKeepsItsOwnDirectory(): void
+    {
+        self::assertSame('/project/docker/database/dumps/scratch', $this->dumpsPathFor('scratch'));
+    }
+
+    private function dumpsPathFor(string $connection): string
+    {
+        $importer = $this->createImporter();
+
+        $seen = [];
+        $this->fileSystem->method('isDirectory')->willReturnCallback(function ($path) use (&$seen) {
+            $seen[] = $path;
+
+            return true;
+        });
+        $this->fileSystem->method('findFiles')->willReturn(['/project/database/dumps/public/users.sql']);
+        $this->fileSystem->method('read')->willReturn('INSERT INTO users VALUES (1);');
+        $this->parser->method('parseFile')->willReturn(['INSERT INTO users VALUES (1)']);
+        $this->dependencyResolver->method('sortForImport')->willReturnArgument(0);
+
+        $importer->import(true, true, null, $connection);
+
+        return $seen[0];
+    }
+
     public function testImportDisablesForeignKeyChecksForMysql(): void
     {
         $importer = $this->createImporter('mysql');
