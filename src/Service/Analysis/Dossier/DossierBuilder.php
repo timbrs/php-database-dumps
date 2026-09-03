@@ -152,6 +152,12 @@ class DossierBuilder
         $codeHints = isset($entry['code_hints']) && is_array($entry['code_hints']) ? $entry['code_hints'] : [];
         $hintColumns = isset($codeHints['columns']) && is_array($codeHints['columns']) ? $codeHints['columns'] : [];
 
+        // Замены ПД лежат НЕ в конфиге таблицы, а в отдельной секции `faker:` схемы, и у таблицы
+        // из full_export конфига нет вовсе. Читать их надо оттуда, иначе досье уверяет, что faker'а
+        // нет, — и правила, которые смотрят на текущий паттерн (R4, R11), работают по пустоте.
+        $fakers = $dumpConfig->getFakerConfig()->getTableFaker($schema, $table);
+        $fakers = is_array($fakers) ? $fakers : [];
+
         $columns = [];
         foreach ($this->columnList($entry) as $column => $meta) {
             $columns[$column] = $this->buildColumn(
@@ -160,7 +166,8 @@ class DossierBuilder
                 isset($entry['profiles']) && is_array($entry['profiles']) ? $entry['profiles'] : [],
                 isset($hintColumns[$column]) && is_array($hintColumns[$column]) ? $hintColumns[$column] : [],
                 $raw,
-                $isFull
+                $isFull,
+                $fakers
             );
         }
 
@@ -199,17 +206,15 @@ class DossierBuilder
      * @param array<string, mixed>      $profiles
      * @param array<string, mixed>      $hint
      * @param array<string, mixed>|null $raw
+     * @param array<string, string>     $fakers колонка => паттерн, из секции `faker:` схемы
      *
      * @return array<string, mixed>
      */
-    private function buildColumn(string $column, array $meta, array $profiles, array $hint, $raw, bool $isFull): array
+    private function buildColumn(string $column, array $meta, array $profiles, array $hint, $raw, bool $isFull, array $fakers = []): array
     {
         $profile = $this->profileOf($profiles, $column);
         $enum = isset($hint['enum']) && is_array($hint['enum']) ? $hint['enum'] : null;
-        $faker = null;
-        if ($raw !== null && isset($raw['faker'][$column])) {
-            $faker = $raw['faker'][$column];
-        }
+        $faker = isset($fakers[$column]) ? (string) $fakers[$column] : null;
 
         $codes = isset($profile['codes']) && is_array($profile['codes']) ? array_map('strval', $profile['codes']) : [];
         $coverage = $this->coverage($column, $raw, $isFull);

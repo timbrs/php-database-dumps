@@ -178,8 +178,8 @@
     },
     "faker_pattern": {
       "type": "string",
-      "enum": ["fio", "fio_short", "name", "email", "phone", "firstname", "lastname", "patronymic", "gender"],
-      "description": "Тип паттерна ПД: fio (Фамилия Имя Отчество), fio_short (Фамилия И.О.), name (Фамилия Имя), email, phone, firstname (имя), lastname (фамилия), patronymic (отчество), gender (пол)"
+      "enum": ["fio", "fio_short", "name", "email", "phone", "firstname", "lastname", "patronymic", "gender", "inn", "ogrn", "digits", "birth_date", "doc_number", "doc_series"],
+      "description": "Тип паттерна ПД. Свободные: fio (Фамилия Имя Отчество), fio_short (Фамилия И.О.), name (Фамилия Имя), email, phone, firstname (имя), lastname (фамилия), patronymic (отчество), gender (пол). Привязанные к исходному значению (один вход — всегда один выход, чтобы не рвались связи по ИНН и номерам): inn, ogrn, digits (сохраняет длину — КПП, ОКПО, ОКАТО), birth_date (сдвиг даты), doc_number, doc_series"
     },
     "faker": {
       "description": "Замена персональных данных. Ключ — имя схемы.",

@@ -4,6 +4,7 @@ namespace Timbrs\DatabaseDumps\Tests\Unit\Service\Analysis\Dossier;
 
 use PHPUnit\Framework\TestCase;
 use Timbrs\DatabaseDumps\Config\DumpConfig;
+use Timbrs\DatabaseDumps\Config\FakerConfig;
 use Timbrs\DatabaseDumps\Service\Analysis\Dossier\DossierBuilder;
 
 class DossierBuilderTest extends TestCase
@@ -42,6 +43,18 @@ class DossierBuilderTest extends TestCase
         self::assertSame(['role' => 'dictionary', 'pair' => 'clients_attrs'], $attrs['clients_attrs_dict']['traits']['eav']);
         self::assertTrue($attrs['jobs']['traits']['scd2']);
         self::assertTrue($attrs['jobs']['traits']['active_flag']);
+    }
+
+    public function testFakerIsReadFromTheSchemaSectionNotFromTheTableConfig(): void
+    {
+        $table = (new DossierBuilder())->build('tasks', $this->inventory(), $this->config())['tables']['jobs'];
+
+        // Замены ПД живут в отдельной секции `faker:` схемы, а не внутри конфига таблицы.
+        // Пока досье искало их не там, оно на каждую колонку отвечало «faker'а нет» — и правила,
+        // которые смотрят на текущий паттерн (R4 «нет замены», R11 «замена не по адресу»),
+        // работали по пустоте.
+        self::assertSame('fio', $table['columns']['owner_name']['pii']['faker']);
+        self::assertNull($table['columns']['status_id']['pii']['faker']);
     }
 
     public function testEavPairIsTakenFromTheSchemaNotFromTheName(): void
@@ -228,6 +241,10 @@ class DossierBuilderTest extends TestCase
                     'cascade_from' => [['parent' => 'tasks.jobs', 'fk_column' => 'job_id', 'parent_column' => 'id']],
                 ],
             ],
-        ]);
+        ], [], new FakerConfig([
+            'tasks' => [
+                'jobs' => ['owner_name' => 'fio'],
+            ],
+        ]));
     }
 }
