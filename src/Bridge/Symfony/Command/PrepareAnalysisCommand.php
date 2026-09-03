@@ -107,10 +107,12 @@ class PrepareAnalysisCommand extends Command
             '  ' . $analysisDir . '/schema_inventory.json          полный инвентарь',
             '  ' . $analysisDir . '/schema_inventory.<schema>.json  по одной схеме (для прогона по чанку)',
             '  ' . $analysisDir . '/output_schema.json              контракт JSON-вывода',
-            '  ' . $analysisDir . '/RUN.md                          инструкция запуска',
+            '',
+            'Документация инструмента (рабочий цикл, команды, коды находок):',
+            '  app:dbdump:docs → ' . $analysisDir . '/docs/',
             '',
             'Результат агент кладёт в ' . $dataDir . '/' . AnalysisPackageBuilder::OUT_DIR . '/<schema>.json,',
-            'затем: app:dbdump:apply-analysis — применить, app:dbdump:validate — проверить.',
+            'затем: app:dbdump:apply-analysis — применить, app:dbdump:check — проверить.',
         ]);
 
         if (!empty($schemaFiles)) {

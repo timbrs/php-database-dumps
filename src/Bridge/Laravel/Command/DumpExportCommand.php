@@ -15,8 +15,6 @@ class DumpExportCommand extends Command
         . ' {table? : Имя таблицы (schema.table) или "all"}'
         . ' {--s|schema= : Фильтр по схеме для "all"}'
         . ' {--c|connection= : Имя подключения (или "all")}'
-        . ' {--no-cascade : Пропустить каскадную фильтрацию WHERE}'
-        . ' {--no-faker : Пропустить замену ПД}'
         . ' {--dry-run : Показать план экспорта без выполнения}'
         . ' {--allow-prod-export : Разрешить экспорт на production}';
 

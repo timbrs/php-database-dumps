@@ -199,22 +199,34 @@ class AnalysisPackageBuilderTest extends TestCase
         $this->assertSame('public.clients', $orders['foreign_keys'][0]['references_table']);
     }
 
-    public function testBuildProvisionsAgentAndInventoryFiles(): void
+    public function testBuildProvisionsInventoryAndContract(): void
     {
         $this->written = [];
         $result = $this->builder()->build();
 
         $paths = implode("\n", array_keys($this->written));
         $this->assertStringContainsString('/proj/docker/database/analysis/schema_inventory.json', $paths);
-        $this->assertStringContainsString('/proj/.opencode/agents/dbdump-mapper.md', $paths);
-        $this->assertStringContainsString('/proj/docker/database/analysis/RUN.md', $paths);
         $this->assertStringContainsString('/proj/docker/database/analysis/output_schema.json', $paths);
         $this->assertSame(2, $result['tables']);
     }
 
     /**
-     * Шаблоны для OPENCODE ссылаются на каталог анализа как {data_dir}/analysis. Агент получает
-     * их как есть, поэтому плейсхолдер обязан раскрыться при записи — иначе агент пишет туда,
+     * Готовый агент и RUN.md пакет больше не кладёт: инструкция устаревала отдельно от кода,
+     * её заменила генерируемая документация (app:dbdump:docs) и политика команды в проекте.
+     */
+    public function testBuildNoLongerWritesAgentTemplates(): void
+    {
+        $this->written = [];
+        $this->builder()->build();
+
+        $paths = implode("\n", array_keys($this->written));
+        $this->assertStringNotContainsString('.opencode/', $paths);
+        $this->assertStringNotContainsString('RUN.md', $paths);
+    }
+
+    /**
+     * Контракт вывода ссылается на каталог анализа как {data_dir}/analysis: агент получает его
+     * как есть, поэтому плейсхолдер обязан раскрыться при записи — иначе агент пишет туда,
      * откуда apply-analysis ничего не читает.
      */
     public function testProvisionedResourcesResolveDataDirPlaceholder(): void
@@ -222,18 +234,9 @@ class AnalysisPackageBuilderTest extends TestCase
         $this->written = [];
         $this->builder()->build();
 
-        foreach (['/proj/docker/database/analysis/RUN.md',
-                  '/proj/.opencode/agents/dbdump-mapper.md',
-                  '/proj/.opencode/commands/dbdump-map.md',
-                  '/proj/docker/database/analysis/output_schema.json'] as $path) {
-            $this->assertArrayHasKey($path, $this->written);
-            $this->assertStringNotContainsString('{data_dir}', $this->written[$path], $path);
-        }
-
-        $this->assertStringContainsString(
-            'docker/database/analysis/out/',
-            $this->written['/proj/.opencode/agents/dbdump-mapper.md']
-        );
+        $path = '/proj/docker/database/analysis/output_schema.json';
+        $this->assertArrayHasKey($path, $this->written);
+        $this->assertStringNotContainsString('{data_dir}', $this->written[$path]);
     }
 
     public function testBuildWritesPerSchemaInventory(): void

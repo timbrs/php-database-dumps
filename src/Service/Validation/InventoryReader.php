@@ -103,6 +103,51 @@ class InventoryReader
     }
 
     /**
+     * Предупреждения сборки слепка (P-1 «размер неизвестен», P-2 «нет права SELECT»):
+     * список {code, message, schema, table, column?}. Берутся из монолита, иначе — из
+     * пер-схемных файлов без повторов.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function warnings(): array
+    {
+        $files = [];
+        if ($this->fileSystem->exists($this->path)) {
+            $files[] = $this->path;
+        } else {
+            foreach ($this->discoverSchemaFiles() as $file) {
+                $files[] = $file;
+            }
+        }
+
+        $warnings = [];
+        $seen = [];
+        foreach ($files as $file) {
+            try {
+                $decoded = json_decode($this->fileSystem->read($file), true);
+            } catch (\Throwable $e) {
+                continue;
+            }
+            if (!is_array($decoded) || !isset($decoded['warnings']) || !is_array($decoded['warnings'])) {
+                continue;
+            }
+            foreach ($decoded['warnings'] as $warning) {
+                if (!is_array($warning) || !isset($warning['code'])) {
+                    continue;
+                }
+                $key = json_encode($warning);
+                if ($key === false || isset($seen[$key])) {
+                    continue;
+                }
+                $seen[$key] = true;
+                $warnings[] = $warning;
+            }
+        }
+
+        return $warnings;
+    }
+
+    /**
      * Все схемы слепка (отсортированы).
      *
      * @return array<int, string>

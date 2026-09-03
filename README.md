@@ -149,12 +149,13 @@ php artisan dbdump:prepare-analysis            # Laravel
 php bin/console app:dbdump:prepare-analysis    # Symfony
 ```
 
-Команда сгенерирует в хост-проект всё необходимое для связки с opencode:
+Команда сгенерирует в хост-проект всё необходимое для внешнего агента:
 
-- `.opencode/agents/dbdump-mapper.md` — готовый агент (read-only по коду, пишет только в `docker/database/analysis/out/`);
 - `docker/database/analysis/schema_inventory.json` + `schema_inventory.<schema>.json` — инвентарь БД для агента (**без значений данных** — PII не выгружается);
 - `docker/database/analysis/output_schema.json` — контракт JSON-вывода;
-- `docker/database/analysis/RUN.md` — точные команды для ручного прогона.
+- `docker/database/analysis/out/` — куда агент кладёт результат.
+
+Документацию инструмента (рабочий цикл, команды, коды находок) генерирует `app:dbdump:docs` в `docker/database/analysis/docs/` — она собирается из самого кода и потому не устаревает отдельно от него.
 
 Команда собирает пакет и печатает, где он лежит; агента она **не запускает** — это делается снаружи (см. [Анализ кода через OPENCODE](#анализ-кода-через-opencode)). Результат агента (связи из кода → `cascade_from: source: code`, бизнес-сегменты → `sample.criteria`) применяет `apply-analysis`; отчёт — в `{data_dir}/analysis/REPORT.md`. Пользовательские правки в YAML в приоритете.
 
@@ -654,19 +655,17 @@ php artisan dbdump:prepare-analysis            # Laravel
 php bin/console app:dbdump:prepare-analysis    # Symfony
 ```
 
-Команда собирает пакет (инвентарь схемы, пер-схемные инвентари, контракт вывода, `RUN.md`) и печатает, где он лежит. Прогон агента — снаружи, по `RUN.md`; применение результата — `apply-analysis`.
+Команда собирает пакет (инвентарь схемы, пер-схемные инвентари, контракт вывода) и печатает, где он лежит. Прогон агента — снаружи; применение результата — `apply-analysis`.
 
 **Ручной путь (3 шага)** — если хотите контролировать прогон агента:
 
 ```bash
-# 1. Подготовить пакет (агент + инвентарь + контракт + RUN.md)
+# 1. Подготовить пакет (инвентарь + контракт) и документацию инструмента
 php bin/console app:dbdump:prepare-analysis        # Symfony
-php artisan dbdump:prepare-analysis                # Laravel
+php bin/console app:dbdump:docs                    # WORKFLOW.md / COMMANDS.md / FINDINGS.md
 
-# 2. Запустить агента по чанку на схему (точные строки печатает команда из шага 1, см. также RUN.md)
-opencode run --agent dbdump-mapper \
-  -f docker/database/analysis/schema_inventory.public.json \
-  "Обработай схему public по инструкции; результат запиши в docker/database/analysis/out/public.json"
+# 2. Запустить своего агента по чанку на схему, дав ему инвентарь схемы и контракт вывода
+#    (агент читает код проекта, к БД не подключается — все безопасные факты уже в инвентаре)
 
 # 3. Применить результат к dump_config.yaml
 php bin/console app:dbdump:apply-analysis          # Symfony
@@ -674,15 +673,57 @@ php artisan dbdump:apply-analysis                  # Laravel
 ```
 
 Что провижинит `prepare-analysis` в хост-проект:
-- `.opencode/agents/dbdump-mapper.md` — готовый агент (read-only по коду; пишет только в `docker/database/analysis/out/`);
-- `.opencode/commands/dbdump-map.md` — слэш-команда для TUI (опционально);
-- `docker/database/analysis/schema_inventory.json` — полный инвентарь + `schema_inventory.<schema>.json` по каждой схеме (для прогона по чанку без переполнения контекста 128k), **без значений данных** (PII в OPENCODE не выгружается);
+- `docker/database/analysis/schema_inventory.json` — полный инвентарь + `schema_inventory.<schema>.json` по каждой схеме (для прогона по чанку без переполнения контекста 128k), **без значений данных** (PII агенту не выгружается);
 - `docker/database/analysis/output_schema.json` — JSON-контракт ответа;
-- `docker/database/analysis/RUN.md` — точные команды запуска и применения.
+- `docker/database/analysis/out/` — каталог для результата агента.
+
+> **Изменено в 1.1.32.** Пакет больше не кладёт `.opencode/agents/dbdump-mapper.md`, `.opencode/commands/dbdump-map.md` и `analysis/RUN.md`: инструкция устаревала отдельно от кода. Её место заняли `app:dbdump:docs` (документация из самого инструмента) и политика запуска агента в проекте.
 
 `apply-analysis` читает `docker/database/analysis/out/*.json`, валидирует против контракта, объединяет чанки и обогащает `dump_config.yaml`: `cascade_from` из кода (с пометкой `source: code` в отчёте) и `sample.criteria` из бизнес-сегментов. Пользовательские правки в приоритете — добавляется только отсутствующее; провенанс/уверенность фиксируются в `docker/database/analysis/REPORT.md`.
 
-Провайдер и модель LLM предполагаются уже настроенными в opencode пользователя (`~/.config/opencode/opencode.json`); агент не задаёт модель явно и наследует дефолтную — отдельной настройки не требуется. Для больших схем дробите прогон по чанку на схему (см. RUN.md).
+Для больших схем дробите прогон по чанку на схему — пер-схемные инвентари для того и пишутся.
+
+## Одна команда проверки: `check`
+
+`check` прогоняет все проверки и складывает находки в одно пространство кодов. Стадии выбираются
+по тому, что доступно, и каждая честно докладывает, почему пропущена:
+
+| стадия | что проверяет | что нужно |
+|---|---|---|
+| `static` | конфиг против слепка схемы (коды S/C/L/Q-1…Q-5/F/G/D/H); `--fix` чинит однозначное | слепок |
+| `live` | каждый `sample.criterion` в БД под `statement_timeout`: `Q-7` падает, `Q-8` таймаут, `Q-6` корзина пуста; `P-1`/`P-2` из слепка | живая БД |
+| `plan` | что и как будет выгружено: режим, `where`, каскад, корзины | ничего |
+| `dump` | что реально легло в `dumps/`: `V-1`…`V-8` | файлы дампа |
+| `import` | контрольная заливка в scratch-БД: `I-1`…`I-4` | `--import-connection` |
+
+```bash
+php bin/console app:dbdump:check                                  # все доступные стадии
+php bin/console app:dbdump:check --stage=static --fix              # только конфиг, с автоправками
+php bin/console app:dbdump:check --stage=dump -s persons           # дампы одной схемы
+php bin/console app:dbdump:check --tables-from=docker/database/analysis/dirty.json
+php bin/console app:dbdump:check --format=json --out=docker/database/analysis/check.json
+php bin/console app:dbdump:check --stage=import --import-connection=scratch
+```
+
+Опции: `--stage` (повторяемая; по умолчанию все, кроме `plan`), `-s|--schema`, `--tables-from`
+(файл со списком `schema.table` или `dirty.json`), `--config`, `--inventory`, `-c|--connection`,
+`--import-connection`, `--fail-on=error|warning|note` (порог кода возврата 1), `--fix`,
+`--format=text|json`, `--out`.
+
+Отчёт — один JSON: `{generated_at, run_id, stages:{ran, why_skipped, ms, queries, …}, summary,
+coverage, findings[]}`, у каждой находки есть `stage`. Узкие команды `validate`, `check-criteria`
+и `verify-dump` остаются рабочими: это подмножества `check` с прежними опциями.
+
+## Документация из инструмента: `docs`
+
+```bash
+php bin/console app:dbdump:docs        # → docker/database/analysis/docs/
+php bin/console app:dbdump              # рабочий цикл кратко + список команд
+```
+
+`docs` пишет три файла: `WORKFLOW.md` (рабочий цикл), `COMMANDS.md` (собран из определений команд —
+те же опции, что в `--help`), `FINDINGS.md` (реестр кодов: стадия, уровень, смысл, чинится ли
+`--fix`, кто решает). Это же кладут в проект для агента, чтобы он не гадал по устаревшему мануалу.
 
 ## Проверка конфига без БД (validate)
 

@@ -175,7 +175,9 @@ class ColumnExistenceRuleTest extends ValidationTestCase
 
         $bad = $this->findings(['limit' => 10, 'sample' => ['stratify' => [['column' => 'status', 'then' => ['column' => 'colour']]]]]);
         $this->assertSame(1, $this->countCode($bad, 'L-5'));
-        $this->assertSame('colour', $this->firstWithCode($bad, 'L-5')->getColumn());
+        $finding = $this->firstWithCode($bad, 'L-5');
+        $this->assertNotNull($finding);
+        $this->assertSame('colour', $finding->getColumn());
     }
 
     public function testStratifyViaChecksChildTableAndBothSidesOfTheJoin(): void
@@ -190,7 +192,9 @@ class ColumnExistenceRuleTest extends ValidationTestCase
 
         $badTable = $this->findings(['limit' => 10, 'sample' => ['stratify_via' => [array_merge($via, ['table' => 'pub.nope'])]]]);
         $this->assertSame(1, $this->countCode($badTable, 'L-5'));
-        $this->assertStringContainsString('нет в слепке', $this->firstWithCode($badTable, 'L-5')->getMessage());
+        $tableFinding = $this->firstWithCode($badTable, 'L-5');
+        $this->assertNotNull($tableFinding);
+        $this->assertStringContainsString('нет в слепке', $tableFinding->getMessage());
 
         $badJoin = $this->findings(['limit' => 10, 'sample' => ['stratify_via' => [array_merge($via, ['join' => ['nope_id' => 'nope']])]]]);
         // Обе стороны связи: колонки нет ни у orders (nope), ни у orders_lines (nope_id).

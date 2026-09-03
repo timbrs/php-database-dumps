@@ -17,24 +17,24 @@ use Timbrs\DatabaseDumps\Service\Db\RowEstimate;
 use Timbrs\DatabaseDumps\Service\Graph\TableDependencyResolver;
 
 /**
- * Готовит пакет для анализа кода хоста агентом OPENCODE (dbdump-mapper):
- *  - .opencode/agents/dbdump-mapper.md      — готовый агент (read-only код + запись в out/)
- *  - .opencode/commands/dbdump-map.md       — слэш-команда (опционально)
+ * Готовит пакет для анализа кода хоста внешним агентом:
  *  - {data_dir}/analysis/schema_inventory.json — вход (схемы/таблицы/колонки/FK/профили, БЕЗ значений данных)
+ *  - {data_dir}/analysis/schema_inventory.<schema>.json — то же по одной схеме (прогон по чанку)
  *  - {data_dir}/analysis/output_schema.json    — JSON-контракт вывода
- *  - {data_dir}/analysis/RUN.md                — инструкции запуска
- *  - {data_dir}/analysis/out/                — каталог для результатов агента
+ *  - {data_dir}/analysis/out/                  — каталог для результатов агента
  *
- * Сам прогон OPENCODE пользователь запускает вручную по RUN.md; модуль его не вызывает.
- * Sample-значения PII в инвентарь НЕ кладутся (только типы/кардинальность).
+ * Готовый файл агента и RUN.md пакет больше не кладёт: инструкция устаревала с каждым релизом
+ * отдельно от кода. Её место заняла `app:dbdump:docs` — WORKFLOW/COMMANDS/FINDINGS генерируются
+ * из самого инструмента, а политика запуска агента живёт в проекте (`.opencode/commands/`).
+ *
+ * Сам прогон агента модуль не вызывает. Sample-значения PII в инвентарь НЕ кладутся
+ * (только типы/кардинальность и коды после PII-шлюза).
  */
 class AnalysisPackageBuilder
 {
     /** Суффиксы каталогов анализа относительно data_dir (полный путь: {data_dir}/analysis). */
     public const ANALYSIS_DIR = 'analysis';
     public const OUT_DIR = 'analysis/out';
-    public const OPENCODE_AGENTS_DIR = '.opencode/agents';
-    public const OPENCODE_COMMANDS_DIR = '.opencode/commands';
 
     /** @var FileSystemInterface */
     private $fileSystem;
@@ -129,10 +129,8 @@ class AnalysisPackageBuilder
         $dataDir = $this->dataDir();
         $analysisDir = $this->projectDir . '/' . $dataDir . '/' . self::ANALYSIS_DIR;
         $outDir = $this->projectDir . '/' . $dataDir . '/' . self::OUT_DIR;
-        $agentsDir = $this->projectDir . '/' . self::OPENCODE_AGENTS_DIR;
-        $commandsDir = $this->projectDir . '/' . self::OPENCODE_COMMANDS_DIR;
 
-        foreach ([$analysisDir, $outDir, $agentsDir, $commandsDir] as $dir) {
+        foreach ([$analysisDir, $outDir] as $dir) {
             $this->ensureDir($dir);
         }
 
@@ -179,27 +177,6 @@ class AnalysisPackageBuilder
         if ($contract !== null) {
             $p = $analysisDir . '/output_schema.json';
             $this->fileSystem->write($p, $contract);
-            $paths[] = $p;
-        }
-
-        $agent = $this->renderResource('dbdump-mapper.md', $dataDir);
-        if ($agent !== null) {
-            $p = $agentsDir . '/dbdump-mapper.md';
-            $this->fileSystem->write($p, $agent);
-            $paths[] = $p;
-        }
-
-        $command = $this->renderResource('dbdump-map.command.md', $dataDir);
-        if ($command !== null) {
-            $p = $commandsDir . '/dbdump-map.md';
-            $this->fileSystem->write($p, $command);
-            $paths[] = $p;
-        }
-
-        $run = $this->renderResource('RUN.md', $dataDir);
-        if ($run !== null) {
-            $p = $analysisDir . '/RUN.md';
-            $this->fileSystem->write($p, $run);
             $paths[] = $p;
         }
 

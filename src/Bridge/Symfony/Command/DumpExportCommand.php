@@ -38,8 +38,6 @@ class DumpExportCommand extends Command
             ->addArgument('table', InputArgument::OPTIONAL, 'Имя таблицы (schema.table) или "all"')
             ->addOption('schema', 's', InputOption::VALUE_REQUIRED, 'Фильтр по схеме для "all"')
             ->addOption('connection', 'c', InputOption::VALUE_REQUIRED, 'Имя подключения (или "all")')
-            ->addOption('no-cascade', null, InputOption::VALUE_NONE, 'Пропустить каскадную фильтрацию WHERE')
-            ->addOption('no-faker', null, InputOption::VALUE_NONE, 'Пропустить замену ПД')
             ->addOption('dry-run', null, InputOption::VALUE_NONE, 'Показать план экспорта без выполнения')
             ->addOption('allow-prod-export', null, InputOption::VALUE_NONE,
                 'Разрешить экспорт на production (после ручной верификации faker-конфига)');

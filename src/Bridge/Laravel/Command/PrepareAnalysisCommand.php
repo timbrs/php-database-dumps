@@ -86,7 +86,6 @@ class PrepareAnalysisCommand extends Command
         $this->line('  ' . $analysisDir . '/schema_inventory.json          полный инвентарь');
         $this->line('  ' . $analysisDir . '/schema_inventory.<schema>.json  по одной схеме');
         $this->line('  ' . $analysisDir . '/output_schema.json              контракт JSON-вывода');
-        $this->line('  ' . $analysisDir . '/RUN.md                          инструкция запуска');
         $this->line('');
         $this->line('Результат агент кладёт в ' . $dataDir . '/' . AnalysisPackageBuilder::OUT_DIR . '/<schema>.json,');
         $this->line('затем: dbdump:apply-analysis — применить, dbdump:validate — проверить.');

@@ -277,3 +277,25 @@ services:
             $dataDir: '%database_dumps.data_dir%'
         tags:
             - { name: 'console.command', command: 'app:dbdump:verify-dump' }
+
+    # Единая проверка: стадии static/live/plan/dump/import, один JSON, реестр кодов FindingCatalog.
+    Timbrs\DatabaseDumps\Service\Check\CheckRunner:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+
+    Timbrs\DatabaseDumps\Bridge\Symfony\Command\CheckCommand:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+            $configPath: '%database_dumps.config_path%'
+        tags:
+            - { name: 'console.command', command: 'app:dbdump:check' }
+
+    Timbrs\DatabaseDumps\Bridge\Symfony\Command\DocsCommand:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+        tags:
+            - { name: 'console.command', command: 'app:dbdump:docs' }
+
+    Timbrs\DatabaseDumps\Bridge\Symfony\Command\WorkflowCommand:
+        tags:
+            - { name: 'console.command', command: 'app:dbdump' }

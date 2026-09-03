@@ -35,7 +35,6 @@ class DbInitCommand extends Command
             ->addOption('skip-after', null, InputOption::VALUE_NONE, 'Пропустить after_exec скрипты')
             ->addOption('schema', 's', InputOption::VALUE_REQUIRED, 'Импорт только указанной схемы')
             ->addOption('connection', 'c', InputOption::VALUE_REQUIRED, 'Имя подключения (или "all" для всех)')
-            ->addOption('no-cascade', null, InputOption::VALUE_NONE, 'Пропустить топологическую сортировку импорта')
             ->addOption('ignore-schema-mismatch', null, InputOption::VALUE_NONE, 'Импортировать даже при расхождении схемы дампа и БД')
             ->addOption('out', null, InputOption::VALUE_REQUIRED, 'Записать отчёт импорта (JSON) в файл')
             ->setHelp(<<<'HELP'
