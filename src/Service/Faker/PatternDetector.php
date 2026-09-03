@@ -90,6 +90,9 @@ class PatternDetector
     /** Международный телефонный формат: 7..15 цифр (после удаления non-digit) */
     private const REGEX_PHONE_INTL = '/^\d{7,15}$/';
 
+    /** Дата или метка времени: ISO (`2025-01-02`, `2025-01-02 10:30:00`) и русская (`31.12.2025`). */
+    private const REGEX_DATE_LIKE = '/^(\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?|\d{2}[.\/]\d{2}[.\/]\d{4})/';
+
     /** 3 слова: кириллица или латиница (с дефисами, апострофами) */
     private const REGEX_FIO = '/^[А-ЯЁа-яёA-Za-z\']+(?:[\-\s][А-ЯЁа-яёA-Za-z\']+)?\s+[А-ЯЁа-яёA-Za-z\']+(?:[\-\s][А-ЯЁа-яёA-Za-z\']+)?\s+[А-ЯЁа-яёA-Za-z\']+(?:[\-\s][А-ЯЁа-яёA-Za-z\']+)?$/u';
     /** Фамилия + 2 инициала с точками */
@@ -423,7 +426,15 @@ class PatternDetector
                 return (bool) preg_match(self::REGEX_EMAIL, trim($v));
             },
             self::PATTERN_PHONE => function (string $v) {
-                $cleaned = preg_replace('/[^\d]/', '', $v);
+                $trimmed = trim($v);
+                // Форму проверяем ДО срезания разделителей: дата `2025-01-02` превращается в
+                // 8 цифр, метка времени — в 14, и обе попадают ровно в диапазон телефона. Без
+                // этого V-7 объявляет утечкой ПД любую колонку с датами, а это ошибка, которая
+                // запирает выгрузку с прода.
+                if (preg_match(self::REGEX_DATE_LIKE, $trimmed) === 1) {
+                    return false;
+                }
+                $cleaned = preg_replace('/[^\d]/', '', $trimmed);
                 return $cleaned !== null && $cleaned !== '' && preg_match(self::REGEX_PHONE_INTL, $cleaned);
             },
             self::PATTERN_FIO => function (string $v) {

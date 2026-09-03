@@ -115,6 +115,39 @@ class ValueCoverageVerifier implements DumpVerifierInterface
     }
 
     /**
+     * Есть ли значение в дампе — с поправкой на написание.
+     *
+     * `pg_stats` отдаёт булево как `t`/`f`, а в дампе стоит SQL-литерал `TRUE`/`FALSE`. При
+     * прямом сравнении колонка, выгруженная целиком, выглядела «не покрытой»: оба кода из двух
+     * отсутствуют. Цифры при этом не трогаем — у integer-колонки коды `1` и `0` это значения,
+     * а не булево, и подменять их написанием нельзя.
+     */
+    private function present(CountingSetSink $sink, string $code): bool
+    {
+        foreach ($this->spellings($code) as $spelling) {
+            if ($sink->has($spelling)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** @return array<int, string> */
+    private function spellings(string $code): array
+    {
+        $low = strtolower(trim($code));
+        if ($low === 't' || $low === 'true') {
+            return ['t', 'true', 'TRUE', 'True'];
+        }
+        if ($low === 'f' || $low === 'false') {
+            return ['f', 'false', 'FALSE', 'False'];
+        }
+
+        return [$code];
+    }
+
+    /**
      * @param array<string, mixed> $profile
      */
     private function compare(TableConfig $config, string $column, CountingSetSink $sink, array $profile): ?Finding
@@ -125,7 +158,7 @@ class ValueCoverageVerifier implements DumpVerifierInterface
         if ($codes !== []) {
             $missing = [];
             foreach ($codes as $code) {
-                if (!$sink->has($code)) {
+                if (!$this->present($sink, $code)) {
                     $missing[] = $code;
                 }
             }

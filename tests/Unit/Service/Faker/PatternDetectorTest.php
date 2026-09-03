@@ -408,4 +408,41 @@ class PatternDetectorTest extends TestCase
         $this->assertTrue(PatternDetector::hintsPii('фио'));
         $this->assertFalse(PatternDetector::hintsPii('status_id'));
     }
+
+    /**
+     * Дата — не телефон.
+     *
+     * Проверка «похоже на телефон» срезала все нецифровые символы и смотрела на длину: `2025-01-02`
+     * превращалось в 8 цифр, метка времени — в 14, и обе попадали в диапазон 7–15. Из-за этого V-7
+     * объявлял утечкой персональных данных любую колонку с датами без faker, а это ошибка, которая
+     * запирает выгрузку с прода.
+     *
+     * @dataProvider dateShapes
+     */
+    public function testDatesAreNotDetectedAsPhones(string $value): void
+    {
+        $values = array_fill(0, 20, $value);
+
+        self::assertNull(PatternDetector::detectPatternInValues('value_date', $values));
+    }
+
+    /** @return array<string, array{string}> */
+    public static function dateShapes(): array
+    {
+        return [
+            'ISO-дата' => ['2025-01-02'],
+            'метка времени' => ['2025-01-02 10:30:00'],
+            'ISO с T' => ['2025-01-02T10:30:00'],
+            'русская дата' => ['31.12.2025'],
+        ];
+    }
+
+    /** Настоящие телефоны при этом по-прежнему опознаются — иначе лечение хуже болезни. */
+    public function testRealPhonesAreStillDetected(): void
+    {
+        $values = array_fill(0, 10, '+7 (999) 123-45-67');
+        $values[] = '89991234567';
+
+        self::assertSame(PatternDetector::PATTERN_PHONE, PatternDetector::detectPatternInValues('contact', $values));
+    }
 }

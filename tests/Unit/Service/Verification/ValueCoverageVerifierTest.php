@@ -77,6 +77,42 @@ class ValueCoverageVerifierTest extends TestCase
         self::assertSame([], $this->verify($inventory));
     }
 
+    /**
+     * Булево пишется по-разному по обе стороны сверки: в дампе стоит SQL-литерал `TRUE`/`FALSE`,
+     * а `pg_stats` отдаёт `t`/`f`. Пока сравнивали буквально, колонка, выгруженная целиком,
+     * числилась непокрытой — «2 из 2 кодов отсутствуют» на полном экспорте.
+     */
+    public function testBooleanCodesMatchSqlLiteralsInTheDump(): void
+    {
+        $this->rawDump("(1, TRUE, 'a'),
+(2, FALSE, 'b')");
+        $inventory = $this->inventory([
+            ['column' => 'status', 'data_type' => 'boolean', 'distinct_count' => 2, 'categorical' => true,
+                'codes' => ['t', 'f'], 'codes_complete' => true, 'n_distinct_source' => 'pg_stats'],
+        ]);
+
+        self::assertSame([], $this->verify($inventory));
+    }
+
+    /**
+     * А вот цифры подменять написанием нельзя: у integer-колонки `1` и `0` — обычные значения,
+     * и пропажу нуля надо показать, а не списать на булево.
+     */
+    public function testDigitCodesAreNotTreatedAsBooleans(): void
+    {
+        $this->rawDump("(1, 1, 'a'),
+(2, 1, 'b')");
+        $inventory = $this->inventory([
+            ['column' => 'status', 'data_type' => 'integer', 'distinct_count' => 2, 'categorical' => true,
+                'codes' => ['1', '0'], 'codes_complete' => true, 'n_distinct_source' => 'pg_stats'],
+        ]);
+
+        $findings = $this->verify($inventory);
+
+        self::assertCount(1, $findings);
+        self::assertSame(['0'], $findings[0]->getSuggestion()['missing_codes']);
+    }
+
     public function testWithoutInventoryNothingIsChecked(): void
     {
         $this->dump([['red', 'a']]);
@@ -110,6 +146,17 @@ class ValueCoverageVerifierTest extends TestCase
         file_put_contents(
             $this->root . '/public/clients.sql',
             "INSERT INTO \"public\".\"clients\" (\"id\", \"status\", \"owner\") VALUES\n" . implode(",\n", $tuples) . ";\n"
+        );
+    }
+
+    /** Дамп с готовыми кортежами — когда значения не строки (булево, числа). */
+    private function rawDump(string $tuples): void
+    {
+        file_put_contents(
+            $this->root . '/public/clients.sql',
+            "INSERT INTO \"public\".\"clients\" (\"id\", \"status\", \"owner\") VALUES
+" . $tuples . ";
+"
         );
     }
 
