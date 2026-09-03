@@ -422,4 +422,132 @@ class ConfigEnricherTest extends TestCase
         $this->assertCount(1, $criteria);
         $this->assertSame('is_active = true', $criteria[0]['where']); // не заменён
     }
+
+    public function testApplyDecisionsWritesConfigAndReport(): void
+    {
+        $enricher = $this->enricher($this->baseConfig());
+        $stats = $enricher->applyDecisions(self::CONFIG_PATH, [
+            [
+                'id' => 'a1',
+                'table' => 'public.orders',
+                'column' => null,
+                'kind' => 'limit',
+                'current' => 500,
+                'proposed' => 2000,
+                'rule' => 'R1',
+                'why' => 'таблица крупнее порога',
+                'evidence' => [['source' => 'db', 'note' => 'reltuples']],
+                'confidence' => 'high',
+                'auto' => false,
+                'accepted' => true,
+                'override' => true,
+            ],
+            [
+                'id' => 'a2',
+                'table' => 'public.clients',
+                'column' => 'last_name',
+                'kind' => 'faker',
+                'current' => null,
+                'proposed' => 'lastname',
+                'rule' => 'R4',
+                'why' => 'колонка с ПД-именем без faker',
+                'evidence' => [],
+                'confidence' => 'high',
+                'auto' => true,
+            ],
+            [
+                'id' => 'a3',
+                'table' => 'public.clients',
+                'column' => null,
+                'kind' => 'stratify',
+                'current' => null,
+                'proposed' => [['column' => 'status_id', 'per_value' => 100]],
+                'rule' => 'R3',
+                'why' => 'категориальная колонка без покрытия',
+                'evidence' => [],
+                'confidence' => 'med',
+                'auto' => false,
+            ],
+        ]);
+
+        $this->assertSame(2, $stats['applied']);
+        $this->assertSame(1, $stats['skipped']);
+        $this->assertSame(0, $stats['stale']);
+
+        $written = Yaml::parse($this->written[self::CONFIG_PATH]);
+        $this->assertSame(2000, $written['partial_export']['public']['orders']['limit']);
+        $this->assertSame('lastname', $written['faker']['public']['clients']['last_name']);
+        // Решение без accepted в конфиг не попало.
+        $this->assertArrayNotHasKey('sample', $written['partial_export']['public']['clients']);
+
+        $reportPath = '/proj/docker/database/analysis/' . ConfigEnricher::APPLY_REPORT_FILE;
+        $this->assertArrayHasKey($reportPath, $this->written);
+        $report = json_decode($this->written[$reportPath], true);
+        $this->assertSame(3, $report['summary']['total']);
+        $this->assertSame(['public.clients', 'public.orders'], $report['changed_tables']);
+
+        // Провенанс в отчёте: правило, обоснование и доказательства.
+        $byId = [];
+        foreach ($report['decisions'] as $entry) {
+            $byId[$entry['id']] = $entry;
+        }
+        $this->assertSame('R1', $byId['a1']['rule']);
+        $this->assertSame('таблица крупнее порога', $byId['a1']['why']);
+        $this->assertSame('db', $byId['a1']['evidence'][0]['source']);
+        $this->assertSame('applied', $byId['a1']['status']);
+        $this->assertSame('skipped_not_accepted', $byId['a3']['status']);
+        $this->assertFalse($byId['a3']['stale']);
+    }
+
+    /**
+     * Конфиг поправили после анализа: решение видело другое значение и молча затирать
+     * ручную правку не должно.
+     */
+    public function testApplyDecisionsMarksOutdatedDecisionStale(): void
+    {
+        $enricher = $this->enricher($this->baseConfig());
+        $stats = $enricher->applyDecisions(self::CONFIG_PATH, [[
+            'id' => 'b1',
+            'table' => 'public.orders',
+            'kind' => 'limit',
+            'current' => 10,
+            'proposed' => 2000,
+            'rule' => 'R1',
+            'why' => 'порог',
+            'auto' => false,
+            'accepted' => true,
+            'override' => true,
+        ]]);
+
+        $this->assertSame(0, $stats['applied']);
+        $this->assertSame(1, $stats['stale']);
+        // Конфиг не перезаписан: applied == 0.
+        $this->assertArrayNotHasKey(self::CONFIG_PATH, $this->written);
+
+        $report = json_decode(
+            $this->written['/proj/docker/database/analysis/' . ConfigEnricher::APPLY_REPORT_FILE],
+            true
+        );
+        $this->assertTrue($report['decisions'][0]['stale']);
+        $this->assertSame(1, $report['summary']['by_status']['stale']);
+    }
+
+    public function testApplyDecisionsReportsInvalidProposal(): void
+    {
+        $enricher = $this->enricher($this->baseConfig());
+        $stats = $enricher->applyDecisions(self::CONFIG_PATH, [[
+            'id' => 'c1',
+            'table' => 'public.orders',
+            'kind' => 'order_by',
+            'current' => null,
+            'proposed' => ['не строка'],
+            'rule' => 'R1',
+            'why' => 'нужен детерминированный порядок',
+            'auto' => true,
+        ]]);
+
+        $this->assertSame(0, $stats['applied']);
+        $this->assertSame(1, $stats['invalid']);
+        $this->assertArrayNotHasKey(self::CONFIG_PATH, $this->written);
+    }
 }

@@ -11,16 +11,20 @@ use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigSplitter;
 
 /**
- * Переносит принятые предложения из анализа кода (OPENCODE) в dump_config.yaml:
- *  - cascade_from (source: code) — связи без FK,
- *  - sample.criteria — именованные бизнес-сегменты.
+ * Переносит принятые предложения в dump_config.yaml.
+ *
+ * Два входа, одна запись:
+ *  - `applyDecisions()` — решения (`decisions.<schema>.json`): любой из одиннадцати видов
+ *    изменения, апплаеры в DecisionApplier, отчёт с провенансом в `apply-report.json`;
+ *  - `enrich()` — старый вывод агента (`out/*.json`): только `cascade_from` (source: code)
+ *    и `sample.criteria`. Остаётся, пока живы прогоны `dbdump-mapper`.
  *
  * Пользовательские правки в приоритете: добавляется только отсутствующее
  * (cascade_from-рёбра по (parent, fk_column); критерии по name). Невалидные
  * предложения отбрасываются (проверка через TableConfig).
  *
- * Провенанс/уверенность фиксируются в REPORT.md (symfony/yaml не хранит
- * комментарии); значения попадают в YAML.
+ * Провенанс/уверенность фиксируются в отчётах (symfony/yaml не хранит комментарии);
+ * в YAML попадают только значения.
  */
 class ConfigEnricher
 {
@@ -30,6 +34,9 @@ class ConfigEnricher
      * использованием как ключей конфига (которые могут стать путями файлов в ConfigSplitter).
      */
     private const IDENTIFIER_REGEX = '/^[\p{L}_][\p{L}\p{N}_$]*$/u';
+
+    /** Отчёт о применении решений: что записано, что пропущено и почему. */
+    public const APPLY_REPORT_FILE = 'apply-report.json';
 
     /** @var FileSystemInterface */
     private $fileSystem;
@@ -46,18 +53,188 @@ class ConfigEnricher
     /** @var DbdumpConfigStore|null */
     private $configStore;
 
+    /** @var DecisionApplier */
+    private $decisionApplier;
+
     public function __construct(
         FileSystemInterface $fileSystem,
         ConfigSplitter $configSplitter,
         LoggerInterface $logger,
         ?string $projectDir = null,
-        DbdumpConfigStore $configStore = null
+        DbdumpConfigStore $configStore = null,
+        DecisionApplier $decisionApplier = null
     ) {
         $this->fileSystem = $fileSystem;
         $this->configSplitter = $configSplitter;
         $this->logger = $logger;
         $this->projectDir = $projectDir !== null ? rtrim($projectDir, '/\\') : null;
         $this->configStore = $configStore;
+        $this->decisionApplier = $decisionApplier !== null ? $decisionApplier : new DecisionApplier();
+    }
+
+    /**
+     * Применить решения из decisions.<schema>.json.
+     *
+     * Записи с `auto: true` применяются сами (механическое: faker на ПД-имя, связь по
+     * внешнему ключу, удаление таблицы, которой нет в БД). Остальные — только с отметкой
+     * `accepted` от агента или человека. Существующее значение побеждает без `override`,
+     * а решение, исходившее из другого состояния конфига, помечается `stale` и не
+     * применяется: между анализом и применением конфиг могли поправить руками.
+     *
+     * @param array<int, array<string, mixed>> $decisions записи из decisions.<schema>.json
+     *
+     * @return array{applied: int, skipped: int, stale: int, invalid: int, results: array<int, array<string, mixed>>}
+     *
+     * @throws \RuntimeException если конфиг не найден
+     */
+    public function applyDecisions(string $configPath, array $decisions): array
+    {
+        if (!$this->fileSystem->exists($configPath)) {
+            throw new \RuntimeException(
+                "dump_config.yaml не найден ({$configPath}). Сначала выполните prepare-config."
+            );
+        }
+
+        $raw = Yaml::parse($this->fileSystem->read($configPath));
+        if (!is_array($raw)) {
+            $raw = [];
+        }
+        $wasSplit = $this->isSplit($raw);
+        $config = $this->resolveIncludes($raw, dirname($configPath));
+
+        $results = [];
+        $counters = ['applied' => 0, 'skipped' => 0, 'stale' => 0, 'invalid' => 0];
+
+        foreach ($decisions as $decision) {
+            if (!is_array($decision)) {
+                continue;
+            }
+            $outcome = $this->decisionApplier->apply($config, $decision);
+            $status = $outcome['status'];
+
+            if ($status === DecisionApplier::STATUS_APPLIED) {
+                $counters['applied']++;
+            } elseif ($status === DecisionApplier::STATUS_STALE) {
+                $counters['stale']++;
+            } elseif ($status === DecisionApplier::STATUS_INVALID
+                || $status === DecisionApplier::STATUS_UNSUPPORTED
+            ) {
+                $counters['invalid']++;
+                $this->logger->warning(sprintf(
+                    'Решение %s (%s) отброшено: %s',
+                    isset($decision['id']) ? (string) $decision['id'] : '?',
+                    isset($decision['kind']) ? (string) $decision['kind'] : '?',
+                    isset($outcome['reason']) ? $outcome['reason'] : 'без причины'
+                ));
+            } else {
+                $counters['skipped']++;
+            }
+
+            $results[] = $this->decisionOutcome($decision, $outcome);
+        }
+
+        if ($counters['applied'] > 0) {
+            if ($wasSplit) {
+                $this->configSplitter->split($configPath, $config);
+            } else {
+                $this->fileSystem->write($configPath, Yaml::dump($config, 6, 2));
+            }
+        }
+
+        $this->writeApplyReport($this->resolveAnalysisDir($configPath), $counters, $results);
+
+        $this->logger->info(sprintf(
+            'Решения применены: %d записано, %d пропущено, %d устарело, %d отброшено',
+            $counters['applied'],
+            $counters['skipped'],
+            $counters['stale'],
+            $counters['invalid']
+        ));
+
+        return $counters + ['results' => $results];
+    }
+
+    /**
+     * Провенанс решения в отчёт: почему предложили, на чём основано, что с ним стало.
+     *
+     * @param array<string, mixed> $decision
+     * @param array{status: string, reason?: string} $outcome
+     *
+     * @return array<string, mixed>
+     */
+    private function decisionOutcome(array $decision, array $outcome): array
+    {
+        $entry = [
+            'id' => isset($decision['id']) ? (string) $decision['id'] : null,
+            'table' => isset($decision['table']) ? (string) $decision['table'] : null,
+            'column' => isset($decision['column']) ? $decision['column'] : null,
+            'kind' => isset($decision['kind']) ? (string) $decision['kind'] : null,
+            'rule' => isset($decision['rule']) ? (string) $decision['rule'] : null,
+            'why' => isset($decision['why']) ? (string) $decision['why'] : null,
+            'confidence' => isset($decision['confidence']) ? (string) $decision['confidence'] : null,
+            'auto' => !empty($decision['auto']),
+            'accepted' => isset($decision['accepted']) ? (bool) $decision['accepted'] : null,
+            'override' => !empty($decision['override']),
+            'evidence' => isset($decision['evidence']) && is_array($decision['evidence'])
+                ? $decision['evidence']
+                : [],
+            'status' => $outcome['status'],
+        ];
+        if (isset($outcome['reason'])) {
+            $entry['reason'] = $outcome['reason'];
+        }
+        if (isset($decision['comment']) && is_string($decision['comment'])) {
+            $entry['comment'] = $decision['comment'];
+        }
+        // stale — это диагноз для человека, а не поле решения: пишем его отдельным флагом,
+        // чтобы отчёт можно было отфильтровать одним ключом.
+        $entry['stale'] = $outcome['status'] === DecisionApplier::STATUS_STALE;
+
+        return $entry;
+    }
+
+    /**
+     * @param array<string, int>               $counters
+     * @param array<int, array<string, mixed>> $results
+     */
+    private function writeApplyReport(string $analysisDir, array $counters, array $results): void
+    {
+        if (!$this->fileSystem->exists($analysisDir)) {
+            $this->fileSystem->createDirectory($analysisDir);
+        }
+
+        $byStatus = [];
+        $byRule = [];
+        $files = [];
+        foreach ($results as $entry) {
+            $status = (string) $entry['status'];
+            $byStatus[$status] = (isset($byStatus[$status]) ? $byStatus[$status] : 0) + 1;
+            if ($entry['rule'] !== null) {
+                $byRule[$entry['rule']] = (isset($byRule[$entry['rule']]) ? $byRule[$entry['rule']] : 0) + 1;
+            }
+            if ($status === DecisionApplier::STATUS_APPLIED && $entry['table'] !== null) {
+                $files[(string) $entry['table']] = true;
+            }
+        }
+        ksort($byStatus);
+        ksort($byRule);
+        ksort($files);
+
+        $report = [
+            'generated_at' => gmdate('Y-m-d\TH:i:s\Z'),
+            'summary' => $counters + [
+                'total' => count($results),
+                'by_status' => $byStatus,
+                'by_rule' => $byRule,
+            ],
+            'changed_tables' => array_keys($files),
+            'decisions' => $results,
+        ];
+
+        $flags = JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+            | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR;
+        $json = json_encode($report, $flags);
+        $this->fileSystem->write($analysisDir . '/' . self::APPLY_REPORT_FILE, $json === false ? '{}' : $json);
     }
 
     /**

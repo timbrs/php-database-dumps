@@ -162,6 +162,7 @@ services:
         arguments:
             $projectDir: '%kernel.project_dir%'
     Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor: ~
+    Timbrs\DatabaseDumps\Service\Analysis\DecisionApplier: ~
     Timbrs\DatabaseDumps\Service\Analysis\CriteriaSqlTester: ~
     Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher:
         arguments:
@@ -257,7 +258,10 @@ services:
             $projectDir: '%kernel.project_dir%'
             $configPath: '%database_dumps.config_path%'
         tags:
+            # Оба имени регистрируем явно: у ленивой команды Symfony берёт имя из тега,
+            # объект не создаётся, и getAliases() ему взять неоткуда.
             - { name: 'console.command', command: 'app:dbdump:apply-analysis' }
+            - { name: 'console.command', command: 'app:dbdump:apply' }
 
     Timbrs\DatabaseDumps\Bridge\Symfony\Command\RepairConfigsCommand:
         arguments:

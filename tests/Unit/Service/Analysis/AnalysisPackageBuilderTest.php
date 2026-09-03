@@ -9,7 +9,9 @@ use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
 use Timbrs\DatabaseDumps\Config\DumpConfig;
+use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
 use Timbrs\DatabaseDumps\Service\Analysis\CodeHintScanner;
+use Timbrs\DatabaseDumps\Service\Analysis\LegacyOutputAdapter;
 use Timbrs\DatabaseDumps\Service\Analysis\Decision\DecisionEngine;
 use Timbrs\DatabaseDumps\Service\Analysis\Dossier\DossierBuilder;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ColumnProfile;
@@ -23,8 +25,14 @@ class AnalysisPackageBuilderTest extends TestCase
     /** @var array<string, string> */
     private $written = [];
 
-    private function builder(LoggerInterface $logger = null, bool $withDossier = false): AnalysisPackageBuilder
-    {
+    /**
+     * @param array<string, string> $legacyOut путь out/*.json => содержимое
+     */
+    private function builder(
+        LoggerInterface $logger = null,
+        bool $withDossier = false,
+        array $legacyOut = []
+    ): AnalysisPackageBuilder {
         $connection = $this->createMock(DatabaseConnectionInterface::class);
         $connection->method('getPlatformName')->willReturn('postgresql');
 
@@ -69,6 +77,11 @@ class AnalysisPackageBuilderTest extends TestCase
         $fs->method('write')->willReturnCallback(function ($path, $content) {
             $this->written[$path] = $content;
         });
+        $fs->method('isDirectory')->willReturn($legacyOut !== []);
+        $fs->method('findFiles')->willReturn(array_keys($legacyOut));
+        $fs->method('read')->willReturnCallback(function ($path) use ($legacyOut) {
+            return isset($legacyOut[$path]) ? $legacyOut[$path] : '';
+        });
 
         return new AnalysisPackageBuilder(
             $fs,
@@ -85,7 +98,9 @@ class AnalysisPackageBuilderTest extends TestCase
             null,
             $withDossier ? new DumpConfig([], ['public' => ['orders' => ['limit' => 10]]]) : null,
             $withDossier ? new DossierBuilder() : null,
-            $withDossier ? new DecisionEngine() : null
+            $withDossier ? new DecisionEngine() : null,
+            new AnalysisIngestor($fs, $this->createMock(LoggerInterface::class)),
+            new LegacyOutputAdapter()
         );
     }
 
@@ -272,6 +287,50 @@ class AnalysisPackageBuilderTest extends TestCase
 
         // Значения данных в решения не попадают.
         $this->assertStringNotContainsString('СЕКРЕТНОЕ_ПД_ЗНАЧЕНИЕ', $this->written[$decisionsPath]);
+    }
+
+    /**
+     * Вывод старого агента не выбрасывается: связи и сегменты попадают в решения
+     * с rule=legacy, а заметки по колонкам — в досье. Раньше columns[] терялись.
+     */
+    public function testLegacyAgentOutputBecomesDecisionsAndDossierNotes(): void
+    {
+        $out = (string) json_encode([
+            'relationships' => [[
+                'source_table' => 'public.orders',
+                'source_column' => 'client_id',
+                'target_table' => 'public.clients',
+                'target_column' => 'id',
+                'confidence' => 90,
+            ]],
+            'columns' => [[
+                'table' => 'public.clients',
+                'column' => 'status',
+                'usages' => ['filter'],
+                'is_key' => true,
+                'note' => 'статус клиента',
+            ]],
+        ]);
+
+        $this->written = [];
+        $this->builder(null, true, ['/proj/docker/database/analysis/out/public.json' => $out])->build();
+
+        $decisionsPath = '/proj/docker/database/analysis/decisions.public.json';
+        $this->assertArrayHasKey($decisionsPath, $this->written);
+        $decisions = json_decode($this->written[$decisionsPath], true);
+        $legacy = array_values(array_filter($decisions['decisions'], function (array $d): bool {
+            return $d['rule'] === 'legacy';
+        }));
+        $this->assertCount(1, $legacy);
+        $this->assertSame('public.orders', $legacy[0]['table']);
+        $this->assertSame('cascade_from', $legacy[0]['kind']);
+        $this->assertFalse($legacy[0]['auto']);
+        $this->assertSame(1, $decisions['summary']['by_rule']['legacy']);
+
+        $dossierPath = '/proj/docker/database/analysis/dossier.public.json';
+        $this->assertArrayHasKey($dossierPath, $this->written);
+        $dossier = json_decode($this->written[$dossierPath], true);
+        $this->assertSame('статус клиента', $dossier['tables']['clients']['columns']['status']['agent']['agent_note']);
     }
 
     public function testBuildWithoutDossierBuilderWritesNoDecisions(): void

@@ -85,6 +85,12 @@ class AnalysisPackageBuilder
     /** @var Decision\DecisionEngine|null */
     private $decisionEngine;
 
+    /** @var AnalysisIngestor|null */
+    private $ingestor;
+
+    /** @var LegacyOutputAdapter|null */
+    private $legacyAdapter;
+
     public function __construct(
         FileSystemInterface $fileSystem,
         ConnectionRegistryInterface $registry,
@@ -100,7 +106,9 @@ class AnalysisPackageBuilder
         PgStatsReader $statsReader = null,
         DumpConfig $dumpConfig = null,
         Dossier\DossierBuilder $dossierBuilder = null,
-        Decision\DecisionEngine $decisionEngine = null
+        Decision\DecisionEngine $decisionEngine = null,
+        AnalysisIngestor $ingestor = null,
+        LegacyOutputAdapter $legacyAdapter = null
     ) {
         $this->fileSystem = $fileSystem;
         $this->registry = $registry;
@@ -117,11 +125,116 @@ class AnalysisPackageBuilder
         $this->dumpConfig = $dumpConfig;
         $this->dossierBuilder = $dossierBuilder;
         $this->decisionEngine = $decisionEngine;
+        $this->ingestor = $ingestor;
+        $this->legacyAdapter = $legacyAdapter;
     }
 
     public function setExactCounts(bool $exact): void
     {
         $this->exactCounts = $exact;
+    }
+
+    /**
+     * Прочитать старый вывод агента (`out/*.json`) и перевести его в решения и аннотации.
+     * Ни ингестора, ни переходника в контейнере — возвращаем пустое: старый формат
+     * необязателен, а на новых прогонах его просто нет.
+     *
+     * @return array{decisions: array<int, array<string, mixed>>, annotations: array<string, array<string, array<string, mixed>>>}
+     */
+    private function readLegacyOutput(string $outDir): array
+    {
+        $empty = ['decisions' => [], 'annotations' => []];
+        if ($this->ingestor === null || $this->legacyAdapter === null) {
+            return $empty;
+        }
+        if (!$this->fileSystem->isDirectory($outDir)) {
+            return $empty;
+        }
+
+        // Сбой чтения чужих файлов не должен ронять подготовку пакета.
+        try {
+            $ingested = $this->ingestor->ingest($outDir);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Старый вывод агента не прочитан: ' . $e->getMessage());
+
+            return $empty;
+        }
+
+        $package = $this->legacyAdapter->toPackage($ingested);
+
+        return [
+            'decisions' => $package['decisions'],
+            'annotations' => $this->legacyAdapter->toAnnotations($ingested),
+        ];
+    }
+
+    /**
+     * Заметки агента по колонкам — в досье, ключом `agent`.
+     *
+     * @param array<string, mixed>                                    $dossier
+     * @param array<string, array<string, array<string, mixed>>> $annotations
+     */
+    private function annotateDossier(array &$dossier, string $schema, array $annotations): void
+    {
+        if ($annotations === []) {
+            return;
+        }
+        foreach ($annotations as $fullName => $columns) {
+            $prefix = $schema . '.';
+            if (strpos($fullName, $prefix) !== 0) {
+                continue;
+            }
+            $table = substr($fullName, strlen($prefix));
+            if (!isset($dossier['tables'][$table]['columns']) || !is_array($dossier['tables'][$table]['columns'])) {
+                continue;
+            }
+            foreach ($columns as $column => $note) {
+                if (isset($dossier['tables'][$table]['columns'][$column])) {
+                    $dossier['tables'][$table]['columns'][$column]['agent'] = $note;
+                }
+            }
+        }
+    }
+
+    /**
+     * Дописать legacy-решения своей схемы к решениям правил и пересчитать сводку.
+     *
+     * @param array<string, mixed>             $package
+     * @param array<int, array<string, mixed>> $legacy
+     */
+    private function mergeLegacyDecisions(array &$package, string $schema, array $legacy): void
+    {
+        if ($legacy === []) {
+            return;
+        }
+        $prefix = $schema . '.';
+        $known = [];
+        foreach ($package['decisions'] as $entry) {
+            $known[$entry['id']] = true;
+        }
+
+        $added = 0;
+        foreach ($legacy as $entry) {
+            if (strpos((string) $entry['table'], $prefix) !== 0 || isset($known[$entry['id']])) {
+                continue;
+            }
+            $package['decisions'][] = $entry;
+            $package['summary']['by_kind'][$entry['kind']] =
+                (isset($package['summary']['by_kind'][$entry['kind']]) ? $package['summary']['by_kind'][$entry['kind']] : 0) + 1;
+            $added++;
+        }
+        if ($added === 0) {
+            return;
+        }
+
+        $package['summary']['by_rule'][LegacyOutputAdapter::RULE] =
+            (isset($package['summary']['by_rule'][LegacyOutputAdapter::RULE])
+                ? $package['summary']['by_rule'][LegacyOutputAdapter::RULE]
+                : 0) + $added;
+        $package['summary']['total'] += $added;
+        $package['summary']['needs_review'] += $added;
+        ksort($package['summary']['by_rule']);
+        ksort($package['summary']['by_kind']);
     }
 
     /**
@@ -190,6 +303,10 @@ class AnalysisPackageBuilder
         // Пер-схемный инвентарь — чтобы прогонять OPENCODE по чанку на схему и не
         // переполнять контекст 128k на больших БД (агент получает -f только своей схемы).
         $schemaFiles = [];
+        // Старый вывод агента, если он остался с прошлого прогона: его связи и сегменты
+        // становятся решениями с rule=legacy, а заметки по колонкам — аннотациями досье.
+        // Раньше columns[] просто выбрасывались.
+        $legacy = $this->readLegacyOutput($outDir);
         $schemas = isset($inventory['schemas']) && is_array($inventory['schemas']) ? $inventory['schemas'] : [];
         foreach ($schemas as $schemaName => $schemaData) {
             $schemaName = (string) $schemaName;
@@ -211,6 +328,7 @@ class AnalysisPackageBuilder
             // именно с ними идут к агенту по коду.
             if ($this->dossierBuilder !== null && $this->dumpConfig !== null) {
                 $dossier = $this->dossierBuilder->build($schemaName, $inventory, $this->dumpConfig);
+                $this->annotateDossier($dossier, $schemaName, $legacy['annotations']);
                 $dossierJson = json_encode($dossier, $jsonFlags);
                 $dossierPath = $analysisDir . '/dossier.' . $schemaName . '.json';
                 $this->fileSystem->write($dossierPath, $dossierJson === false ? '{}' : $dossierJson);
@@ -220,6 +338,7 @@ class AnalysisPackageBuilder
                 // её применит `apply` без агента; остальное идёт человеку или разведке.
                 if ($this->decisionEngine !== null) {
                     $decisions = $this->decisionEngine->decide($dossier, $this->decisionSettings());
+                    $this->mergeLegacyDecisions($decisions, $schemaName, $legacy['decisions']);
                     $decisionsJson = json_encode($decisions, $jsonFlags);
                     $decisionsPath = $analysisDir . '/decisions.' . $schemaName . '.json';
                     $this->fileSystem->write($decisionsPath, $decisionsJson === false ? '{}' : $decisionsJson);

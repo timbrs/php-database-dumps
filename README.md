@@ -713,7 +713,39 @@ php artisan dbdump:apply-analysis                  # Laravel
 
 > **Изменено в 1.1.32.** Пакет больше не кладёт `.opencode/agents/dbdump-mapper.md`, `.opencode/commands/dbdump-map.md` и `analysis/RUN.md`: инструкция устаревала отдельно от кода. Её место заняли `app:dbdump:docs` (документация из самого инструмента) и политика запуска агента в проекте.
 
-`apply-analysis` читает `docker/database/analysis/out/*.json`, валидирует против контракта, объединяет чанки и обогащает `dump_config.yaml`: `cascade_from` из кода (с пометкой `source: code` в отчёте) и `sample.criteria` из бизнес-сегментов. Пользовательские правки в приоритете — добавляется только отсутствующее; провенанс/уверенность фиксируются в `docker/database/analysis/REPORT.md`.
+### Применение: `apply`
+
+```bash
+php bin/console app:dbdump:apply                    # он же app:dbdump:apply-analysis
+php bin/console app:dbdump:apply -s clients -s tasks
+php bin/console app:dbdump:apply --decisions=docker/database/analysis/decisions.clients.json
+php bin/console app:dbdump:apply --legacy            # только старый вывод агента из out/
+```
+
+Записывает решения в `dump_config.yaml`. Три правила, которые не обойти:
+
+- **`auto` применяется само** — маскирование колонки с ПД-именем, связь по внешнему ключу БД,
+  удаление таблицы, которой в базе нет, замена заведомо неподходящего паттерна. Всё, что меняет
+  состав выборки, ждёт отметки `accepted` от агента по коду или от человека. `accepted: false` —
+  отказ, он сильнее `auto`.
+- **Существующее значение в YAML побеждает** без `override`: конфиг правят руками, и затирать
+  ручную настройку молча нельзя. `criteria` и `cascade_from` при этом накапливаются — новое
+  ребро или сегмент дописывается, совпадение по имени (или по паре `parent`+`fk_column`)
+  пропускается.
+- **Решение из устаревшего конфига не применяется.** Если `current` записи разошёлся с тем, что
+  сейчас в YAML, значит между анализом и применением конфиг поправили: запись помечается `stale`
+  и пропускается. Перезапустите `prepare-analysis`.
+
+Предложение проверяется через `TableConfig::fromArray()` **до** мутации, поэтому битая запись не
+оставляет конфиг полуприменённым. Итог с провенансом (правило, обоснование, доказательства,
+статус) — в `docker/database/analysis/apply-report.json`; изменённый YAML пишется только если
+хоть одно решение применилось.
+
+Старый вывод агента (`analysis/out/*.json`) тот же вызов применяет по-прежнему: `cascade_from`
+из кода и `sample.criteria` из бизнес-сегментов, пользовательские правки в приоритете, провенанс
+в `docker/database/analysis/REPORT.md`. Кроме того, `prepare-analysis` показывает его в новом
+виде — связи и сегменты как решения с `rule: legacy` (всегда требуют отметки), а `columns[]`
+как заметки агента в досье: раньше они просто выбрасывались.
 
 Для больших схем дробите прогон по чанку на схему — пер-схемные инвентари для того и пишутся.
 
@@ -758,6 +790,23 @@ php bin/console app:dbdump              # рабочий цикл кратко +
 `docs` пишет три файла: `WORKFLOW.md` (рабочий цикл), `COMMANDS.md` (собран из определений команд —
 те же опции, что в `--help`), `FINDINGS.md` (реестр кодов: стадия, уровень, смысл, чинится ли
 `--fix`, кто решает). Это же кладут в проект для агента, чтобы он не гадал по устаревшему мануалу.
+
+### Паритет мостов Symfony и Laravel
+
+Ядро пакета общее, различаются только консольные мосты. Восемь исходных команд работают в обоих;
+новые — только Symfony, и Laravel-мост заморожен: новые зависимости в нём nullable, код
+PHP 7.2-совместимый.
+
+| команда | Symfony | Laravel |
+|---|---|---|
+| `prepare-config`, `prepare-analysis`, `apply-analysis`, `validate`, `check-criteria`/`repair-configs`, `export`, `import`, `db-init` | да | да |
+| `check` (стадии static/live/plan/dump/import) | да | нет |
+| `docs`, `app:dbdump` (рабочий цикл) | да | нет |
+| `verify-dump` | да | нет |
+| алиас `apply`, опции `-s/--decisions/--legacy` у `apply-analysis` | да | нет |
+
+Laravel-команда `dbdump:apply-analysis` применяет только старый вывод агента (`analysis/out/*.json`);
+решения `decisions.<schema>.json` читает Symfony-мост.
 
 ## Проверка конфига без БД (validate)
 

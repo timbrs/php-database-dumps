@@ -39,6 +39,8 @@ use Timbrs\DatabaseDumps\Service\Analysis\AnalysisReportWriter;
 use Timbrs\DatabaseDumps\Service\Analysis\CodeHintScanner;
 use Timbrs\DatabaseDumps\Service\Analysis\ConfigCriteriaRepairer;
 use Timbrs\DatabaseDumps\Service\Analysis\ConfigEnricher;
+use Timbrs\DatabaseDumps\Service\Analysis\DecisionApplier;
+use Timbrs\DatabaseDumps\Service\Analysis\LegacyOutputAdapter;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ColumnStatisticsInspector;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigGenerator;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigSplitter;
@@ -394,7 +396,9 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                     new MigrationScanner($app['config']->get('database-dumps.project_dir')),
                     new ViewScanner($app->make(ConnectionRegistryInterface::class))
                 ),
-                new DecisionEngine()
+                new DecisionEngine(),
+                $app->make(AnalysisIngestor::class),
+                new LegacyOutputAdapter()
             );
         });
         $this->app->singleton(AnalysisIngestor::class, function ($app) {
@@ -409,9 +413,11 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 $app->make(ConfigSplitter::class),
                 $app->make(LoggerInterface::class),
                 $app['config']->get('database-dumps.project_dir'),
-                $app->make(DbdumpConfigStore::class)
+                $app->make(DbdumpConfigStore::class),
+                $app->make(DecisionApplier::class)
             );
         });
+        $this->app->singleton(DecisionApplier::class);
         $this->app->singleton(CriteriaSqlTester::class, function ($app) {
             return new CriteriaSqlTester($app->make(ConnectionRegistryInterface::class));
         });
