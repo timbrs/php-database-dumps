@@ -136,7 +136,7 @@ HELP
         }
 
         /** @var array<int, string> $stages */
-        $stages = (array) $input->getOption('stage');
+        $stages = $this->stages((array) $input->getOption('stage'));
         foreach ($stages as $stage) {
             if (!in_array($stage, CheckRunner::STAGES, true)) {
                 $io->error('Неизвестная стадия: ' . $stage . ' (допустимы ' . implode(', ', CheckRunner::STAGES) . ')');
@@ -211,6 +211,31 @@ HELP
         }
 
         return $report->hasAtLeast($failOn) ? Command::FAILURE : Command::SUCCESS;
+    }
+
+    /**
+     * Стадии из `--stage`. Опция повторяемая (`--stage=static --stage=live`), но пишут её обычно
+     * списком через запятую — так она названа и в документации инструмента, и в ранбуках. Раньше
+     * такая форма падала с «Неизвестная стадия: static,live,plan», хотя ровно она и написана в
+     * инструкции; принимаем обе.
+     *
+     * @param array<int, string> $raw
+     *
+     * @return array<int, string>
+     */
+    private function stages(array $raw): array
+    {
+        $out = [];
+        foreach ($raw as $value) {
+            foreach (explode(',', (string) $value) as $stage) {
+                $stage = trim($stage);
+                if ($stage !== '') {
+                    $out[] = $stage;
+                }
+            }
+        }
+
+        return array_values(array_unique($out));
     }
 
     private function renderText(SymfonyStyle $io, CheckReport $report): void
