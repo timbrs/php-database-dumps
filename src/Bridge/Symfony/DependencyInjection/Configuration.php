@@ -6,6 +6,7 @@ use Symfony\Component\Config\Definition\Builder\TreeBuilder;
 use Symfony\Component\Config\Definition\ConfigurationInterface;
 use Timbrs\DatabaseDumps\Config\AiConfig;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
+use Timbrs\DatabaseDumps\Service\ConfigGenerator\ServiceTableFilter;
 use Timbrs\DatabaseDumps\Service\Db\SafeQueryPolicy;
 
 /**
@@ -73,6 +74,27 @@ class Configuration implements ConfigurationInterface
                             ->defaultValue(SafeQueryPolicy::DEFAULT_QUERY_BUDGET)->min(0)->end()
                         ->integerNode(SafeQueryPolicy::KEY_MAX_SCAN_ROWS)
                             ->defaultValue(SafeQueryPolicy::DEFAULT_MAX_SCAN_ROWS)->min(0)->end()
+                    ->end()
+                ->end()
+
+                // Служебные таблицы фреймворков, которые не попадают в конфиг выгрузки.
+                // Список настраивается целиком: доменное имя может совпасть со служебным
+                // (так из инвентаря выпала бизнес-таблица jobs).
+                ->arrayNode('service_tables')
+                    ->addDefaultsIfNotSet()
+                    ->children()
+                        ->arrayNode('exact')
+                            ->scalarPrototype()->end()
+                            ->defaultValue(ServiceTableFilter::DEFAULT_EXACT)
+                        ->end()
+                        ->arrayNode('prefix')
+                            ->scalarPrototype()->end()
+                            ->defaultValue(ServiceTableFilter::DEFAULT_PREFIXES)
+                        ->end()
+                        ->arrayNode('segments')
+                            ->scalarPrototype()->end()
+                            ->defaultValue(ServiceTableFilter::DEFAULT_SEGMENTS)
+                        ->end()
                     ->end()
                 ->end()
             ->end();

@@ -31,6 +31,7 @@ use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisIngestor;
 use Timbrs\DatabaseDumps\Service\Analysis\CriteriaSqlTester;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
+use Timbrs\DatabaseDumps\Service\Analysis\Decision\DecisionEngine;
 use Timbrs\DatabaseDumps\Service\Analysis\Dossier\DossierBuilder;
 use Timbrs\DatabaseDumps\Service\Analysis\Dossier\MigrationScanner;
 use Timbrs\DatabaseDumps\Service\Analysis\Dossier\ViewScanner;
@@ -236,7 +237,11 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
             );
         });
 
-        $this->app->singleton(ServiceTableFilter::class);
+        $this->app->singleton(ServiceTableFilter::class, function ($app) {
+            $settings = $app['config']->get('database-dumps.service_tables');
+
+            return new ServiceTableFilter(is_array($settings) ? $settings : []);
+        });
         $this->app->singleton(TableInspector::class, function ($app) {
             return new TableInspector(
                 $app->make(ConnectionRegistryInterface::class),
@@ -388,7 +393,8 @@ class DatabaseDumpsServiceProvider extends ServiceProvider
                 new DossierBuilder(
                     new MigrationScanner($app['config']->get('database-dumps.project_dir')),
                     new ViewScanner($app->make(ConnectionRegistryInterface::class))
-                )
+                ),
+                new DecisionEngine()
             );
         });
         $this->app->singleton(AnalysisIngestor::class, function ($app) {

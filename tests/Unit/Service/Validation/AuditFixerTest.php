@@ -115,7 +115,7 @@ class AuditFixerTest extends ValidationTestCase
                         ['parent' => 'pub.clients', 'fk_column' => 'client_id', 'parent_column' => 'id'],
                     ],
                 ]],
-                'faker' => ['orders' => ['name' => 'inn']],
+                'faker' => ['orders' => ['name' => 'passport_scan']],
             ],
         ]);
         $files[self::INVENTORY_PATH] = $this->inventoryJson($this->inventory());

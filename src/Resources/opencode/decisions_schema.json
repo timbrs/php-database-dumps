@@ -1,0 +1,155 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "decisions.<schema>.json — предложения по конфигу выгрузки",
+  "description": "Файл готовит `app:dbdump:prepare-analysis` из досье схемы. Записи с auto=true применяет `app:dbdump:apply` без участия человека. Остальные требуют решения: агент по коду или человек ставит accepted=true (можно с override/proposed). Значений данных здесь нет — только имена таблиц, колонок и case'ов enum'ов. Файл лежит в {data_dir}/analysis/.",
+  "type": "object",
+  "required": ["generated_at", "schema", "summary", "decisions"],
+  "additionalProperties": false,
+  "properties": {
+    "generated_at": {
+      "type": "string",
+      "description": "UTC-время прогона analyze, ISO-8601."
+    },
+    "schema": {
+      "type": "string",
+      "description": "Имя схемы БД, к которой относятся решения."
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total", "auto", "needs_review", "by_rule", "by_kind"],
+      "additionalProperties": false,
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "auto": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Сколько записей применится без подтверждения."
+        },
+        "needs_review": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Сколько ждёт решения агента или человека."
+        },
+        "by_rule": {
+          "type": "object",
+          "description": "Счётчик по коду правила.",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "by_kind": {
+          "type": "object",
+          "description": "Счётчик по виду изменения.",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/decision" }
+    }
+  },
+  "definitions": {
+    "decision": {
+      "type": "object",
+      "required": ["id", "table", "column", "kind", "current", "proposed", "rule", "why", "evidence", "confidence", "auto"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "sha1(table|column|kind|rule|json(proposed)). Стабилен между прогонами analyze, поэтому accepted переживает повторный анализ. Изменилось proposed — изменился id, и решение принимают заново (apply-report помечает старое как stale)."
+        },
+        "table": {
+          "type": "string",
+          "description": "Полное имя таблицы: schema.table."
+        },
+        "column": {
+          "type": ["string", "null"],
+          "description": "Колонка, если решение про неё (faker, stratify, criteria); null — решение про таблицу целиком."
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "mode",
+            "limit",
+            "order_by",
+            "where",
+            "stratify",
+            "stratify_via",
+            "per_value",
+            "criteria",
+            "cascade_from",
+            "faker",
+            "remove_table"
+          ],
+          "description": "Что именно меняется в YAML. Апплаер выбирается по этому полю."
+        },
+        "current": {
+          "description": "Значение в конфиге на момент анализа; null — ключа нет. Нужно, чтобы apply увидел, что конфиг успели поменять руками."
+        },
+        "proposed": {
+          "description": "Предлагаемое значение. Для remove_table — null."
+        },
+        "rule": {
+          "type": "string",
+          "pattern": "^(R\\d+|agent|legacy)$",
+          "description": "Кто предложил: R1…R11 — правило движка, agent — разведка по коду, legacy — старый формат output_schema.json через LegacyOutputAdapter."
+        },
+        "why": {
+          "type": "string",
+          "description": "Одна фраза по-русски: почему так. Попадает в apply-report и в аудит."
+        },
+        "evidence": {
+          "type": "array",
+          "description": "Доказательства. Пусто — решение выведено только из слепка БД.",
+          "items": { "$ref": "#/definitions/evidence" }
+        },
+        "confidence": {
+          "type": "string",
+          "enum": ["high", "med", "low"]
+        },
+        "auto": {
+          "type": "boolean",
+          "description": "true — механическое изменение, тулза применяет сама (удаление ссылки на несуществующую таблицу, faker на колонку с ПД, связь по внешнему ключу БД). Всё, что меняет состав выборки, всегда false."
+        },
+        "accepted": {
+          "type": "boolean",
+          "description": "Ставит агент или человек. Без него запись с auto=false пропускается apply'ем."
+        },
+        "override": {
+          "type": "boolean",
+          "description": "Разрешает перезаписать уже заполненное значение в YAML. Без него существующая настройка побеждает."
+        },
+        "comment": {
+          "type": "string",
+          "description": "Пояснение того, кто принял решение; уходит в apply-report."
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["source"],
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": ["orm", "raw_sql", "db", "view", "migration", "jira", "article", "agent"],
+          "description": "orm — сущность/репозиторий Doctrine; raw_sql — сырой SQL в коде; db — слепок и pg_stats; view — определение представления; migration — миграция; jira/article — задача или статья (их приносит researcher); agent — вывод разведки без внешней ссылки."
+        },
+        "file": {
+          "type": "string",
+          "description": "Путь относительно корня проекта."
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "ref": {
+          "type": "string",
+          "description": "Внешняя ссылка: ключ задачи, идентификатор статьи, имя миграции."
+        },
+        "note": {
+          "type": "string",
+          "description": "Короткое пояснение к доказательству."
+        }
+      }
+    }
+  }
+}

@@ -82,6 +82,9 @@ class AnalysisPackageBuilder
     /** @var Dossier\DossierBuilder|null */
     private $dossierBuilder;
 
+    /** @var Decision\DecisionEngine|null */
+    private $decisionEngine;
+
     public function __construct(
         FileSystemInterface $fileSystem,
         ConnectionRegistryInterface $registry,
@@ -96,7 +99,8 @@ class AnalysisPackageBuilder
         RowCounter $rowCounter = null,
         PgStatsReader $statsReader = null,
         DumpConfig $dumpConfig = null,
-        Dossier\DossierBuilder $dossierBuilder = null
+        Dossier\DossierBuilder $dossierBuilder = null,
+        Decision\DecisionEngine $decisionEngine = null
     ) {
         $this->fileSystem = $fileSystem;
         $this->registry = $registry;
@@ -112,11 +116,31 @@ class AnalysisPackageBuilder
         $this->statsReader = $statsReader;
         $this->dumpConfig = $dumpConfig;
         $this->dossierBuilder = $dossierBuilder;
+        $this->decisionEngine = $decisionEngine;
     }
 
     public function setExactCounts(bool $exact): void
     {
         $this->exactCounts = $exact;
+    }
+
+    /**
+     * Пороги для правил решений — из `settings.decisions` конфига выгрузки.
+     * Отсутствует секция — работают умолчания DecisionEngine.
+     *
+     * @return array<string, mixed>
+     */
+    private function decisionSettings(): array
+    {
+        if ($this->dumpConfig === null) {
+            return [];
+        }
+        $settings = $this->dumpConfig->getSettings();
+        if (!isset($settings['decisions']) || !is_array($settings['decisions'])) {
+            return [];
+        }
+
+        return $settings['decisions'];
     }
 
     /**
@@ -191,6 +215,16 @@ class AnalysisPackageBuilder
                 $dossierPath = $analysisDir . '/dossier.' . $schemaName . '.json';
                 $this->fileSystem->write($dossierPath, $dossierJson === false ? '{}' : $dossierJson);
                 $paths[] = $dossierPath;
+
+                // Решения по досье: что менять в конфиге и почему. Часть помечена auto —
+                // её применит `apply` без агента; остальное идёт человеку или разведке.
+                if ($this->decisionEngine !== null) {
+                    $decisions = $this->decisionEngine->decide($dossier, $this->decisionSettings());
+                    $decisionsJson = json_encode($decisions, $jsonFlags);
+                    $decisionsPath = $analysisDir . '/decisions.' . $schemaName . '.json';
+                    $this->fileSystem->write($decisionsPath, $decisionsJson === false ? '{}' : $decisionsJson);
+                    $paths[] = $decisionsPath;
+                }
             }
         }
 
@@ -198,6 +232,13 @@ class AnalysisPackageBuilder
         if ($contract !== null) {
             $p = $analysisDir . '/output_schema.json';
             $this->fileSystem->write($p, $contract);
+            $paths[] = $p;
+        }
+
+        $decisionsContract = $this->renderResource('decisions_schema.json', $dataDir);
+        if ($decisionsContract !== null) {
+            $p = $analysisDir . '/decisions_schema.json';
+            $this->fileSystem->write($p, $decisionsContract);
             $paths[] = $p;
         }
 

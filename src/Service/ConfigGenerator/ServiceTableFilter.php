@@ -3,14 +3,22 @@
 namespace Timbrs\DatabaseDumps\Service\ConfigGenerator;
 
 /**
- * Фильтр служебных таблиц фреймворков (Laravel, Symfony) и системных таблиц
+ * Фильтр служебных таблиц фреймворков (Laravel, Symfony) и системных таблиц.
+ *
+ * Список настраивается через `settings.service_tables` (exact / prefix / segments): жёсткий
+ * набор ошибается на доменных именах — так из инвентаря пропала бизнес-таблица `tasks.jobs`,
+ * совпавшая с очередью Laravel. Поэтому `jobs` из умолчаний убрана: очередь Laravel всё равно
+ * ловится по `failed_jobs`/`job_batches`, а доменную таблицу с таким именем не жалко проверить
+ * глазами, чем молча потерять.
  */
 class ServiceTableFilter
 {
     /**
-     * Точные имена служебных таблиц
+     * Точные имена служебных таблиц.
+     *
+     * @var array<int, string>
      */
-    private const IGNORED_TABLES = [
+    public const DEFAULT_EXACT = [
         'migrations',
         'password_resets',
         'password_reset_tokens',
@@ -19,7 +27,6 @@ class ServiceTableFilter
         'cache',
         'cache_locks',
         'sessions',
-        'jobs',
         'job_batches',
         'telescope_entries',
         'telescope_entries_tags',
@@ -31,18 +38,22 @@ class ServiceTableFilter
     ];
 
     /**
-     * Префиксы служебных таблиц
+     * Префиксы служебных таблиц.
+     *
+     * @var array<int, string>
      */
-    private const IGNORED_PREFIXES = [
+    public const DEFAULT_PREFIXES = [
         'horizon_',
         'pulse_',
         'sanctum_',
     ];
 
     /**
-     * Ключевые слова для фильтрации (проверяются как сегменты имени)
+     * Ключевые слова (проверяются как сегменты имени).
+     *
+     * @var array<int, string>
      */
-    private const IGNORED_KEYWORDS = [
+    public const DEFAULT_SEGMENTS = [
         'backup',
         'backups',
         'test',
@@ -51,30 +62,68 @@ class ServiceTableFilter
         'logs',
     ];
 
+    /** @var array<int, string> */
+    private $exact;
+
+    /** @var array<int, string> */
+    private $prefixes;
+
+    /** @var array<int, string> */
+    private $segments;
+
     /**
-     * Определяет, является ли таблица служебной и должна быть проигнорирована
+     * @param array<string, mixed> $settings секция settings.service_tables (exact/prefix/segments)
+     */
+    public function __construct(array $settings = [])
+    {
+        $this->exact = $this->normalize(isset($settings['exact']) ? $settings['exact'] : null, self::DEFAULT_EXACT);
+        $this->prefixes = $this->normalize(isset($settings['prefix']) ? $settings['prefix'] : null, self::DEFAULT_PREFIXES);
+        $this->segments = $this->normalize(isset($settings['segments']) ? $settings['segments'] : null, self::DEFAULT_SEGMENTS);
+    }
+
+    /**
+     * Определяет, является ли таблица служебной и должна быть проигнорирована.
      */
     public function shouldIgnore(string $tableName): bool
     {
         $lower = strtolower($tableName);
 
-        if (in_array($lower, self::IGNORED_TABLES, true)) {
+        if (in_array($lower, $this->exact, true)) {
             return true;
         }
 
-        foreach (self::IGNORED_PREFIXES as $prefix) {
-            if (strpos($lower, $prefix) === 0) {
+        foreach ($this->prefixes as $prefix) {
+            if ($prefix !== '' && strpos($lower, $prefix) === 0) {
                 return true;
             }
         }
 
-        $segments = explode('_', $lower);
-        foreach ($segments as $segment) {
-            if (in_array($segment, self::IGNORED_KEYWORDS, true)) {
+        foreach (explode('_', $lower) as $segment) {
+            if (in_array($segment, $this->segments, true)) {
                 return true;
             }
         }
 
         return false;
+    }
+
+    /**
+     * @param mixed              $value
+     * @param array<int, string> $default
+     * @return array<int, string>
+     */
+    private function normalize($value, array $default): array
+    {
+        if (!is_array($value)) {
+            return $default;
+        }
+        $out = [];
+        foreach ($value as $item) {
+            if (is_string($item) && $item !== '') {
+                $out[] = strtolower($item);
+            }
+        }
+
+        return $out;
     }
 }

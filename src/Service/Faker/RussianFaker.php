@@ -401,8 +401,138 @@ class RussianFaker implements FakerInterface
                 case PatternDetector::PATTERN_GENDER:
                     $row[$column] = $this->generateGender($gender, (string) $original);
                     break;
+                // Ниже — seed от самого значения: одинаковый ИНН в clients и leads обязан
+                // получить одинаковую замену, иначе связь по нему в дампе рвётся.
+                case PatternDetector::PATTERN_INN:
+                    $row[$column] = $this->generateInn((string) $original);
+                    break;
+                case PatternDetector::PATTERN_OGRN:
+                    $row[$column] = $this->generateOgrn((string) $original);
+                    break;
+                case PatternDetector::PATTERN_DIGITS:
+                case PatternDetector::PATTERN_DOC_NUMBER:
+                case PatternDetector::PATTERN_DOC_SERIES:
+                    $row[$column] = $this->generateDigits((string) $original);
+                    break;
+                case PatternDetector::PATTERN_BIRTH_DATE:
+                    $row[$column] = $this->generateBirthDate((string) $original);
+                    break;
             }
         }
+    }
+
+    /**
+     * ИНН той же длины (10 или 12) с верными контрольными разрядами: сервисы-потребители
+     * дампа валидируют его, и «просто цифры» они не примут.
+     */
+    private function generateInn(string $original): string
+    {
+        $digits = preg_replace('/\D+/', '', $original);
+        $length = ($digits !== null && strlen($digits) === 10) ? 10 : 12;
+        $state = crc32('inn:' . $original);
+
+        $body = '';
+        for ($i = 0; $i < $length - ($length === 10 ? 1 : 2); $i++) {
+            $body .= (string) $this->nextInt($state, $i === 0 ? 1 : 0, 9);
+        }
+
+        if ($length === 10) {
+            return $body . $this->innChecksum($body, [2, 4, 10, 3, 5, 9, 4, 6, 8]);
+        }
+        $eleventh = $this->innChecksum($body, [7, 2, 4, 10, 3, 5, 9, 4, 6, 8]);
+        $twelfth = $this->innChecksum($body . $eleventh, [3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8]);
+
+        return $body . $eleventh . $twelfth;
+    }
+
+    /**
+     * @param array<int, int> $weights
+     */
+    private function innChecksum(string $digits, array $weights): string
+    {
+        $sum = 0;
+        $length = strlen($digits);
+        for ($i = 0; $i < $length && $i < count($weights); $i++) {
+            $sum += ((int) $digits[$i]) * $weights[$i];
+        }
+
+        return (string) (($sum % 11) % 10);
+    }
+
+    /**
+     * ОГРН/ОГРНИП: 13 или 15 цифр, последняя — контрольная (остаток от деления на 11 или 13).
+     */
+    private function generateOgrn(string $original): string
+    {
+        $digits = preg_replace('/\D+/', '', $original);
+        $length = ($digits !== null && strlen($digits) === 15) ? 15 : 13;
+        $state = crc32('ogrn:' . $original);
+
+        $body = '';
+        for ($i = 0; $i < $length - 1; $i++) {
+            $body .= (string) $this->nextInt($state, $i === 0 ? 1 : 0, 9);
+        }
+        $divisor = $length === 13 ? 11 : 13;
+        $control = (string) ($this->modOfDigits($body, $divisor) % 10);
+
+        return $body . $control;
+    }
+
+    /**
+     * Остаток от деления длинного числа, записанного строкой: 15 цифр не помещаются
+     * в int на 32-битных сборках, а bcmath в образе может быть не собран.
+     */
+    private function modOfDigits(string $digits, int $divisor): int
+    {
+        $remainder = 0;
+        $length = strlen($digits);
+        for ($i = 0; $i < $length; $i++) {
+            $remainder = ($remainder * 10 + (int) $digits[$i]) % $divisor;
+        }
+
+        return $remainder;
+    }
+
+    /**
+     * Цифры той же длины и той же формы: разделители (КПП, ОКАТО, номера документов)
+     * остаются на своих местах — иначе колонка перестаёт проходить формат-контроль.
+     */
+    private function generateDigits(string $original): string
+    {
+        $state = crc32('digits:' . $original);
+        $out = '';
+        $length = strlen($original);
+        for ($i = 0; $i < $length; $i++) {
+            $char = $original[$i];
+            $out .= ctype_digit($char) ? (string) $this->nextInt($state, 0, 9) : $char;
+        }
+
+        return $out;
+    }
+
+    /**
+     * Дата рождения сдвигается на ±N дней с сохранением формата: возрастные разрезы
+     * («клиенты старше 60») в дампе остаются осмысленными, а конкретный человек — нет.
+     */
+    private function generateBirthDate(string $original): string
+    {
+        $timestamp = strtotime($original);
+        if ($timestamp === false) {
+            return $original;
+        }
+        $state = crc32('birth:' . $original);
+        $shift = $this->nextInt($state, -180, 180) * 86400;
+        $shifted = $timestamp + $shift;
+
+        // Формат исходного значения: дата, дата со временем или ISO с микросекундами.
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', trim($original)) === 1) {
+            return date('Y-m-d', $shifted);
+        }
+        if (preg_match('/^\d{2}\.\d{2}\.\d{4}$/', trim($original)) === 1) {
+            return date('d.m.Y', $shifted);
+        }
+
+        return date('Y-m-d H:i:s', $shifted);
     }
 
     private function generateEmail(string $firstName, string $lastName, int &$state): string

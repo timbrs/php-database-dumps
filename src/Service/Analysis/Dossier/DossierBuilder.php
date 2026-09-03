@@ -71,6 +71,33 @@ class DossierBuilder
                 isset($views[$key]) ? $views[$key] : []
             );
         }
+        // Таблицы, настроенные в конфиге, которых в слепке нет: их не выгрузит ни один экспорт,
+        // и молча — поэтому они попадают в досье помеченными, а не пропадают вовсе (R7).
+        foreach ($this->configuredTables($schema, $dumpConfig) as $table) {
+            if (isset($out[$table])) {
+                continue;
+            }
+            $raw = $dumpConfig->getTableConfig($schema, $table);
+            $out[$table] = [
+                'phantom' => true,
+                'row_count' => ['value' => null, 'estimated' => false, 'source' => null],
+                'config' => [
+                    'mode' => in_array($table, $dumpConfig->getFullExportTables($schema), true) ? 'full_export' : 'partial_export',
+                    'limit' => $raw !== null && isset($raw[TableConfig::KEY_LIMIT]) ? $raw[TableConfig::KEY_LIMIT] : null,
+                    'where' => null,
+                    'order_by' => null,
+                    'sample' => null,
+                    'cascade_from' => null,
+                ],
+                'traits' => [],
+                'edges' => [],
+                'views' => [],
+                'migrations' => null,
+                'code' => [],
+                'columns' => [],
+                'ambiguous' => [],
+            ];
+        }
         ksort($out);
 
         return [
@@ -79,6 +106,21 @@ class DossierBuilder
             'inventory_generated_at' => isset($inventory['generated_at']) ? $inventory['generated_at'] : null,
             'tables' => $out,
         ];
+    }
+
+    /**
+     * Таблицы схемы, названные в конфиге (обе секции).
+     *
+     * @return array<int, string>
+     */
+    private function configuredTables(string $schema, DumpConfig $dumpConfig): array
+    {
+        $tables = $dumpConfig->getFullExportTables($schema);
+        foreach ($dumpConfig->getPartialExportTables($schema) as $table => $_) {
+            $tables[] = (string) $table;
+        }
+
+        return array_values(array_unique($tables));
     }
 
     /**

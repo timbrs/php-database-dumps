@@ -98,6 +98,13 @@ class FakerTypeRule implements RuleInterface
                         continue;
                     }
 
+                    // Идентификаторы и даты пишутся не только в текст: ИНН и КПП живут в
+                    // числовых колонках, дата рождения — в date/timestamp. Эти паттерны
+                    // сохраняют форму значения, поэтому тут они уместны, а не поломка.
+                    if ($this->fitsNonTextType($pattern, $class, $type)) {
+                        continue;
+                    }
+
                     if ($class === 'numeric') {
                         $findings[] = Finding::warning(
                             'F-1',
@@ -162,5 +169,30 @@ class FakerTypeRule implements RuleInterface
             return 'numeric';
         }
         return 'breaking';
+    }
+
+    /**
+     * Паттерн, которому нетекстовый тип не помеха: цифровые идентификаторы остаются цифрами,
+     * дата рождения — датой того же формата.
+     */
+    private function fitsNonTextType(string $pattern, string $class, string $type): bool
+    {
+        $digitPatterns = [
+            PatternDetector::PATTERN_INN,
+            PatternDetector::PATTERN_OGRN,
+            PatternDetector::PATTERN_DIGITS,
+            PatternDetector::PATTERN_DOC_NUMBER,
+            PatternDetector::PATTERN_DOC_SERIES,
+        ];
+        if ($class === 'numeric' && in_array($pattern, $digitPatterns, true)) {
+            return true;
+        }
+        if ($pattern === PatternDetector::PATTERN_BIRTH_DATE) {
+            $normalized = strtolower(trim((string) preg_replace('/\s*\(.*$/', '', $type)));
+
+            return strpos($normalized, 'date') !== false || strpos($normalized, 'timestamp') !== false;
+        }
+
+        return false;
     }
 }

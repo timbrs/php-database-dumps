@@ -111,7 +111,11 @@ services:
     Timbrs\DatabaseDumps\Service\ConfigGenerator\ForeignKeyInspector: ~
     Timbrs\DatabaseDumps\Service\ConfigGenerator\PrimaryKeyInspector: ~
     Timbrs\DatabaseDumps\Service\ConfigGenerator\TableInspector: ~
-    Timbrs\DatabaseDumps\Service\ConfigGenerator\ServiceTableFilter: ~
+    # Служебные таблицы фреймворков: список настраивается (settings.service_tables),
+    # потому что доменное имя может совпасть со служебным.
+    Timbrs\DatabaseDumps\Service\ConfigGenerator\ServiceTableFilter:
+        arguments:
+            $settings: '%database_dumps.service_tables%'
     Timbrs\DatabaseDumps\Service\ConfigGenerator\ConfigSplitter: ~
     Timbrs\DatabaseDumps\Service\ConfigGenerator\ModeParser: ~
     Timbrs\DatabaseDumps\Service\ConfigGenerator\RegenerationGuard: ~
@@ -286,6 +290,11 @@ services:
     Timbrs\DatabaseDumps\Service\Analysis\Dossier\ViewScanner: ~
 
     Timbrs\DatabaseDumps\Service\Analysis\Dossier\DossierBuilder: ~
+
+    # Решения по досье (R1…R11) и переходник со старого вывода агента.
+    Timbrs\DatabaseDumps\Service\Analysis\Decision\DecisionEngine: ~
+
+    Timbrs\DatabaseDumps\Service\Analysis\LegacyOutputAdapter: ~
 
     # Единая проверка: стадии static/live/plan/dump/import, один JSON, реестр кодов FindingCatalog.
     Timbrs\DatabaseDumps\Service\Check\CheckRunner:

@@ -1,5 +1,7 @@
 <?php
 
+use Timbrs\DatabaseDumps\Service\ConfigGenerator\ServiceTableFilter;
+
 return [
     // Главный конфиг выгрузки лежит внутри data_dir — рядом с dump-settings/, dumps/ и analysis/.
     'config_path' => base_path(env('DBDUMP_DATA_DIR', 'docker/database') . '/dump_config.yaml'),
@@ -61,6 +63,22 @@ return [
         'idle_in_transaction_session_timeout' => (int) env('DBDUMP_DB_IDLE_IN_TRANSACTION_SESSION_TIMEOUT', 60000),
         'query_budget' => (int) env('DBDUMP_DB_QUERY_BUDGET', 2000),
         'max_scan_rows' => (int) env('DBDUMP_DB_MAX_SCAN_ROWS', 50000),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Служебные таблицы фреймворков
+    |--------------------------------------------------------------------------
+    |
+    | Не попадают в конфиг выгрузки. Список задаётся целиком: доменное имя может
+    | совпасть со служебным (так из инвентаря выпала бизнес-таблица jobs).
+    | exact — полное совпадение, prefix — начало имени, segments — слово в имени
+    | через подчёркивание.
+    */
+    'service_tables' => [
+        'exact' => ServiceTableFilter::DEFAULT_EXACT,
+        'prefix' => ServiceTableFilter::DEFAULT_PREFIXES,
+        'segments' => ServiceTableFilter::DEFAULT_SEGMENTS,
     ],
 
 ];

@@ -35,6 +35,17 @@ class PatternDetector
     public const PATTERN_GENDER = 'gender';
 
     /**
+     * Идентификаторы и документы. До их появления единственной «затычкой» был phone, и он
+     * ломал и длину, и контрольную сумму: ИНН переставал быть ИНН, дата рождения — датой.
+     */
+    public const PATTERN_INN = 'inn';
+    public const PATTERN_OGRN = 'ogrn';
+    public const PATTERN_DIGITS = 'digits';
+    public const PATTERN_BIRTH_DATE = 'birth_date';
+    public const PATTERN_DOC_NUMBER = 'doc_number';
+    public const PATTERN_DOC_SERIES = 'doc_series';
+
+    /**
      * Список всех допустимых паттернов (используется для валидации FakerConfig).
      */
     public const ALLOWED_PATTERNS = [
@@ -47,6 +58,26 @@ class PatternDetector
         self::PATTERN_LASTNAME,
         self::PATTERN_PATRONYMIC,
         self::PATTERN_GENDER,
+        self::PATTERN_INN,
+        self::PATTERN_OGRN,
+        self::PATTERN_DIGITS,
+        self::PATTERN_BIRTH_DATE,
+        self::PATTERN_DOC_NUMBER,
+        self::PATTERN_DOC_SERIES,
+    ];
+
+    /**
+     * Паттерны, которым нужно исходное значение (длина, формат, дата) и которые обязаны
+     * давать одинаковый результат для одинакового входа: по ИНН связывают клиента и лид,
+     * и разъехавшийся ИНН рвёт эту связь в дампе.
+     */
+    public const VALUE_SEEDED_PATTERNS = [
+        self::PATTERN_INN,
+        self::PATTERN_OGRN,
+        self::PATTERN_DIGITS,
+        self::PATTERN_BIRTH_DATE,
+        self::PATTERN_DOC_NUMBER,
+        self::PATTERN_DOC_SERIES,
     ];
 
     public const SAMPLE_SIZE = 200;

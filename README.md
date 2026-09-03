@@ -394,6 +394,12 @@ partial_export:
 | `email` | Email | ivan@company.ru | aleksandr.petrov42@example.com |
 | `phone` | Телефон | +79161234567 | +79234567890 |
 | `gender` | Пол (12 форматов: male/female, м/ж, муж/жен и др.) | Мужской | Женский |
+| `inn` | ИНН (10 или 12 цифр, контрольные разряды пересчитаны) | 7707083893 | 7712045619 |
+| `ogrn` | ОГРН/ОГРНИП (13 или 15 цифр, контрольный разряд пересчитан) | 1027700132195 | 1024306718432 |
+| `digits` | Любой цифровой идентификатор с сохранением длины и разделителей (КПП, ОКПО, ОКАТО, ОКТМО, СНИЛС) | 770701001 | 418362905 |
+| `birth_date` | Дата рождения (сдвиг ±180 дней, формат исходной строки сохраняется) | 1985-04-17 | 1985-09-02 |
+| `doc_series` | Серия документа | 4509 | 2731 |
+| `doc_number` | Номер документа | 123456 | 804517 |
 
 **Секция `faker` в конфигурации:**
 
@@ -416,6 +422,8 @@ faker:
 ```
 
 Паттерны `firstname`, `lastname` и `patronymic` детектируются через кросс-корреляцию: если в таблице уже найдена составная колонка (fio, fio_short, name), а рядом есть колонка с отдельными именами/фамилиями/отчествами — она будет обнаружена автоматически.
+
+Паттерны `inn`, `ogrn`, `digits`, `birth_date`, `doc_series` и `doc_number` **выводятся из значения**: одинаковый вход даёт одинаковый выход в любой таблице и в любом прогоне. Иначе один и тот же ИНН превратился бы в `clients` в одно число, а в `leads` — в другое, и связь между записями в дампе разошлась бы. Длина, разделители и формат даты сохраняются, поэтому такой faker годится и для числовых колонок (`bigint`), и для `date`/`timestamp`.
 
 Паттерн `gender` определяется по совпадению имени колонки (`gender`, `sex`, `пол`) **и** содержимого (допустимые значения: `male`/`female`, `m`/`f`, `м`/`ж`, `мужской`/`женский`, `муж`/`жен`, `мужчина`/`женщина`). Регистр и формат оригинала сохраняются при замене.
 
@@ -674,8 +682,34 @@ php artisan dbdump:apply-analysis                  # Laravel
 
 Что провижинит `prepare-analysis` в хост-проект:
 - `docker/database/analysis/schema_inventory.json` — полный инвентарь + `schema_inventory.<schema>.json` по каждой схеме (для прогона по чанку без переполнения контекста 128k), **без значений данных** (PII агенту не выгружается);
-- `docker/database/analysis/output_schema.json` — JSON-контракт ответа;
+- `docker/database/analysis/dossier.<schema>.json` — досье по каждой таблице и колонке: слепок, оценка строк, связи (`db_fk` + `cascade_from`), enum'ы из кода с доказательствами, миграции, вьюхи, признаки SCD2/словаря/EAV и пометки `ambiguous` — именно с ними идут к агенту по коду;
+- `docker/database/analysis/decisions.<schema>.json` — предложения по конфигу (правила R1…R11): что менять, на что и почему, со ссылками на доказательства;
+- `docker/database/analysis/decisions_schema.json` — контракт этого файла;
+- `docker/database/analysis/output_schema.json` — JSON-контракт ответа агента (старый формат);
 - `docker/database/analysis/out/` — каталог для результата агента.
+
+### Решения (`decisions.<schema>.json`)
+
+Правила читают досье и предлагают правки. Тулза применяет сама только механическое —
+записи с `auto: true`:
+
+| правило | о чём | авто |
+|---|---|---|
+| `R1` | полная выгрузка таблицы крупнее порога → частичная с `order_by` и разрезами | нет |
+| `R2` | словарь, маленькая таблица, таблица с высокой входящей степенью или наполняемая миграцией → выгружать целиком | нет |
+| `R3` | категориальная колонка без покрытия → корзины (`stratify`; для EAV — `attr_id` + вложенный `value_*`) | нет |
+| `R4` | колонка с ПД-именем без `faker` → маскировать | **да** |
+| `R5` | связь без `cascade_from` | **да** для внешнего ключа БД |
+| `R6` | SCD2-таблица без разрезов → три критерия: текущая активная, деактивированная, история | нет |
+| `R7` | таблица в конфиге, которой нет в БД → удалить | **да** |
+| `R8` | кандидат в корзины с более чем 50 различными значениями → нужны критерии по группам | нет |
+| `R9` | case enum'а из кода не встречается в БД (и наоборот) | нет |
+| `R10` | квота × число корзин больше `limit` → снизить квоту | нет |
+| `R11` | `phone`/`fio` на числовой или датной колонке → `inn`/`digits`/`birth_date` | **да** |
+
+Значений данных в решениях нет: только имена таблиц, колонок и case'ов enum'ов. `id` записи
+считается от адреса и предложения, поэтому отметка `accepted` переживает повторный `analyze`, а
+изменившееся предложение придётся принимать заново.
 
 > **Изменено в 1.1.32.** Пакет больше не кладёт `.opencode/agents/dbdump-mapper.md`, `.opencode/commands/dbdump-map.md` и `analysis/RUN.md`: инструкция устаревала отдельно от кода. Её место заняли `app:dbdump:docs` (документация из самого инструмента) и политика запуска агента в проекте.
 
@@ -916,7 +950,20 @@ database_dumps:
         idle_in_transaction_session_timeout: 60000
         query_budget: 2000                    # предохранитель: запросов к БД на один прогон разведки
         max_scan_rows: 50000                  # выше — таблицу целиком не сканируем (COUNT(*), DISTINCT, сортировка)
+
+    # Служебные таблицы фреймворков — не попадают в конфиг выгрузки.
+    # Список задаётся целиком: доменное имя может совпасть со служебным.
+    service_tables:
+        exact: ['migrations', 'failed_jobs', 'sessions', 'messenger_messages']
+        prefix: ['horizon_', 'pulse_', 'sanctum_']
+        segments: ['log', 'logs', 'backup', 'test']
 ```
+
+> **`jobs` больше не служебная (1.1.34).** Раньше это имя было в жёстком списке, и вместе с
+> очередью Laravel из инвентаря молча пропадала бизнес-таблица с тем же именем. Очередь
+> по-прежнему ловится по `failed_jobs`/`job_batches`; если в вашем проекте `jobs` — это
+> действительно очередь, добавьте её в `service_tables.exact`. Указанный ключ **заменяет**
+> умолчание целиком, а не дополняет его: перечисляйте полный список.
 
 **Токен сюда не кладётся.** Он живёт в `.env.local` (`DBDUMP_LLM_TOKEN`), поэтому файл
 безопасно коммитить. Переменные окружения `DBDUMP_*` перекрывают значения из этого файла.
@@ -1614,6 +1661,12 @@ The package can automatically detect and replace personal data during export. Th
 | `email` | Email address | ivan@company.ru | aleksandr.petrov42@example.com |
 | `phone` | Phone number | +79161234567 | +79234567890 |
 | `gender` | Gender (12 formats: male/female, m/f, м/ж, etc.) | Мужской | Женский |
+| `inn` | Russian tax number (10 or 12 digits, checksum recomputed) | 7707083893 | 7712045619 |
+| `ogrn` | Russian state registration number (13 or 15 digits) | 1027700132195 | 1024306718432 |
+| `digits` | Any numeric identifier, length and separators preserved (KPP, OKPO, OKATO, OKTMO, SNILS) | 770701001 | 418362905 |
+| `birth_date` | Birth date (shifted by ±180 days, original format preserved) | 1985-04-17 | 1985-09-02 |
+| `doc_series` | Document series | 4509 | 2731 |
+| `doc_number` | Document number | 123456 | 804517 |
 
 **The `faker` section in configuration:**
 
@@ -1634,6 +1687,8 @@ faker:
       short_fio: fio_short
       contact_email: email
 ```
+
+The `inn`, `ogrn`, `digits`, `birth_date`, `doc_series` and `doc_number` patterns are **value-seeded**: the same input always produces the same output, in every table and every run. Otherwise one tax number would map to different values in `clients` and in `leads`, breaking the link between records in the dump. Length, separators and date format are preserved, so these patterns also fit numeric (`bigint`) and `date`/`timestamp` columns.
 
 The `firstname`, `lastname`, and `patronymic` patterns are detected via cross-correlation: if a composite column (fio, fio_short, name) is already found in the table and there's an adjacent column with individual first names/last names/patronymics — it will be detected automatically.
 

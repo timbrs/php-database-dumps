@@ -37,7 +37,6 @@ class ServiceTableFilterTest extends TestCase
             'cache' => ['cache'],
             'cache_locks' => ['cache_locks'],
             'sessions' => ['sessions'],
-            'jobs' => ['jobs'],
             'job_batches' => ['job_batches'],
             'telescope_entries' => ['telescope_entries'],
             'telescope_entries_tags' => ['telescope_entries_tags'],
@@ -89,5 +88,51 @@ class ServiceTableFilterTest extends TestCase
         $this->assertTrue($this->filter->shouldIgnore('MIGRATIONS'));
         $this->assertTrue($this->filter->shouldIgnore('Horizon_Jobs'));
         $this->assertTrue($this->filter->shouldIgnore('Access_LOG'));
+    }
+
+    /**
+     * Очередь Laravel называется `jobs`, но так же может называться и бизнес-таблица
+     * (в crm-backend из-за этого пропала `tasks.jobs`). По умолчанию — не служебная.
+     */
+    public function testJobsIsNotServiceByDefault(): void
+    {
+        $this->assertFalse($this->filter->shouldIgnore('jobs'));
+    }
+
+    public function testExactListIsConfigurable(): void
+    {
+        $filter = new ServiceTableFilter([
+            'exact' => array_merge(ServiceTableFilter::DEFAULT_EXACT, ['jobs']),
+        ]);
+
+        $this->assertTrue($filter->shouldIgnore('jobs'));
+        $this->assertTrue($filter->shouldIgnore('migrations'));
+    }
+
+    public function testPrefixesAndSegmentsAreConfigurable(): void
+    {
+        $filter = new ServiceTableFilter([
+            'exact' => [],
+            'prefix' => ['legacy_'],
+            'segments' => ['archive'],
+        ]);
+
+        $this->assertTrue($filter->shouldIgnore('legacy_orders'));
+        $this->assertTrue($filter->shouldIgnore('orders_archive'));
+        $this->assertFalse($filter->shouldIgnore('migrations'));
+        $this->assertFalse($filter->shouldIgnore('horizon_jobs'));
+    }
+
+    /**
+     * Пустой массив — это «настроек нет», а не «список пустой»: иначе забытый ключ
+     * в config/packages потянул бы в конфиг выгрузки все служебные таблицы.
+     */
+    public function testEmptySettingsFallBackToDefaults(): void
+    {
+        $filter = new ServiceTableFilter([]);
+
+        $this->assertTrue($filter->shouldIgnore('migrations'));
+        $this->assertTrue($filter->shouldIgnore('horizon_jobs'));
+        $this->assertTrue($filter->shouldIgnore('access_log'));
     }
 }

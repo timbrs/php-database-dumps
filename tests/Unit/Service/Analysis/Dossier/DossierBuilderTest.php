@@ -140,6 +140,25 @@ class DossierBuilderTest extends TestCase
         ];
     }
 
+    /**
+     * Таблица есть в конфиге, но её нет в БД: экспорт молча её пропустит, поэтому
+     * в досье она обязана появиться с пометкой — по ней R7 предложит удаление.
+     */
+    public function testConfiguredTableMissingFromInventoryIsMarkedPhantom(): void
+    {
+        $dossier = (new DossierBuilder())->build('tasks', $this->inventory(), $this->config());
+
+        self::assertArrayHasKey('ghost_table', $dossier['tables']);
+        $ghost = $dossier['tables']['ghost_table'];
+        self::assertTrue($ghost['phantom']);
+        self::assertSame('partial_export', $ghost['config']['mode']);
+        self::assertNull($ghost['row_count']['value']);
+        self::assertSame([], $ghost['columns']);
+
+        // Существующие таблицы фантомами не помечаются.
+        self::assertArrayNotHasKey('phantom', $dossier['tables']['jobs']);
+    }
+
     private function config(): DumpConfig
     {
         return new DumpConfig([], [
@@ -148,6 +167,7 @@ class DossierBuilderTest extends TestCase
                     'limit' => 500,
                     'sample' => ['criteria' => [['name' => 'open', 'where' => 'status_id = 1', 'limit' => 100]]],
                 ],
+                'ghost_table' => ['limit' => 10],
                 'clients_attrs' => [
                     'limit' => 100,
                     'cascade_from' => [['parent' => 'tasks.jobs', 'fk_column' => 'job_id', 'parent_column' => 'id']],

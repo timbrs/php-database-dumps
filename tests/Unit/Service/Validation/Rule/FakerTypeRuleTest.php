@@ -95,7 +95,7 @@ class FakerTypeRuleTest extends ValidationTestCase
 
     public function testUnknownPatternIsReportedSeparately(): void
     {
-        $findings = $this->findings(['name' => 'inn']);
+        $findings = $this->findings(['name' => 'passport_scan']);
 
         $this->assertCount(1, $findings);
         $this->assertSame('F-2', $findings[0]->getCode());

@@ -8,7 +8,10 @@ use Timbrs\DatabaseDumps\Contract\DatabaseConnectionInterface;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\Analysis\AnalysisPackageBuilder;
+use Timbrs\DatabaseDumps\Config\DumpConfig;
 use Timbrs\DatabaseDumps\Service\Analysis\CodeHintScanner;
+use Timbrs\DatabaseDumps\Service\Analysis\Decision\DecisionEngine;
+use Timbrs\DatabaseDumps\Service\Analysis\Dossier\DossierBuilder;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ColumnProfile;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ColumnStatisticsInspector;
 use Timbrs\DatabaseDumps\Service\ConfigGenerator\ServiceTableFilter;
@@ -20,7 +23,7 @@ class AnalysisPackageBuilderTest extends TestCase
     /** @var array<string, string> */
     private $written = [];
 
-    private function builder(LoggerInterface $logger = null): AnalysisPackageBuilder
+    private function builder(LoggerInterface $logger = null, bool $withDossier = false): AnalysisPackageBuilder
     {
         $connection = $this->createMock(DatabaseConnectionInterface::class);
         $connection->method('getPlatformName')->willReturn('postgresql');
@@ -76,7 +79,13 @@ class AnalysisPackageBuilderTest extends TestCase
             $stats,
             $logger ?? $this->createMock(LoggerInterface::class),
             '/proj',
-            $this->stubScanner()
+            $this->stubScanner(),
+            null,
+            null,
+            null,
+            $withDossier ? new DumpConfig([], ['public' => ['orders' => ['limit' => 10]]]) : null,
+            $withDossier ? new DossierBuilder() : null,
+            $withDossier ? new DecisionEngine() : null
         );
     }
 
@@ -237,6 +246,43 @@ class AnalysisPackageBuilderTest extends TestCase
         $path = '/proj/docker/database/analysis/output_schema.json';
         $this->assertArrayHasKey($path, $this->written);
         $this->assertStringNotContainsString('{data_dir}', $this->written[$path]);
+    }
+
+    /**
+     * Досье и решения по нему — рядом с пер-схемным инвентарём. Без DumpConfig и
+     * DossierBuilder (старая сборка контейнера) пакет остаётся прежним.
+     */
+    public function testBuildWritesDossierAndDecisionsPerSchema(): void
+    {
+        $this->written = [];
+        $this->builder(null, true)->build();
+
+        $dossierPath = '/proj/docker/database/analysis/dossier.public.json';
+        $decisionsPath = '/proj/docker/database/analysis/decisions.public.json';
+        $this->assertArrayHasKey($dossierPath, $this->written);
+        $this->assertArrayHasKey($decisionsPath, $this->written);
+
+        $decisions = json_decode($this->written[$decisionsPath], true);
+        $this->assertSame('public', $decisions['schema']);
+        $this->assertArrayHasKey('decisions', $decisions);
+        $this->assertArrayHasKey('total', $decisions['summary']);
+
+        // Контракт решений кладётся рядом — агент читает его, а не исходники тулзы.
+        $this->assertArrayHasKey('/proj/docker/database/analysis/decisions_schema.json', $this->written);
+
+        // Значения данных в решения не попадают.
+        $this->assertStringNotContainsString('СЕКРЕТНОЕ_ПД_ЗНАЧЕНИЕ', $this->written[$decisionsPath]);
+    }
+
+    public function testBuildWithoutDossierBuilderWritesNoDecisions(): void
+    {
+        $this->written = [];
+        $this->builder()->build();
+
+        $paths = implode("
+", array_keys($this->written));
+        $this->assertStringNotContainsString('dossier.public.json', $paths);
+        $this->assertStringNotContainsString('decisions.public.json', $paths);
     }
 
     public function testBuildWritesPerSchemaInventory(): void

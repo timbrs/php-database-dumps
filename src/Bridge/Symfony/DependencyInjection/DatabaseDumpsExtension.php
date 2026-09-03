@@ -33,6 +33,7 @@ class DatabaseDumpsExtension extends Extension
         $container->setParameter('database_dumps.max_cascade_depth', $processed['max_cascade_depth']);
         // Секция db целиком — её разбирает SafeQueryPolicy, здесь ключи не перечисляются.
         $container->setParameter('database_dumps.db', $processed['db']);
+        $container->setParameter('database_dumps.service_tables', $processed['service_tables']);
 
         $dataDir = $this->resolveDataDir($processed, $container);
         $container->setParameter('database_dumps.data_dir', $dataDir);
