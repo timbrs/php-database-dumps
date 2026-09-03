@@ -210,6 +210,8 @@ services:
 
     Timbrs\DatabaseDumps\Service\Verification\RowCountVerifier: ~
 
+    Timbrs\DatabaseDumps\Service\Verification\SampleReportVerifier: ~
+
     Timbrs\DatabaseDumps\Service\Verification\DumpVerificationRunner:
         arguments:
             $verifiers:
@@ -217,6 +219,7 @@ services:
                 - '@Timbrs\DatabaseDumps\Service\Verification\ValueCoverageVerifier'
                 - '@Timbrs\DatabaseDumps\Service\Verification\PiiLeakVerifier'
                 - '@Timbrs\DatabaseDumps\Service\Verification\RowCountVerifier'
+                - '@Timbrs\DatabaseDumps\Service\Verification\SampleReportVerifier'
 
     # Commands — ЛЕНИВАЯ регистрация: имя команды указано в теге, поэтому Symfony знает его
     # БЕЗ создания объекта команды (и без инстанцирования графа зависимостей, включая DumpConfig).

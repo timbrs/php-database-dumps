@@ -55,6 +55,7 @@ class DocsCommand extends Command
 
         $files = [
             'WORKFLOW.md' => self::workflow(),
+            'DOSSIER.md' => self::dossier(),
             'FINDINGS.md' => FindingCatalog::renderMarkdown(),
             'COMMANDS.md' => $this->renderCommands(),
         ];
@@ -90,7 +91,21 @@ class DocsCommand extends Command
      */
     public static function workflow(): string
     {
-        $path = __DIR__ . '/../../../Resources/docs/workflow.md';
+        return self::resource('workflow.md');
+    }
+
+    /**
+     * DOSSIER.md — что лежит в dossier.<schema>.json и что означают пометки ambiguous.
+     * Агент читает досье, и структуру ему объясняет этот файл, а не исходники правил.
+     */
+    public static function dossier(): string
+    {
+        return self::resource('dossier.md');
+    }
+
+    private static function resource(string $name): string
+    {
+        $path = __DIR__ . '/../../../Resources/docs/' . $name;
         $content = is_file($path) ? file_get_contents($path) : false;
 
         return $content === false ? '' : $content;

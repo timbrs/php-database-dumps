@@ -53,6 +53,7 @@ use Timbrs\DatabaseDumps\Service\Verification\DumpValueReader;
 use Timbrs\DatabaseDumps\Service\Verification\DumpVerificationRunner;
 use Timbrs\DatabaseDumps\Service\Verification\PiiLeakVerifier;
 use Timbrs\DatabaseDumps\Service\Verification\RowCountVerifier;
+use Timbrs\DatabaseDumps\Service\Verification\SampleReportVerifier;
 use Timbrs\DatabaseDumps\Service\Verification\ValueCoverageVerifier;
 use Timbrs\DatabaseDumps\Util\FileSystemHelper;
 use Timbrs\DatabaseDumps\Util\YamlConfigLoader;
@@ -413,6 +414,7 @@ class FullCycleTest extends TestCase
             new ValueCoverageVerifier(),
             new PiiLeakVerifier(),
             new RowCountVerifier(),
+            new SampleReportVerifier($this->fileSystem),
         ]);
     }
 

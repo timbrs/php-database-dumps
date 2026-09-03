@@ -74,6 +74,7 @@ class FindingCatalog
         'V-3' => ['stage' => 'dump', 'severity' => 'warning', 'title' => 'родитель связи не выгружен — сверять нечем', 'fixable' => false, 'decides' => 'agent'],
         'V-4' => ['stage' => 'dump', 'severity' => 'error', 'title' => 'колонки связи нет в дампе', 'fixable' => false, 'decides' => 'agent'],
         'V-5' => ['stage' => 'dump', 'severity' => 'warning', 'title' => 'покрытие значений: кодов/категорий в дампе меньше, чем в БД', 'fixable' => false, 'decides' => 'agent'],
+        'V-6' => ['stage' => 'dump', 'severity' => 'warning', 'title' => 'корзина выборки пуста, упала или усечена потолком limit (падение — ошибка)', 'fixable' => false, 'decides' => 'agent'],
         'V-7' => ['stage' => 'dump', 'severity' => 'error', 'title' => 'персональные данные в колонке без faker (по имени — предупреждение)', 'fixable' => false, 'decides' => 'agent'],
         'V-8' => ['stage' => 'dump', 'severity' => 'warning', 'title' => 'число строк расходится с limit, квотами или слепком (сверх limit — ошибка)', 'fixable' => false, 'decides' => 'agent'],
         'I-1' => ['stage' => 'import', 'severity' => 'error', 'title' => 'таблица пропущена при импорте: колонки дампа расходятся со схемой БД', 'fixable' => false, 'decides' => 'human'],
