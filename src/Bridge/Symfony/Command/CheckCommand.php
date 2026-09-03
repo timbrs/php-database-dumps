@@ -8,14 +8,21 @@ use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
 use Timbrs\DatabaseDumps\Bridge\Symfony\ConsoleLogger;
+use Timbrs\DatabaseDumps\Contract\ConfigLoaderInterface;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 use Timbrs\DatabaseDumps\Contract\LoggerInterface;
 use Timbrs\DatabaseDumps\Service\Ai\DbdumpConfigStore;
+use Timbrs\DatabaseDumps\Service\Analysis\Dossier\MigrationScanner;
 use Timbrs\DatabaseDumps\Service\Check\CheckReport;
 use Timbrs\DatabaseDumps\Service\Check\CheckRunner;
+use Timbrs\DatabaseDumps\Service\Incremental\Checkpoint;
+use Timbrs\DatabaseDumps\Service\Incremental\DirtySetBuilder;
+use Timbrs\DatabaseDumps\Service\Incremental\GitHistory;
+use Timbrs\DatabaseDumps\Service\Incremental\MigrationDiffParser;
 use Timbrs\DatabaseDumps\Service\Validation\Finding;
 use Timbrs\DatabaseDumps\Service\Validation\FindingCatalog;
 use Timbrs\DatabaseDumps\Service\Validation\InventoryReader;
+use Timbrs\DatabaseDumps\Util\YamlConfigLoader;
 
 /**
  * check: все проверки конфига и дампов одной командой.
@@ -45,13 +52,17 @@ class CheckCommand extends Command
     /** @var string */
     private $configPath;
 
+    /** @var ConfigLoaderInterface */
+    private $configLoader;
+
     public function __construct(
         CheckRunner $runner,
         FileSystemInterface $fileSystem,
         DbdumpConfigStore $configStore,
         LoggerInterface $logger,
         string $projectDir,
-        string $configPath
+        string $configPath,
+        ConfigLoaderInterface $configLoader = null
     ) {
         $this->runner = $runner;
         $this->fileSystem = $fileSystem;
@@ -59,6 +70,7 @@ class CheckCommand extends Command
         $this->logger = $logger;
         $this->projectDir = rtrim($projectDir, '/\\');
         $this->configPath = $configPath;
+        $this->configLoader = $configLoader !== null ? $configLoader : new YamlConfigLoader();
         parent::__construct();
     }
 
@@ -70,6 +82,8 @@ class CheckCommand extends Command
             ->addOption('stage', null, InputOption::VALUE_REQUIRED | InputOption::VALUE_IS_ARRAY, 'Стадии: ' . implode(', ', CheckRunner::STAGES) . ' (по умолчанию — все доступные, кроме plan)')
             ->addOption('schema', 's', InputOption::VALUE_REQUIRED | InputOption::VALUE_IS_ARRAY, 'Только эти схемы (можно повторять)')
             ->addOption('tables-from', null, InputOption::VALUE_REQUIRED, 'Файл со списком schema.table (по строке) или dirty.json со списком tables — проверять только их')
+            ->addOption('since-checkpoint', null, InputOption::VALUE_NONE, 'Только изменившееся с прошлой отметки (checkpoint.json); отметки нет — проверяется всё')
+            ->addOption('since-migration', null, InputOption::VALUE_REQUIRED, 'Только таблицы, затронутые миграциями новее этой версии')
             ->addOption('config', null, InputOption::VALUE_REQUIRED, 'Путь к dump_config.yaml')
             ->addOption('inventory', null, InputOption::VALUE_REQUIRED, 'Путь к schema_inventory.json')
             ->addOption('connection', 'c', InputOption::VALUE_REQUIRED, 'Подключение для стадий live/plan/dump')
@@ -91,6 +105,8 @@ class CheckCommand extends Command
   php bin/console app:dbdump:check --stage=static --fix             только конфиг, с автоправками
   php bin/console app:dbdump:check --stage=dump -s persons          выгруженные дампы схемы persons
   php bin/console app:dbdump:check --tables-from=docker/database/analysis/dirty.json
+  php bin/console app:dbdump:check --since-checkpoint               только изменившееся с прошлой отметки
+  php bin/console app:dbdump:check --since-migration=Version20250101120000
   php bin/console app:dbdump:check --format=json --out=docker/database/analysis/check.json
   php bin/console app:dbdump:check --stage=import --import-connection=scratch
 
@@ -135,6 +151,9 @@ HELP
 
         $tables = null;
         $tablesFrom = $input->getOption('tables-from');
+        $sinceCheckpoint = (bool) $input->getOption('since-checkpoint');
+        $sinceMigration = $input->getOption('since-migration');
+
         if ($tablesFrom !== null && $tablesFrom !== '') {
             $tables = $this->readTableList($this->absolutize((string) $tablesFrom));
             if ($tables === null) {
@@ -142,6 +161,21 @@ HELP
 
                 return Command::FAILURE;
             }
+        } elseif ($sinceCheckpoint || ($sinceMigration !== null && $sinceMigration !== '')) {
+            $tables = $this->incrementalTables(
+                $input,
+                $io,
+                $sinceMigration !== null && $sinceMigration !== '' ? (string) $sinceMigration : null
+            );
+            if ($tables === null) {
+                return Command::FAILURE;
+            }
+            if ($tables === []) {
+                $io->success('Делать нечего: с прошлой отметки ни одна таблица не изменилась.');
+
+                return Command::SUCCESS;
+            }
+            $io->writeln(sprintf('Инкремент: проверяем %d таблиц.', count($tables)), OutputInterface::OUTPUT_RAW);
         }
 
         $report = $this->runner->run([
@@ -303,6 +337,56 @@ HELP
         }
 
         return $tables;
+    }
+
+    /**
+     * Грязный набор без записи отметки: та же механика, что у `app:dbdump:checkpoint`,
+     * но результат никуда не сохраняется — `check` просто сужает себе список таблиц.
+     *
+     * `null` — ошибка (сообщение уже выведено), `[]` — проверять нечего.
+     *
+     * @return array<int, string>|null
+     */
+    private function incrementalTables(InputInterface $input, SymfonyStyle $io, ?string $sinceMigration): ?array
+    {
+        $configPath = $this->resolveConfigPath($input);
+        if (!$this->fileSystem->exists($configPath)) {
+            $io->error('Конфиг выгрузки не найден: ' . $configPath);
+
+            return null;
+        }
+
+        $analysisDir = $this->projectDir . '/' . $this->configStore->getDataDir($this->projectDir) . '/analysis';
+        $checkpoint = Checkpoint::load($this->fileSystem, $analysisDir . '/' . Checkpoint::FILE);
+
+        if ($sinceMigration !== null) {
+            $checkpoint = new Checkpoint([
+                'newest_migration' => $sinceMigration,
+                'tables' => $checkpoint !== null ? $checkpoint->tables() : [],
+            ]);
+        } elseif ($checkpoint === null) {
+            $io->warning('Отметки нет — проверяем всё. Зафиксировать состояние: app:dbdump:checkpoint --save');
+
+            return [];
+        }
+
+        $git = new GitHistory($this->projectDir);
+        $parser = new MigrationDiffParser(new MigrationScanner($this->projectDir));
+        $builder = new DirtySetBuilder($parser, $git->hasHistory() ? $git->diffSensor() : null);
+
+        $dirty = $builder->build(
+            $checkpoint,
+            $this->configLoader->load($configPath),
+            new InventoryReader($this->fileSystem, $this->resolveInventoryPath($input)),
+            (array) $input->getOption('schema')
+        );
+
+        // Отметки не было и режим не «с миграции» — грязное всё, а это обычный полный прогон.
+        if (!empty($dirty['full'])) {
+            return [];
+        }
+
+        return DirtySetBuilder::tableList($dirty);
     }
 
     private function resolveConfigPath(InputInterface $input): string

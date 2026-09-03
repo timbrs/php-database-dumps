@@ -32,6 +32,9 @@ class MigrationScanner
     /** @var array<string, array<string, mixed>>|null */
     private $cache;
 
+    /** @var array<int, array{version: string, path: string, description: string|null, jira: string|null, tables: array<string, array{ddl: array<int, string>, inserts: int}>}>|null */
+    private $parsedCache;
+
     /**
      * @param array<int, string> $directories относительные каталоги миграций
      */
@@ -51,19 +54,12 @@ class MigrationScanner
         }
 
         $result = [];
-        foreach ($this->files() as $file) {
-            $content = $this->read($file['path']);
-            if ($content === null) {
-                continue;
-            }
-            $version = $file['name'];
-            $description = $this->description($content);
-            $issue = null;
-            if ($description !== null && preg_match(self::ISSUE_REGEX, $description, $im) === 1) {
-                $issue = $im[1];
-            }
+        foreach ($this->parsed() as $migration) {
+            $version = $migration['version'];
+            $description = $migration['description'];
+            $issue = $migration['jira'];
 
-            foreach ($this->tablesOf($content) as $key => $facts) {
+            foreach ($migration['tables'] as $key => $facts) {
                 if (!isset($result[$key])) {
                     $result[$key] = [
                         'introduced_in' => $version,
@@ -100,6 +96,57 @@ class MigrationScanner
         $this->cache = $result;
 
         return $result;
+    }
+
+    /**
+     * Разбор по миграциям, в порядке версий: нужен инкременту — он спрашивает не «что
+     * известно о таблице», а «что изменилось после такой-то версии».
+     *
+     * @return array<int, array{version: string, path: string, description: string|null, jira: string|null, tables: array<string, array{ddl: array<int, string>, inserts: int}>}>
+     */
+    public function parsed(): array
+    {
+        if ($this->parsedCache !== null) {
+            return $this->parsedCache;
+        }
+
+        $parsed = [];
+        foreach ($this->files() as $file) {
+            $content = $this->read($file['path']);
+            if ($content === null) {
+                continue;
+            }
+            $description = $this->description($content);
+            $issue = null;
+            if ($description !== null && preg_match(self::ISSUE_REGEX, $description, $im) === 1) {
+                $issue = $im[1];
+            }
+            $parsed[] = [
+                'version' => $file['name'],
+                'path' => $file['path'],
+                'description' => $description,
+                'jira' => $issue,
+                'tables' => $this->tablesOf($content),
+            ];
+        }
+        usort($parsed, function (array $a, array $b): int {
+            return strcmp($a['version'], $b['version']);
+        });
+
+        $this->parsedCache = $parsed;
+
+        return $parsed;
+    }
+
+    /**
+     * Самая новая версия миграции. Версии Doctrine сортируются лексикографически
+     * (`VersionYYYYMMDDHHMMSS`), поэтому достаточно взять последнюю.
+     */
+    public function newestVersion(): ?string
+    {
+        $parsed = $this->parsed();
+
+        return $parsed === [] ? null : $parsed[count($parsed) - 1]['version'];
     }
 
     /**

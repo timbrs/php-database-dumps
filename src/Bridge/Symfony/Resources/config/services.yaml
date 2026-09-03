@@ -312,6 +312,14 @@ services:
         tags:
             - { name: 'console.command', command: 'app:dbdump:check' }
 
+    # Инкремент: отметка проверенного состояния и грязный набор.
+    Timbrs\DatabaseDumps\Bridge\Symfony\Command\CheckpointCommand:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+            $configPath: '%database_dumps.config_path%'
+        tags:
+            - { name: 'console.command', command: 'app:dbdump:checkpoint' }
+
     Timbrs\DatabaseDumps\Bridge\Symfony\Command\DocsCommand:
         arguments:
             $projectDir: '%kernel.project_dir%'
