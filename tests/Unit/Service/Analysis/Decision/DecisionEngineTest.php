@@ -174,6 +174,9 @@ class DecisionEngineTest extends TestCase
         self::assertSame(PatternDetector::PATTERN_PHONE, $decision['current']);
         self::assertSame(PatternDetector::PATTERN_INN, $decision['proposed']);
         self::assertTrue($decision['auto']);
+        // Без перезаписи апплаер отбил бы решение как «значение уже есть» — а «уже есть»
+        // тут и является поводом: правило чинит стоящий паттерн, другого случая у него нет.
+        self::assertTrue($decision['override']);
     }
 
     public function testIdIsStableAcrossRunsAndChangesWithProposal(): void

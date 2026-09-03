@@ -67,7 +67,8 @@ class Decision
         string $why,
         array $evidence = [],
         string $confidence = 'med',
-        bool $auto = false
+        bool $auto = false,
+        bool $override = false
     ) {
         if (!in_array($kind, self::KINDS, true)) {
             throw new \InvalidArgumentException('Неизвестный kind решения: ' . $kind);
@@ -85,6 +86,11 @@ class Decision
             'confidence' => $confidence,
             'auto' => $auto,
         ];
+        // Ключ появляется только когда правило и вправду чинит существующее значение: апплаер
+        // читает его как `empty(...)`, а лишнее поле в каждой записи меняло бы контракт вывода.
+        if ($override) {
+            $this->data['override'] = true;
+        }
     }
 
     /**

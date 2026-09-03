@@ -33,6 +33,48 @@ class DecisionApplierTest extends TestCase
     }
 
     /**
+     * Существующее значение побеждает — но не тогда, когда решение прямо просит его заменить.
+     * Это путь R11: `inn: phone` в дампе ломает и форму ИНН, и связи по нему.
+     */
+    public function testOverrideReplacesTheWrongFakerPattern(): void
+    {
+        $config = ['faker' => ['public' => ['orders' => ['inn' => 'phone']]]];
+        $decision = [
+            'table' => 'public.orders',
+            'column' => 'inn',
+            'kind' => Decision::KIND_FAKER,
+            'current' => 'phone',
+            'proposed' => 'inn',
+            'auto' => true,
+            'override' => true,
+        ];
+
+        $this->assertSame(DecisionApplier::STATUS_APPLIED, $this->apply($config, $decision));
+        $this->assertSame('inn', $config['faker']['public']['orders']['inn']);
+    }
+
+    /**
+     * Перезапись не отменяет проверку на устаревание: если с момента анализа паттерн правили
+     * руками, затирать его нельзя — правило видело не то, что лежит сейчас.
+     */
+    public function testOverrideStillRefusesStaleDecision(): void
+    {
+        $config = ['faker' => ['public' => ['orders' => ['inn' => 'digits']]]];
+        $decision = [
+            'table' => 'public.orders',
+            'column' => 'inn',
+            'kind' => Decision::KIND_FAKER,
+            'current' => 'phone',
+            'proposed' => 'inn',
+            'auto' => true,
+            'override' => true,
+        ];
+
+        $this->assertSame(DecisionApplier::STATUS_STALE, $this->apply($config, $decision));
+        $this->assertSame('digits', $config['faker']['public']['orders']['inn']);
+    }
+
+    /**
      * Всё, что меняет состав выборки, ждёт отметки: иначе тулза сама решала бы,
      * какие данные попадут в дамп.
      */
