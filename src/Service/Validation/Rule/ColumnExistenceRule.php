@@ -269,6 +269,60 @@ class ColumnExistenceRule implements RuleInterface
             }
         }
 
+        foreach (TableConfig::stratifySpecs($sample) as $spec) {
+            $then = $spec['then'];
+            if ($then !== null && !isset($known[strtolower($then['column'])])) {
+                $findings[] = Finding::error(
+                    'L-5',
+                    sprintf('stratify[].then ссылается на несуществующую колонку «%s» — выборка упадёт', $then['column']),
+                    $schema,
+                    $table,
+                    $then['column']
+                );
+            }
+        }
+
+        foreach (TableConfig::stratifyVia($sample) as $via) {
+            foreach ($via['join'] as $viaColumn => $localColumn) {
+                if (!isset($known[strtolower($localColumn)])) {
+                    $findings[] = Finding::error(
+                        'L-5',
+                        sprintf('stratify_via[%s].join ссылается на несуществующую колонку «%s» этой таблицы — выборка упадёт', $via['table'], $localColumn),
+                        $schema,
+                        $table,
+                        $localColumn
+                    );
+                }
+            }
+            $parts = explode('.', $via['table'], 2);
+            if (count($parts) !== 2) {
+                continue;
+            }
+            $viaColumns = $context->inventory()->columns($parts[0], $parts[1]);
+            if ($viaColumns === []) {
+                $findings[] = Finding::error(
+                    'L-5',
+                    sprintf('stratify_via ссылается на таблицу «%s», которой нет в слепке — выборка упадёт', $via['table']),
+                    $schema,
+                    $table
+                );
+                continue;
+            }
+            $viaKnown = $this->lowerSet($viaColumns);
+            $expected = array_merge([$via['column']], array_map('strval', array_keys($via['join'])));
+            foreach ($expected as $viaColumn) {
+                if (!isset($viaKnown[strtolower($viaColumn)])) {
+                    $findings[] = Finding::error(
+                        'L-5',
+                        sprintf('stratify_via ссылается на несуществующую колонку «%s» таблицы %s — выборка упадёт', $viaColumn, $via['table']),
+                        $schema,
+                        $table,
+                        $viaColumn
+                    );
+                }
+            }
+        }
+
         return $findings;
     }
 

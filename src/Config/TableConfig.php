@@ -25,9 +25,24 @@ class TableConfig
     public const SAMPLE_KEY_CRITERIA = 'criteria';
     public const SAMPLE_KEY_STRATIFY_BY = 'stratify_by';
     public const SAMPLE_KEY_PER_VALUE = 'per_value';
+    public const SAMPLE_KEY_STRATIFY = 'stratify';
+    public const SAMPLE_KEY_STRATIFY_VIA = 'stratify_via';
     public const CRITERION_KEY_NAME = 'name';
     public const CRITERION_KEY_WHERE = 'where';
     public const CRITERION_KEY_LIMIT = 'limit';
+
+    /** Ключи описания stratify[] (и вложенного then) и stratify_via[]. */
+    public const STRATIFY_KEY_COLUMN = 'column';
+    public const STRATIFY_KEY_PER_VALUE = 'per_value';
+    public const STRATIFY_KEY_THEN = 'then';
+    public const STRATIFY_KEY_MAX_VALUES = 'max_values';
+    public const VIA_KEY_TABLE = 'table';
+    public const VIA_KEY_JOIN = 'join';
+    public const VIA_KEY_WHERE = 'where';
+
+    /** Вложенный уровень: значений второго уровня на значение первого и квота на пару. */
+    public const DEFAULT_THEN_MAX_VALUES = 20;
+    public const DEFAULT_THEN_PER_VALUE = 10;
 
     /**
      * Дефолтная квота корзины stratify_by, если per_value не задан ни в таблице, ни в
@@ -200,18 +215,100 @@ class TableConfig
      */
     public static function stratifyColumns(?array $sample): array
     {
-        if ($sample === null || !isset($sample[self::SAMPLE_KEY_STRATIFY_BY])) {
+        if ($sample === null) {
             return [];
         }
-        $raw = $sample[self::SAMPLE_KEY_STRATIFY_BY];
         $columns = [];
-        foreach (is_array($raw) ? $raw : [$raw] as $column) {
-            if (is_string($column) && $column !== '') {
-                $columns[] = $column;
+        if (isset($sample[self::SAMPLE_KEY_STRATIFY_BY])) {
+            $raw = $sample[self::SAMPLE_KEY_STRATIFY_BY];
+            foreach (is_array($raw) ? $raw : [$raw] as $column) {
+                if (is_string($column) && $column !== '') {
+                    $columns[] = $column;
+                }
             }
+        }
+        foreach (self::stratifySpecs($sample) as $spec) {
+            $columns[] = $spec['column'];
         }
 
         return $columns;
+    }
+
+    /**
+     * Описания sample.stratify — вложенная стратификация: корзина на значение column,
+     * а внутри неё (then) — на значение второй колонки среди строк первой.
+     *
+     * @param array<string, mixed>|null $sample
+     * @return array<int, array{column: string, per_value: int|null, then: array{column: string, per_value: int|null, max_values: int}|null}>
+     */
+    public static function stratifySpecs(?array $sample): array
+    {
+        if ($sample === null || !isset($sample[self::SAMPLE_KEY_STRATIFY]) || !is_array($sample[self::SAMPLE_KEY_STRATIFY])) {
+            return [];
+        }
+        $specs = [];
+        foreach ($sample[self::SAMPLE_KEY_STRATIFY] as $spec) {
+            if (!is_array($spec) || !isset($spec[self::STRATIFY_KEY_COLUMN]) || !is_string($spec[self::STRATIFY_KEY_COLUMN])) {
+                continue;
+            }
+            $then = null;
+            if (isset($spec[self::STRATIFY_KEY_THEN]) && is_array($spec[self::STRATIFY_KEY_THEN])
+                && isset($spec[self::STRATIFY_KEY_THEN][self::STRATIFY_KEY_COLUMN])
+                && is_string($spec[self::STRATIFY_KEY_THEN][self::STRATIFY_KEY_COLUMN])
+            ) {
+                $rawThen = $spec[self::STRATIFY_KEY_THEN];
+                $then = [
+                    'column' => $rawThen[self::STRATIFY_KEY_COLUMN],
+                    'per_value' => isset($rawThen[self::STRATIFY_KEY_PER_VALUE]) ? (int) $rawThen[self::STRATIFY_KEY_PER_VALUE] : null,
+                    'max_values' => isset($rawThen[self::STRATIFY_KEY_MAX_VALUES]) ? (int) $rawThen[self::STRATIFY_KEY_MAX_VALUES] : self::DEFAULT_THEN_MAX_VALUES,
+                ];
+            }
+            $specs[] = [
+                'column' => $spec[self::STRATIFY_KEY_COLUMN],
+                'per_value' => isset($spec[self::STRATIFY_KEY_PER_VALUE]) ? (int) $spec[self::STRATIFY_KEY_PER_VALUE] : null,
+                'then' => $then,
+            ];
+        }
+
+        return $specs;
+    }
+
+    /**
+     * Описания sample.stratify_via — обратная стратификация: значения открываются на
+     * дочерней таблице (EAV-атрибуты), а корзины строятся у родителя через EXISTS.
+     *
+     * @param array<string, mixed>|null $sample
+     * @return array<int, array{table: string, join: array<string, string>, where: string|null, column: string, per_value: int|null}>
+     */
+    public static function stratifyVia(?array $sample): array
+    {
+        if ($sample === null || !isset($sample[self::SAMPLE_KEY_STRATIFY_VIA]) || !is_array($sample[self::SAMPLE_KEY_STRATIFY_VIA])) {
+            return [];
+        }
+        $result = [];
+        foreach ($sample[self::SAMPLE_KEY_STRATIFY_VIA] as $via) {
+            if (!is_array($via) || !isset($via[self::VIA_KEY_TABLE], $via[self::VIA_KEY_JOIN], $via[self::STRATIFY_KEY_COLUMN])
+                || !is_string($via[self::VIA_KEY_TABLE]) || !is_array($via[self::VIA_KEY_JOIN]) || !is_string($via[self::STRATIFY_KEY_COLUMN])
+            ) {
+                continue;
+            }
+            $join = [];
+            foreach ($via[self::VIA_KEY_JOIN] as $viaColumn => $localColumn) {
+                if (is_string($viaColumn) && is_string($localColumn)) {
+                    $join[$viaColumn] = $localColumn;
+                }
+            }
+            $result[] = [
+                'table' => $via[self::VIA_KEY_TABLE],
+                'join' => $join,
+                'where' => isset($via[self::VIA_KEY_WHERE]) && is_string($via[self::VIA_KEY_WHERE]) && $via[self::VIA_KEY_WHERE] !== ''
+                    ? $via[self::VIA_KEY_WHERE] : null,
+                'column' => $via[self::STRATIFY_KEY_COLUMN],
+                'per_value' => isset($via[self::STRATIFY_KEY_PER_VALUE]) ? (int) $via[self::STRATIFY_KEY_PER_VALUE] : null,
+            ];
+        }
+
+        return $result;
     }
 
     /**
@@ -412,6 +509,10 @@ class TableConfig
      *       - { name: <ident>, where: <clause>, limit: <int> }
      *     stratify_by: <ident> | [<ident>, …]   # необязательно; список — корзины по каждой колонке
      *     per_value:  <int>         # необязательно (квота для stratify_by)
+     *     stratify:                 # необязательно; вложенная стратификация (один уровень then)
+     *       - { column: <ident>, per_value: <int>, then: { column: <ident>, per_value: <int>, max_values: <int> } }
+     *     stratify_via:             # необязательно; значения открываются на дочерней таблице
+     *       - { table: <schema.table>, join: { <via_col>: <local_col> }, where: <clause>, column: <ident>, per_value: <int> }
      *
      * Каждый criteria[].where проходит ту же проверку, что и общий where
      * (запрет ';', SQL-комментариев, баланс кавычек/скобок) — корректные
@@ -424,12 +525,35 @@ class TableConfig
     {
         $hasCriteria = isset($sample[self::SAMPLE_KEY_CRITERIA]);
         $hasStratify = isset($sample[self::SAMPLE_KEY_STRATIFY_BY]);
+        $hasSpecs = isset($sample[self::SAMPLE_KEY_STRATIFY]);
+        $hasVia = isset($sample[self::SAMPLE_KEY_STRATIFY_VIA]);
 
-        if (!$hasCriteria && !$hasStratify) {
+        if (!$hasCriteria && !$hasStratify && !$hasSpecs && !$hasVia) {
             throw new \InvalidArgumentException(
                 'sample must define at least "' . self::SAMPLE_KEY_CRITERIA
-                . '" or "' . self::SAMPLE_KEY_STRATIFY_BY . '"'
+                . '", "' . self::SAMPLE_KEY_STRATIFY_BY . '", "' . self::SAMPLE_KEY_STRATIFY
+                . '" or "' . self::SAMPLE_KEY_STRATIFY_VIA . '"'
             );
+        }
+
+        if ($hasSpecs) {
+            $specs = $sample[self::SAMPLE_KEY_STRATIFY];
+            if (!is_array($specs) || $specs === []) {
+                throw new \InvalidArgumentException('sample.stratify must be a non-empty list');
+            }
+            foreach ($specs as $i => $spec) {
+                $this->validateStratifySpec("sample.stratify[{$i}]", $spec, true);
+            }
+        }
+
+        if ($hasVia) {
+            $vias = $sample[self::SAMPLE_KEY_STRATIFY_VIA];
+            if (!is_array($vias) || $vias === []) {
+                throw new \InvalidArgumentException('sample.stratify_via must be a non-empty list');
+            }
+            foreach ($vias as $i => $via) {
+                $this->validateStratifyVia("sample.stratify_via[{$i}]", $via);
+            }
         }
 
         if ($hasCriteria) {
@@ -467,6 +591,91 @@ class TableConfig
             if (!is_int($perValue) || $perValue < 1) {
                 throw new \InvalidArgumentException('sample.per_value must be an int >= 1');
             }
+        }
+    }
+
+    /**
+     * Описание stratify[]: column — идентификатор, per_value/max_values — int >= 1,
+     * then — ещё одно описание без собственного then (глубже одного уровня не поддерживается:
+     * число корзин растёт как произведение, и квота ужмётся в ноль).
+     *
+     * @param mixed $spec
+     * @throws \InvalidArgumentException
+     */
+    private function validateStratifySpec(string $path, $spec, bool $allowThen): void
+    {
+        if (!is_array($spec)) {
+            throw new \InvalidArgumentException("{$path} must be an object with \"column\"");
+        }
+        $column = $spec[self::STRATIFY_KEY_COLUMN] ?? null;
+        if (!is_string($column) || $column === '') {
+            throw new \InvalidArgumentException("{$path}.column must be a non-empty string");
+        }
+        $this->validateIdentifier("{$path}.column", $column);
+
+        foreach ([self::STRATIFY_KEY_PER_VALUE, self::STRATIFY_KEY_MAX_VALUES] as $key) {
+            if (isset($spec[$key]) && (!is_int($spec[$key]) || $spec[$key] < 1)) {
+                throw new \InvalidArgumentException("{$path}.{$key} must be an int >= 1");
+            }
+        }
+
+        if (isset($spec[self::STRATIFY_KEY_THEN])) {
+            if (!$allowThen) {
+                throw new \InvalidArgumentException("{$path}.then: only one nested level is supported");
+            }
+            $this->validateStratifySpec("{$path}.then", $spec[self::STRATIFY_KEY_THEN], false);
+        }
+    }
+
+    /**
+     * Описание stratify_via[]: table — «schema.table», join — непустая карта
+     * колонка_дочерней => колонка_этой_таблицы, where — необязательный фрагмент с теми же
+     * ограничениями, что и обычный where, column — идентификатор, per_value — int >= 1.
+     *
+     * @param mixed $via
+     * @throws \InvalidArgumentException
+     */
+    private function validateStratifyVia(string $path, $via): void
+    {
+        if (!is_array($via)) {
+            throw new \InvalidArgumentException("{$path} must be an object with \"table\", \"join\" and \"column\"");
+        }
+        $table = $via[self::VIA_KEY_TABLE] ?? null;
+        if (!is_string($table) || substr_count($table, '.') !== 1) {
+            throw new \InvalidArgumentException("{$path}.table must be \"schema.table\"");
+        }
+        [$viaSchema, $viaTable] = explode('.', $table, 2);
+        $this->validateIdentifier("{$path}.table (schema)", $viaSchema);
+        $this->validateIdentifier("{$path}.table (table)", $viaTable);
+
+        $join = $via[self::VIA_KEY_JOIN] ?? null;
+        if (!is_array($join) || $join === []) {
+            throw new \InvalidArgumentException("{$path}.join must be a non-empty map of <via column>: <local column>");
+        }
+        foreach ($join as $viaColumn => $localColumn) {
+            if (!is_string($viaColumn) || !is_string($localColumn) || $localColumn === '') {
+                throw new \InvalidArgumentException("{$path}.join entries must map column names to column names");
+            }
+            $this->validateIdentifier("{$path}.join key", $viaColumn);
+            $this->validateIdentifier("{$path}.join value", $localColumn);
+        }
+
+        if (isset($via[self::VIA_KEY_WHERE])) {
+            $where = $via[self::VIA_KEY_WHERE];
+            if (!is_string($where) || $where === '') {
+                throw new \InvalidArgumentException("{$path}.where must be a non-empty string");
+            }
+            $this->validateClause("{$path}.where", $where);
+        }
+
+        $column = $via[self::STRATIFY_KEY_COLUMN] ?? null;
+        if (!is_string($column) || $column === '') {
+            throw new \InvalidArgumentException("{$path}.column must be a non-empty string");
+        }
+        $this->validateIdentifier("{$path}.column", $column);
+
+        if (isset($via[self::STRATIFY_KEY_PER_VALUE]) && (!is_int($via[self::STRATIFY_KEY_PER_VALUE]) || $via[self::STRATIFY_KEY_PER_VALUE] < 1)) {
+            throw new \InvalidArgumentException("{$path}.per_value must be an int >= 1");
         }
     }
 

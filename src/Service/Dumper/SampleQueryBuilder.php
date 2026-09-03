@@ -287,55 +287,267 @@ class SampleQueryBuilder
             ? (int) $sample[TableConfig::SAMPLE_KEY_PER_VALUE]
             : ($defaultPerValue ?? TableConfig::DEFAULT_PER_VALUE);
 
-        foreach (TableConfig::stratifyColumns($sample) as $column) {
+        // stratify_by: корзина на значение колонки (одна колонка или список — независимо).
+        $stratifyBy = $sample[TableConfig::SAMPLE_KEY_STRATIFY_BY] ?? null;
+        $plainColumns = [];
+        foreach (is_array($stratifyBy) ? $stratifyBy : [$stratifyBy] as $column) {
+            if (is_string($column) && $column !== '') {
+                $plainColumns[] = $column;
+            }
+        }
+        foreach ($plainColumns as $column) {
             $found = $this->stratifyValues($config, $column, $platform, $connection, $fullTable, $baseWhere, $withCascade);
-            $values = [];
-            foreach ($found['values'] ?? [] as $value) {
-                if ($value !== null) {
-                    $values[] = $value;
+            $values = $this->nonNull($found['values'] ?? []);
+            $quota = $this->scaledQuota($fullTable, $column, $perValue, count($values), $cap);
+            $this->reportStratify($config, $column, $found, count($values), $quota, null);
+            foreach ($this->valueBuckets($platform, $connection, $column, $values, $quota, null, $column) as $bucket) {
+                $result[] = $bucket;
+            }
+        }
+
+        // stratify: то же, но с вложенным уровнем — «сто зелёных закрытых»: внутри корзины
+        // первого значения ещё по корзине на значение второй колонки.
+        foreach (TableConfig::stratifySpecs($sample) as $spec) {
+            $column = $spec['column'];
+            $specPerValue = $spec['per_value'] ?? $perValue;
+            $found = $this->stratifyValues($config, $column, $platform, $connection, $fullTable, $baseWhere, $withCascade);
+            $values = $this->nonNull($found['values'] ?? []);
+            $then = $spec['then'];
+
+            if ($then === null) {
+                $quota = $this->scaledQuota($fullTable, $column, $specPerValue, count($values), $cap);
+                $this->reportStratify($config, $column, $found, count($values), $quota, null);
+                foreach ($this->valueBuckets($platform, $connection, $column, $values, $quota, null, $column) as $bucket) {
+                    $result[] = $bucket;
                 }
+                continue;
             }
 
-            // Квота на корзину ужимается под limit заранее: покрытие важнее объёма.
-            $quota = $perValue;
-            if ($cap !== null && $cap > 0 && $values !== [] && $perValue * count($values) > $cap) {
-                $quota = max(self::MIN_PER_VALUE, intdiv($cap, count($values)));
+            $thenPerValue = $then['per_value'] ?? TableConfig::DEFAULT_THEN_PER_VALUE;
+            $quotedCol = $platform->quoteIdentifier($column);
+            $nested = [];
+            $pairs = 0;
+            foreach ($values as $i => $value) {
+                $outer = $quotedCol . ' = ' . $connection->quote($value);
+                $inner = $this->nestedValues($platform, $connection, $fullTable, $baseWhere, $outer, $then['column'], $then['max_values']);
+                if ($inner === []) {
+                    // Второго уровня нет — корзина первого уровня целиком, с его квотой.
+                    foreach ($this->valueBuckets($platform, $connection, $column, [$i => $value], $specPerValue, null, $column) as $bucket) {
+                        $nested[] = $bucket;
+                    }
+                    continue;
+                }
+                $prefix = $column . '#' . $i . '/' . $then['column'];
+                foreach ($this->valueBuckets($platform, $connection, $then['column'], $inner, $thenPerValue, $outer, $prefix) as $bucket) {
+                    $bucket['nested'] = true;
+                    $nested[] = $bucket;
+                    $pairs++;
+                }
+            }
+            // Под limit ужимается квота пар — их число и растёт как произведение.
+            $quota = $this->scaledQuota($fullTable, $column . '/' . $then['column'], $thenPerValue, $pairs, $cap);
+            foreach ($nested as $bucket) {
+                if (!empty($bucket['nested'])) {
+                    $bucket['limit'] = min((int) $bucket['limit'], $quota);
+                }
+                unset($bucket['nested']);
+                $result[] = $bucket;
+            }
+            $this->reportStratify($config, $column, $found, count($values), $specPerValue, [
+                'column' => $then['column'],
+                'max_values' => $then['max_values'],
+                'per_value' => $quota,
+                'buckets' => count($nested),
+            ]);
+        }
+
+        // stratify_via: значения открываются на дочерней таблице (EAV-атрибуты), корзины
+        // у родителя — через EXISTS. Так «цвет клиента» из clients_attrs попадает в выборку clients.
+        foreach (TableConfig::stratifyVia($sample) as $via) {
+            $parts = explode('.', $via['table'], 2);
+            if (count($parts) !== 2) {
+                continue;
+            }
+            $viaFull = $platform->getFullTableName($parts[0], $parts[1]);
+            $alias = '_via';
+            $quotedViaCol = $alias . '.' . $platform->quoteIdentifier($via['column']);
+
+            $joinConditions = [];
+            foreach ($via['join'] as $viaColumn => $localColumn) {
+                $joinConditions[] = $alias . '.' . $platform->quoteIdentifier($viaColumn)
+                    . ' = ' . $fullTable . '.' . $platform->quoteIdentifier($localColumn);
+            }
+            if ($joinConditions === []) {
+                continue;
+            }
+
+            $valuesSql = "SELECT DISTINCT {$quotedViaCol} FROM {$viaFull} {$alias}";
+            if ($via['where'] !== null) {
+                $valuesSql .= " WHERE ({$via['where']})";
+            }
+            $valuesSql .= " ORDER BY {$quotedViaCol} " . $platform->getLimitSql(self::MAX_STRATIFY_BUCKETS + 1);
+            $values = $this->nonNull($connection->fetchFirstColumn($valuesSql));
+            $truncated = count($values) > self::MAX_STRATIFY_BUCKETS;
+            if ($truncated) {
+                $values = array_slice($values, 0, self::MAX_STRATIFY_BUCKETS);
                 $this->warn(sprintf(
-                    'sample: %s — stratify_by %s: %d корзин × %d > limit %d, квота корзины ужата до %d',
+                    'sample: %s — у stratify_via %s.%s больше %d значений, корзины только по первым %d',
                     $fullTable,
-                    $column,
-                    count($values),
-                    $perValue,
-                    $cap,
-                    $quota
+                    $via['table'],
+                    $via['column'],
+                    self::MAX_STRATIFY_BUCKETS,
+                    self::MAX_STRATIFY_BUCKETS
                 ));
             }
 
-            if ($this->report !== null) {
-                $this->report->stratify($config->getSchema(), $config->getTable(), [
-                    'column' => $column,
-                    'source' => $found['source'],
-                    'values' => count($values),
-                    'truncated' => $found['truncated'],
-                    'per_value' => $quota,
-                    'reason' => $found['reason'] ?? null,
-                ]);
-            }
+            $viaPerValue = $via['per_value'] ?? $perValue;
+            $label = $via['table'] . '.' . $via['column'];
+            $quota = $this->scaledQuota($fullTable, $label, $viaPerValue, count($values), $cap);
+            $this->reportStratify($config, 'via:' . $label, [
+                'source' => self::STRATIFY_SOURCE_DISTINCT,
+                'truncated' => $truncated,
+            ], count($values), $quota, null);
 
-            $quotedCol = $platform->quoteIdentifier($column);
-            $showValue = !PatternDetector::hintsPii($column);
+            $showValue = !PatternDetector::hintsPii($via['column']);
             foreach ($values as $i => $value) {
+                $exists = 'EXISTS (SELECT 1 FROM ' . $viaFull . ' ' . $alias . ' WHERE ' . implode(' AND ', $joinConditions)
+                    . ($via['where'] !== null ? " AND ({$via['where']})" : '')
+                    . ' AND ' . $quotedViaCol . ' = ' . $connection->quote($value) . ')';
                 $bucket = [
-                    'name' => $column . '#' . $i,
-                    'where' => $quotedCol . ' = ' . $connection->quote($value),
+                    'name' => $label . '#' . $i,
+                    'where' => $exists,
                     'limit' => $quota,
-                    'kind' => 'stratify',
-                    'column' => $column,
+                    'kind' => 'stratify_via',
+                    'column' => $label,
                 ];
                 if ($showValue && is_scalar($value) && preg_match(self::CODE_VALUE_REGEX, (string) $value) === 1) {
                     $bucket['value'] = (string) $value;
                 }
                 $result[] = $bucket;
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Корзины «колонка = значение» (при необходимости внутри внешнего условия).
+     *
+     * @param array<int, mixed> $values
+     * @return array<int, array{name: string, where: string, limit: int, kind: string, column: string, value?: string}>
+     */
+    private function valueBuckets(
+        DatabasePlatformInterface $platform,
+        DatabaseConnectionInterface $connection,
+        string $column,
+        array $values,
+        int $quota,
+        ?string $outerWhere,
+        string $namePrefix
+    ): array {
+        $quotedCol = $platform->quoteIdentifier($column);
+        $showValue = !PatternDetector::hintsPii($column);
+        $buckets = [];
+        foreach ($values as $i => $value) {
+            $condition = $quotedCol . ' = ' . $connection->quote($value);
+            $bucket = [
+                'name' => $namePrefix . '#' . $i,
+                'where' => $outerWhere !== null ? '(' . $outerWhere . ') AND (' . $condition . ')' : $condition,
+                'limit' => $quota,
+                'kind' => 'stratify',
+                'column' => $column,
+            ];
+            if ($showValue && is_scalar($value) && preg_match(self::CODE_VALUE_REGEX, (string) $value) === 1) {
+                $bucket['value'] = (string) $value;
+            }
+            $buckets[] = $bucket;
+        }
+
+        return $buckets;
+    }
+
+    /**
+     * Значения второго уровня среди строк первого: фильтр `column = V` делает DISTINCT
+     * выборочным, потому статистика и защита от скана здесь не нужны.
+     *
+     * @return array<int, mixed>
+     */
+    private function nestedValues(
+        DatabasePlatformInterface $platform,
+        DatabaseConnectionInterface $connection,
+        string $fullTable,
+        ?string $baseWhere,
+        string $outerWhere,
+        string $column,
+        int $maxValues
+    ): array {
+        $quotedCol = $platform->quoteIdentifier($column);
+        $where = $baseWhere !== null ? "({$baseWhere}) AND ({$outerWhere})" : "({$outerWhere})";
+        $sql = "SELECT DISTINCT {$quotedCol} FROM {$fullTable} WHERE {$where} ORDER BY {$quotedCol} "
+            . $platform->getLimitSql($maxValues + 1);
+        $values = $this->nonNull($connection->fetchFirstColumn($sql));
+        if (count($values) > $maxValues) {
+            $values = array_slice($values, 0, $maxValues);
+        }
+
+        return $values;
+    }
+
+    /**
+     * Квота на корзину под limit: покрытие важнее объёма, но ниже MIN_PER_VALUE не ужимаем.
+     */
+    private function scaledQuota(string $fullTable, string $label, int $perValue, int $buckets, ?int $cap): int
+    {
+        if ($cap === null || $cap <= 0 || $buckets === 0 || $perValue * $buckets <= $cap) {
+            return $perValue;
+        }
+        $quota = max(self::MIN_PER_VALUE, intdiv($cap, $buckets));
+        $this->warn(sprintf(
+            'sample: %s — %s: %d корзин × %d > limit %d, квота корзины ужата до %d',
+            $fullTable,
+            $label,
+            $buckets,
+            $perValue,
+            $cap,
+            $quota
+        ));
+
+        return $quota;
+    }
+
+    /**
+     * @param array<string, mixed>      $found
+     * @param array<string, mixed>|null $then
+     */
+    private function reportStratify(TableConfig $config, string $column, array $found, int $values, int $quota, ?array $then): void
+    {
+        if ($this->report === null) {
+            return;
+        }
+        $entry = [
+            'column' => $column,
+            'source' => $found['source'] ?? self::STRATIFY_SOURCE_DISTINCT,
+            'values' => $values,
+            'truncated' => !empty($found['truncated']),
+            'per_value' => $quota,
+            'reason' => $found['reason'] ?? null,
+        ];
+        if ($then !== null) {
+            $entry['then'] = $then;
+        }
+        $this->report->stratify($config->getSchema(), $config->getTable(), $entry);
+    }
+
+    /**
+     * @param array<int, mixed> $values
+     * @return array<int, mixed>
+     */
+    private function nonNull(array $values): array
+    {
+        $result = [];
+        foreach ($values as $value) {
+            if ($value !== null) {
+                $result[] = $value;
             }
         }
 

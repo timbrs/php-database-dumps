@@ -221,6 +221,14 @@ class CriteriaRule implements RuleInterface
         foreach (TableConfig::stratifyColumns($sample) as $stratifyBy) {
             $buckets += $this->bucketCount($context, $schema, $table, $stratifyBy);
         }
+        // Вложенный уровень умножает корзины первого на max_values, обратная стратификация
+        // добавляет до потолка корзин на каждую запись — худший случай, как и для stratify_by.
+        foreach (TableConfig::stratifySpecs($sample) as $spec) {
+            if ($spec['then'] !== null) {
+                $buckets += $this->bucketCount($context, $schema, $table, $spec['column']) * ($spec['then']['max_values'] - 1);
+            }
+        }
+        $buckets += count(TableConfig::stratifyVia($sample)) * SampleQueryBuilder::MAX_STRATIFY_BUCKETS;
         $quota += $buckets * $perValue;
 
         if ($quota <= $limit) {

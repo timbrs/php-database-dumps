@@ -126,6 +126,52 @@
           "type": "integer",
           "minimum": 1,
           "description": "Квота строк на корзину stratify_by (по умолчанию 100 или settings.sample.per_value; при упоре в limit ужимается, но не ниже 5)"
+        },
+        "stratify": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Вложенная стратификация: корзина на значение column, внутри — then: корзина на значение второй колонки среди строк первой («сто зелёных закрытых»)",
+          "items": {
+            "type": "object",
+            "properties": {
+              "column": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_$]*$" },
+              "per_value": { "type": "integer", "minimum": 1 },
+              "then": {
+                "type": "object",
+                "properties": {
+                  "column": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_$]*$" },
+                  "per_value": { "type": "integer", "minimum": 1, "description": "Квота на пару значений (по умолчанию 10)" },
+                  "max_values": { "type": "integer", "minimum": 1, "description": "Сколько значений второго уровня брать на значение первого (по умолчанию 20)" }
+                },
+                "required": ["column"],
+                "additionalProperties": false
+              }
+            },
+            "required": ["column"],
+            "additionalProperties": false
+          }
+        },
+        "stratify_via": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Обратная стратификация: значения открываются на дочерней таблице (EAV-атрибуты), корзины у этой таблицы строятся через EXISTS",
+          "items": {
+            "type": "object",
+            "properties": {
+              "table": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_$]*\\.[A-Za-z_][A-Za-z0-9_$]*$", "description": "Дочерняя таблица «schema.table»" },
+              "join": {
+                "type": "object",
+                "minProperties": 1,
+                "description": "Связь: колонка дочерней таблицы => колонка этой таблицы",
+                "additionalProperties": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_$]*$" }
+              },
+              "where": { "type": "string", "description": "Фильтр строк дочерней таблицы (например, attr_id = 4 AND active_flg)" },
+              "column": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_$]*$", "description": "Колонка дочерней таблицы, чьи значения дают корзины" },
+              "per_value": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["table", "join", "column"],
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false

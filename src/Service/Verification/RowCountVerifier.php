@@ -146,7 +146,10 @@ class RowCountVerifier implements DumpVerifierInterface
             return $limit;
         }
         $sample = $config->getSample() ?? [];
-        if (isset($sample[TableConfig::SAMPLE_KEY_STRATIFY_BY])) {
+        if (isset($sample[TableConfig::SAMPLE_KEY_STRATIFY_BY])
+            || isset($sample[TableConfig::SAMPLE_KEY_STRATIFY])
+            || isset($sample[TableConfig::SAMPLE_KEY_STRATIFY_VIA])
+        ) {
             return null;
         }
         $sum = 0;

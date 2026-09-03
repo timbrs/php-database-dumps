@@ -168,6 +168,35 @@ class ColumnExistenceRuleTest extends ValidationTestCase
         $this->assertSame(1, $this->countCode($findings, 'L-5'));
     }
 
+    public function testNestedThenColumnIsChecked(): void
+    {
+        $ok = $this->findings(['limit' => 10, 'sample' => ['stratify' => [['column' => 'status', 'then' => ['column' => 'client_id']]]]]);
+        $this->assertSame(0, $this->countCode($ok, 'L-5'));
+
+        $bad = $this->findings(['limit' => 10, 'sample' => ['stratify' => [['column' => 'status', 'then' => ['column' => 'colour']]]]]);
+        $this->assertSame(1, $this->countCode($bad, 'L-5'));
+        $this->assertSame('colour', $this->firstWithCode($bad, 'L-5')->getColumn());
+    }
+
+    public function testStratifyViaChecksChildTableAndBothSidesOfTheJoin(): void
+    {
+        $via = ['table' => 'pub.orders_lines', 'join' => ['order_id' => 'id'], 'column' => 'qty'];
+
+        $ok = $this->findings(['limit' => 10, 'sample' => ['stratify_via' => [$via]]]);
+        $this->assertSame(0, $this->countCode($ok, 'L-5'));
+
+        $badColumn = $this->findings(['limit' => 10, 'sample' => ['stratify_via' => [array_merge($via, ['column' => 'colour'])]]]);
+        $this->assertSame(1, $this->countCode($badColumn, 'L-5'));
+
+        $badTable = $this->findings(['limit' => 10, 'sample' => ['stratify_via' => [array_merge($via, ['table' => 'pub.nope'])]]]);
+        $this->assertSame(1, $this->countCode($badTable, 'L-5'));
+        $this->assertStringContainsString('нет в слепке', $this->firstWithCode($badTable, 'L-5')->getMessage());
+
+        $badJoin = $this->findings(['limit' => 10, 'sample' => ['stratify_via' => [array_merge($via, ['join' => ['nope_id' => 'nope']])]]]);
+        // Обе стороны связи: колонки нет ни у orders (nope), ни у orders_lines (nope_id).
+        $this->assertSame(2, $this->countCode($badJoin, 'L-5'));
+    }
+
     public function testFakerOnMissingColumnIsFixableWarning(): void
     {
         $findings = $this->findings(['limit' => 10], ['orders' => ['create_date_chd' => 'phone']]);

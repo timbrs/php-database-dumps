@@ -640,6 +640,77 @@ class SampleQueryBuilderTest extends TestCase
         $this->assertArrayNotHasKey('value', $buckets[1]);
     }
 
+    public function testNestedStratifyMakesBucketsPerPairOfValues(): void
+    {
+        $this->pkInspector->method('getPrimaryKeyColumns')->willReturn(['id']);
+        $this->connection->method('fetchFirstColumn')->willReturnCallback(function ($sql) {
+            $this->capturedSql[] = $sql;
+            if (strpos($sql, 'DISTINCT "attr_id"') !== false) {
+                return [4, 5];
+            }
+            if (strpos($sql, 'DISTINCT "value_int"') !== false) {
+                // У attr_id = 4 два значения, у attr_id = 5 — ни одного.
+                return strpos($sql, "'4'") !== false ? [1, 2] : [];
+            }
+            return [100];
+        });
+
+        $sample = ['stratify' => [['column' => 'attr_id', 'per_value' => 30, 'then' => ['column' => 'value_int', 'per_value' => 7, 'max_values' => 5]]]];
+        $config = new TableConfig('clients', 'clients_attrs', null, 'active_flg', null, null, null, null, $sample);
+        $report = new SampleReportCollector();
+        $builder = new SampleQueryBuilder($this->registry, $this->pkInspector, $this->selectedPk, null, null, null, null, $report);
+
+        $builder->build($config);
+
+        $this->assertStringContainsString('SELECT DISTINCT "value_int" FROM "clients"."clients_attrs" WHERE (active_flg) AND ("attr_id" = \'4\') ORDER BY "value_int" LIMIT 6', $this->capturedSql[1]);
+        $buckets = array_values(array_filter($this->capturedSql, function ($s) {
+            return strpos($s, 'DISTINCT') === false;
+        }));
+        $this->assertCount(3, $buckets);
+        $this->assertStringContainsString('WHERE (active_flg) AND (("attr_id" = \'4\') AND ("value_int" = \'1\')) LIMIT 7', $buckets[0]);
+        $this->assertStringContainsString('(("attr_id" = \'4\') AND ("value_int" = \'2\')) LIMIT 7', $buckets[1]);
+        // Без второго уровня — корзина первого уровня с его квотой.
+        $this->assertStringContainsString('WHERE (active_flg) AND ("attr_id" = \'5\') LIMIT 30', $buckets[2]);
+
+        $names = array_map(function (array $b) {
+            return $b['name'];
+        }, $report->toArray()['tables']['clients.clients_attrs']['buckets']);
+        $this->assertSame(['attr_id#0/value_int#0', 'attr_id#0/value_int#1', 'attr_id#1'], $names);
+        $this->assertSame('value_int', $report->toArray()['tables']['clients.clients_attrs']['stratify'][0]['then']['column']);
+    }
+
+    public function testStratifyViaOpensValuesOnTheChildTableAndBucketsThroughExists(): void
+    {
+        $this->pkInspector->method('getPrimaryKeyColumns')->willReturn(['id']);
+        $this->connection->method('fetchFirstColumn')->willReturnCallback(function ($sql) {
+            $this->capturedSql[] = $sql;
+            if (strpos($sql, 'DISTINCT') !== false) {
+                return ['red', 'green'];
+            }
+            return [1];
+        });
+
+        $sample = ['stratify_via' => [[
+            'table' => 'clients.clients_attrs',
+            'join' => ['core_id' => 'core_id'],
+            'where' => 'attr_id = 4 AND active_flg',
+            'column' => 'value_string',
+            'per_value' => 100,
+        ]]];
+        $config = new TableConfig('clients', 'clients', null, null, null, null, null, null, $sample);
+
+        $this->builder()->build($config);
+
+        $this->assertSame(
+            'SELECT DISTINCT _via."value_string" FROM "clients"."clients_attrs" _via WHERE (attr_id = 4 AND active_flg) ORDER BY _via."value_string" LIMIT 51',
+            $this->capturedSql[0]
+        );
+        $expected = 'WHERE (EXISTS (SELECT 1 FROM "clients"."clients_attrs" _via WHERE _via."core_id" = "clients"."clients"."core_id"'
+            . ' AND (attr_id = 4 AND active_flg) AND _via."value_string" = \'red\')) LIMIT 100';
+        $this->assertStringContainsString($expected, $this->capturedSql[1]);
+        $this->assertStringContainsString("_via.\"value_string\" = 'green'", $this->capturedSql[2]);
+    }
+
     public function testLongInListIsChunked(): void
     {
         $this->pkInspector->method('getPrimaryKeyColumns')->willReturn(['id']);

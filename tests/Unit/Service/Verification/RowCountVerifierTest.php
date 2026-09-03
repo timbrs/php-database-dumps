@@ -75,6 +75,17 @@ class RowCountVerifierTest extends TestCase
         self::assertSame([], $this->verify([$config], null));
     }
 
+    public function testStratificationHasNoCeiling(): void
+    {
+        $this->dump('dict', 3);
+        $config = TableConfig::fromArray('public', 'dict', [
+            'limit' => 2,
+            'sample' => ['stratify_via' => [['table' => 'public.dict_attrs', 'join' => ['dict_id' => 'id'], 'column' => 'v']]],
+        ]);
+
+        self::assertSame([], $this->verify([$config], null));
+    }
+
     public function testEmptyDumpOfNonEmptyTableIsAWarning(): void
     {
         $this->dump('dict', 0);
