@@ -1,7 +1,7 @@
 # Database Dumps Package
 
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen)]()
-[![PHP Version](https://img.shields.io/badge/php-%5E7.2%20%7C%20%5E8.0-blue)]()
+[![PHP Version](https://img.shields.io/badge/php-%5E7.1%20%7C%20%5E8.0-blue)]()
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)]()
 
 **[Русский](#русский)** | **[English](#english)**
@@ -1506,9 +1506,23 @@ DBDUMP_TEST_DSN='pgsql:host=127.0.0.1;port=5432;dbname=app' DBDUMP_TEST_USER=app
 
 **Обязательные:**
 
-- PHP ^7.2 | ^8.0
+- PHP ^7.1 | ^8.0
 - `symfony/yaml` ^4.4 | ^5.4 | ^6.0 | ^7.0
 - `symfony/finder` ^4.4 | ^5.4 | ^6.0 | ^7.0
+
+Нижняя планка — **7.1**: пакет ставится в том числе в проекты, которые с неё не сдвинулись. На
+практике нужен 7.1.**3** — столько требует Symfony 4.4, самая старая поддерживаемая ветка
+`symfony/yaml` и `symfony/finder`.
+
+Совместимость проверяется не на глаз, а сниффами:
+
+```
+composer compat
+```
+
+(`PHPCompatibility` по `src/` с `testVersion 7.1-`). Это единственный способ поймать, например,
+`array_key_first()` или флаг `JSON_INVALID_UTF8_SUBSTITUTE` — оба появились после 7.1 и оба уже
+пробирались в код. Тесты и статический анализ такого не видят: они гоняются на современном PHP.
 
 **Опциональные (зависят от фреймворка):**
 

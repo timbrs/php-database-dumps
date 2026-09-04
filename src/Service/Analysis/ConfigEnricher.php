@@ -2,6 +2,7 @@
 
 namespace Timbrs\DatabaseDumps\Service\Analysis;
 
+use Timbrs\DatabaseDumps\Util\JsonReport;
 use Symfony\Component\Yaml\Yaml;
 use Timbrs\DatabaseDumps\Config\DumpConfig;
 use Timbrs\DatabaseDumps\Config\TableConfig;
@@ -231,10 +232,7 @@ class ConfigEnricher
             'decisions' => $results,
         ];
 
-        $flags = JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
-            | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR;
-        $json = json_encode($report, $flags);
-        $this->fileSystem->write($analysisDir . '/' . self::APPLY_REPORT_FILE, $json === false ? '{}' : $json);
+        $this->fileSystem->write($analysisDir . '/' . self::APPLY_REPORT_FILE, JsonReport::encode($report));
     }
 
     /**
@@ -618,10 +616,7 @@ class ConfigEnricher
             'cascade_from' => $ingested['cascade_from'] ?? [],
             'sample_criteria' => $ingested['sample_criteria'] ?? [],
         ];
-        $flags = JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
-            | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR;
-        $json = json_encode($result, $flags);
-        $this->fileSystem->write($jsonPath, $json === false ? '{}' : $json);
+        $this->fileSystem->write($jsonPath, JsonReport::encode($result));
     }
 
     /**

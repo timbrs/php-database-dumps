@@ -2,6 +2,7 @@
 
 namespace Timbrs\DatabaseDumps\Service\Analysis;
 
+use Timbrs\DatabaseDumps\Util\JsonReport;
 use Timbrs\DatabaseDumps\Contract\FileSystemInterface;
 
 /**
@@ -68,12 +69,7 @@ class AnalysisReportWriter
             $result['code_analysis'] = $existingJson['code_analysis'];
         }
 
-        // JSON_INVALID_UTF8_SUBSTITUTE: бинарные/битые значения в top_values
-        // не должны обнулять весь отчёт (иначе json_encode вернул бы false).
-        $flags = JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
-            | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR;
-        $json = json_encode($result, $flags);
-        $this->fileSystem->write($jsonPath, $json === false ? '{}' : $json);
+        $this->fileSystem->write($jsonPath, JsonReport::encode($result));
 
         return ['report' => $reportPath, 'json' => $jsonPath];
     }

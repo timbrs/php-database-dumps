@@ -346,8 +346,9 @@ class RussianFaker implements FakerInterface
         // Уникальный seed для email/phone: добавляем PK (первое поле строки)
         $uniqueSeedParts = $nameSeedParts;
         if (!empty($row)) {
-            $firstKey = array_key_first($row);
-            $uniqueSeedParts[] = (string) ($row[$firstKey] ?? '');
+            // Не array_key_first(): она с PHP 7.3, а пакет держит 7.1.
+            $keys = array_keys($row);
+            $uniqueSeedParts[] = (string) ($row[$keys[0]] ?? '');
         }
         $uniqueState = crc32(implode("\0", $uniqueSeedParts));
 
